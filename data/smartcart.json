@@ -1,0 +1,36 @@
+{
+  "users": [
+    {
+      "id": "usr_sys_super",
+      "email": "hirammarkkaranja@gmail.com",
+      "name": "Hiram Mark Karanja",
+      "role": "SYSTEM_ADMIN",
+      "phone": "+254 700 000 000",
+      "password": "#Mark3407",
+      "created_at": "2026-10-24T10:30:00.000Z"
+    }
+  ],
+  "supermarkets": [],
+  "categories": [
+    { "id": "cat_1", "name": "Bakery" },
+    { "id": "cat_2", "name": "Dairy" },
+    { "id": "cat_3", "name": "Food & Groceries" },
+    { "id": "cat_4", "name": "Beverages" },
+    { "id": "cat_5", "name": "Personal Care" },
+    { "id": "cat_6", "name": "Cleaning Products" },
+    { "id": "cat_7", "name": "Fresh Produce" },
+    { "id": "cat_8", "name": "Household & Electronics" }
+  ],
+  "products": [],
+  "shopping_sessions": [],
+  "activity_logs": [
+    {
+      "id": "log_sys_init",
+      "action": "SYSTEM_INIT",
+      "user_name": "Hiram Mark Karanja",
+      "details": "Clean database initialized. SuperAdmin registered. Zero stores and zero demo customers.",
+      "timestamp": "2026-10-24T10:30:00.000Z"
+    }
+  ],
+  "store_staff": []
+}
