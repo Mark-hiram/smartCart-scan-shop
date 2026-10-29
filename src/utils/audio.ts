@@ -1,9 +1,20 @@
 // Web Audio API POS scanner beep & haptic feedback simulator
+let sharedAudioCtx: AudioContext | null = null;
+
 export function playScanBeep(success: boolean = true) {
   try {
     const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
     if (!AudioContextClass) return;
-    const ctx = new AudioContextClass();
+
+    if (!sharedAudioCtx || sharedAudioCtx.state === 'closed') {
+      sharedAudioCtx = new AudioContextClass();
+    }
+
+    if (sharedAudioCtx.state === 'suspended') {
+      sharedAudioCtx.resume().catch(() => {});
+    }
+
+    const ctx = sharedAudioCtx;
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
 
@@ -20,8 +31,12 @@ export function playScanBeep(success: boolean = true) {
       osc.stop(ctx.currentTime + 0.12);
 
       // Trigger mobile vibration if supported
-      if (navigator.vibrate) {
-        navigator.vibrate(50);
+      if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
+        try {
+          navigator.vibrate(50);
+        } catch {
+          // Ignore vibration permission issues
+        }
       }
     } else {
       // Warning double buzz
@@ -32,11 +47,15 @@ export function playScanBeep(success: boolean = true) {
       osc.start(ctx.currentTime);
       osc.stop(ctx.currentTime + 0.25);
 
-      if (navigator.vibrate) {
-        navigator.vibrate([80, 50, 80]);
+      if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
+        try {
+          navigator.vibrate([80, 50, 80]);
+        } catch {
+          // Ignore vibration permission issues
+        }
       }
     }
-  } catch (e) {
-    // Audio autoplay restrictions gracefully handled
+  } catch {
+    // Audio autoplay restrictions or headless environments gracefully handled
   }
 }

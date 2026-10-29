@@ -13,6 +13,7 @@ import {
   ArrowRight,
 } from 'lucide-react';
 import { Supermarket, User } from '../types.ts';
+import { PWAInstallButton } from './PWAInstallButton.tsx';
 
 interface NavbarProps {
   currentUser: User;
@@ -172,8 +173,11 @@ export const Navbar: React.FC<NavbarProps> = ({
           </nav>
         )}
 
-        {/* Right side controls: Cart Trigger & Account Switcher */}
+        {/* Right side controls: PWA Install, Cart Trigger & Account Switcher */}
         <div className="flex items-center gap-2">
+          {/* PWA Mobile App Install Trigger */}
+          <PWAInstallButton variant="navbar" />
+
           {/* Quick Cart summary button */}
           <button
             onClick={onOpenCart}
@@ -331,17 +335,15 @@ export const Navbar: React.FC<NavbarProps> = ({
             )}
           </div>
 
-          {/* Direct Log Out Button for Admin sessions */}
-          {(currentUser.role === 'SYSTEM_ADMIN' || currentUser.role === 'SUPERMARKET_ADMIN') && (
-            <button
-              onClick={onSignOut}
-              className="flex items-center gap-1.5 bg-rose-600 hover:bg-rose-500 text-white px-2.5 py-1.5 rounded-xl border border-rose-500 text-xs font-bold transition shadow-sm active:scale-95"
-              title="Log Out from Admin session"
-            >
-              <LogOut className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Log Out</span>
-            </button>
-          )}
+          {/* Direct Log Out Button for Everyone */}
+          <button
+            onClick={onSignOut}
+            className="flex items-center gap-1.5 bg-rose-600 hover:bg-rose-500 text-white px-2.5 py-1.5 rounded-xl border border-rose-500 text-xs font-bold transition shadow-sm active:scale-95"
+            title="Log Out / Exit session"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Log Out</span>
+          </button>
         </div>
       </div>
     </header>

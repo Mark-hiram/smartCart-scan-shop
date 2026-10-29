@@ -14,7 +14,8 @@ import { SystemAdminPortal } from './components/SystemAdminPortal.tsx';
 import { StoreAdminSignIn } from './components/StoreAdminSignIn.tsx';
 import { SystemAdminSignIn } from './components/SystemAdminSignIn.tsx';
 import { CustomerAccountModal } from './components/CustomerAccountModal.tsx';
-import { Store, Shield, Lock } from 'lucide-react';
+import { OfflineIndicator } from './components/OfflineIndicator.tsx';
+import { Store, Shield, Lock, Sparkles } from 'lucide-react';
 import { api } from './api.ts';
 import { Supermarket, User, ShoppingSession, CustomerLoyalty } from './types.ts';
 import { playScanBeep } from './utils/audio.ts';
@@ -133,6 +134,29 @@ export default function App() {
     initSession(currentUser.id, sm.id, currentUser.name);
   };
 
+  const handleQuickSeedStore = async () => {
+    try {
+      const res = await api.createSupermarket({
+        name: 'Quickmart Lavington',
+        supermarket_code: 'QM-LAV-01',
+        branch: 'Lavington Branch',
+        location: 'James Gichuru Rd, Nairobi',
+        phone: '+254 711 223344',
+        email: 'lavington@quickmart.co.ke',
+        currency: 'KSh',
+        low_stock_threshold: 15,
+        admin_password: 'admin123',
+        admin_name: 'Store Manager',
+        seedProducts: true,
+      });
+      if (res.success) {
+        await loadSupermarkets();
+      }
+    } catch (e) {
+      console.error('Failed to quick start supermarket:', e);
+    }
+  };
+
   const handleSwitchUser = (user: User) => {
     setCurrentUser(user);
     if (user.role === 'SUPERMARKET_ADMIN') {
@@ -231,7 +255,12 @@ export default function App() {
     localStorage.removeItem('smartcart_active_user');
     setCurrentUser(GUEST_CUSTOMER);
     setCurrentView('customer');
-    setSession(null);
+    if (currentSupermarket) {
+      initSession(GUEST_CUSTOMER.id, currentSupermarket.id, GUEST_CUSTOMER.name);
+    } else {
+      setSession(null);
+    }
+    loadCustomerLoyalty(GUEST_CUSTOMER.id);
   };
 
   // Dynamic store background color & gradient styling
@@ -293,6 +322,7 @@ export default function App() {
               onQuickScanBarcode={handleQuickScanBarcode}
               onUpdateCartItemQty={handleUpdateCartItem}
               onRemoveCartItem={handleRemoveCartItem}
+              onSignOut={handleSignOut}
             />
           ) : (
             <div className="max-w-xl mx-auto px-4 py-16 text-center space-y-6">
@@ -312,17 +342,25 @@ export default function App() {
               </div>
               <div className="flex flex-col sm:flex-row items-center justify-center gap-3 pt-2">
                 <button
+                  onClick={handleQuickSeedStore}
+                  className="w-full sm:w-auto px-6 py-3 rounded-2xl bg-amber-400 hover:bg-amber-300 text-emerald-950 font-black text-sm shadow-md transition flex items-center justify-center gap-2 active:scale-95 cursor-pointer"
+                  title="Initialize a ready-to-test supermarket with sample items"
+                >
+                  <Sparkles className="w-4 h-4 text-emerald-950" />
+                  <span>Quick Start: Launch Demo Supermarket</span>
+                </button>
+                <button
                   onClick={() => setCurrentView('system')}
-                  className="w-full sm:w-auto px-6 py-3 rounded-2xl bg-emerald-900 hover:bg-emerald-800 text-white font-extrabold text-sm shadow-lg shadow-emerald-950/20 transition flex items-center justify-center gap-2"
+                  className="w-full sm:w-auto px-6 py-3 rounded-2xl bg-emerald-900 hover:bg-emerald-800 text-white font-extrabold text-sm shadow-lg shadow-emerald-950/20 transition flex items-center justify-center gap-2 cursor-pointer"
                 >
                   <Shield className="w-4 h-4 text-amber-400" />
-                  <span>Open System Admin (Add Store / Customer)</span>
+                  <span>Open System Admin</span>
                 </button>
                 <button
                   onClick={() => setIsAccountOpen(true)}
-                  className="w-full sm:w-auto px-6 py-3 rounded-2xl bg-white hover:bg-slate-50 border border-slate-300 text-slate-800 font-bold text-sm shadow-sm transition"
+                  className="w-full sm:w-auto px-6 py-3 rounded-2xl bg-white hover:bg-slate-50 border border-slate-300 text-slate-800 font-bold text-sm shadow-sm transition cursor-pointer"
                 >
-                  Customer Account / Sign Up
+                  Customer Account
                 </button>
               </div>
             </div>
@@ -488,6 +526,7 @@ export default function App() {
         currentSupermarket={currentSupermarket}
         loyalty={loyalty}
         onRefreshLoyalty={loadCustomerLoyalty}
+        onSignOut={handleSignOut}
       />
 
       {/* Discreet Private Staff & Admin Access Footer */}
@@ -516,6 +555,9 @@ export default function App() {
           </div>
         </div>
       </footer>
+
+      {/* PWA Offline Connectivity Indicator */}
+      <OfflineIndicator />
     </div>
   );
 }

@@ -172,11 +172,14 @@ app.get('/api/products/barcode', (req: Request, res: Response) => {
         id: product.id,
         barcode: product.barcode,
         name: product.product_name,
+        product_name: product.product_name,
         brand: product.brand,
         unit: product.unit,
         price: product.selling_price,
+        selling_price: product.selling_price,
         discount_price: product.discount_price,
         stock: product.stock_quantity,
+        stock_quantity: product.stock_quantity,
         category: product.category,
         description: product.description,
         status: product.status,
@@ -779,7 +782,7 @@ app.get('/api/activity-logs', (req: Request, res: Response) => {
 async function startServer() {
   if (!isProduction) {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: { middlewareMode: true, hmr: false },
       appType: 'spa',
     });
     app.use(vite.middlewares);

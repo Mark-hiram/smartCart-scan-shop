@@ -24,6 +24,7 @@ import {
   CreditCard,
   Hash,
   AlertCircle,
+  LogOut,
 } from 'lucide-react';
 import { User, Supermarket, CustomerLoyalty } from '../types.ts';
 import { api } from '../api.ts';
@@ -36,6 +37,7 @@ interface CustomerAccountModalProps {
   currentSupermarket: Supermarket | null;
   loyalty: CustomerLoyalty | null;
   onRefreshLoyalty: (customerId: string) => void;
+  onSignOut?: () => void;
 }
 
 export const CustomerAccountModal: React.FC<CustomerAccountModalProps> = ({
@@ -46,6 +48,7 @@ export const CustomerAccountModal: React.FC<CustomerAccountModalProps> = ({
   currentSupermarket,
   loyalty,
   onRefreshLoyalty,
+  onSignOut,
 }) => {
   const [mode, setMode] = useState<'profile' | 'signin' | 'register' | 'forgot'>('profile');
   const [emailInput, setEmailInput] = useState('');
@@ -229,12 +232,28 @@ export const CustomerAccountModal: React.FC<CustomerAccountModalProps> = ({
       <div className="bg-white w-full max-w-lg rounded-3xl shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[92vh]">
         {/* Header */}
         <div className="bg-gradient-to-r from-emerald-950 via-emerald-900 to-emerald-950 text-white p-5 sm:p-6 relative shrink-0">
-          <button
-            onClick={onClose}
-            className="absolute top-4 right-4 p-2 rounded-xl bg-white/10 hover:bg-white/20 text-white transition"
-          >
-            <X className="w-4 h-4" />
-          </button>
+          <div className="absolute top-4 right-4 flex items-center gap-2">
+            {onSignOut && (
+              <button
+                type="button"
+                onClick={() => {
+                  onClose();
+                  onSignOut();
+                }}
+                className="px-2.5 py-1.5 rounded-xl bg-rose-600/90 hover:bg-rose-600 text-white text-xs font-bold transition flex items-center gap-1 shadow-sm active:scale-95 border border-rose-400"
+                title="Log Out of this customer account"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+                <span>Log Out</span>
+              </button>
+            )}
+            <button
+              onClick={onClose}
+              className="p-2 rounded-xl bg-white/10 hover:bg-white/20 text-white transition"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
 
           <div className="flex items-center gap-3">
             <div className="w-12 h-12 rounded-2xl bg-amber-400 text-emerald-950 flex items-center justify-center font-black shadow-lg">
@@ -366,9 +385,25 @@ export const CustomerAccountModal: React.FC<CustomerAccountModalProps> = ({
                     </div>
                   </div>
 
-                  <span className="text-[10px] font-mono text-slate-500 bg-white px-2 py-1 rounded-lg border border-slate-200 shrink-0">
-                    ID: {currentUser.id_number || currentUser.id.slice(0, 10)}
-                  </span>
+                  <div className="flex flex-col items-end gap-1.5 shrink-0">
+                    <span className="text-[10px] font-mono text-slate-500 bg-white px-2 py-1 rounded-lg border border-slate-200">
+                      ID: {currentUser.id_number || currentUser.id.slice(0, 10)}
+                    </span>
+                    {onSignOut && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onClose();
+                          onSignOut();
+                        }}
+                        className="px-2.5 py-1 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-[11px] font-bold transition flex items-center gap-1 shadow-2xs active:scale-95"
+                        title="Log out and return to guest mode"
+                      >
+                        <LogOut className="w-3 h-3 text-rose-600" />
+                        <span>Log Out</span>
+                      </button>
+                    )}
+                  </div>
                 </div>
 
                 {/* Additional Customer Details: National ID, Logins Count, Password Status */}
