@@ -20,6 +20,7 @@ import {
   Gift,
   Star,
   LogOut,
+  LogIn,
   Tag,
   Lightbulb,
   LifeBuoy,
@@ -54,13 +55,14 @@ import {
   Product,
 } from '../types.ts';
 import { PWAInstallButton } from './PWAInstallButton.tsx';
+import { CustomerHelpCenterModal } from './CustomerHelpCenterModal.tsx';
 
 interface CustomerDashboardProps {
   currentUser?: User;
   supermarket: Supermarket;
   session: ShoppingSession | null;
   loyalty: CustomerLoyalty | null;
-  onOpenAccount?: () => void;
+  onOpenAccount?: (mode?: 'profile' | 'signin' | 'register') => void;
   onOpenScanner: () => void;
   onOpenSearch: () => void;
   onOpenCart: () => void;
@@ -135,6 +137,7 @@ export const CustomerDashboard: React.FC<CustomerDashboardProps> = ({
   const [selectedAisle, setSelectedAisle] = useState('Aisle 1 - Fresh Produce & Fruits');
   const [attendantRequested, setAttendantRequested] = useState(false);
   const [openFaqIndex, setOpenFaqIndex] = useState<number | null>(0);
+  const [showHelpCenter, setShowHelpCenter] = useState(false);
 
   // Load products for specials and desktop quick scan test pills
   useEffect(() => {
@@ -221,19 +224,32 @@ export const CustomerDashboard: React.FC<CustomerDashboardProps> = ({
       </div>
 
       <div className="flex items-center gap-1.5 shrink-0">
-        <button
-          onClick={() => onOpenAccount?.()}
-          className="px-2.5 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 border border-slate-200 text-xs font-bold text-slate-700 transition flex items-center gap-1 active:scale-95"
-          title="Customer account linked to email"
-        >
-          <span>My Account</span>
-          <ArrowRight className="w-3 h-3" />
-        </button>
+        {user.id === 'usr_guest' || user.email === 'guest@smartcart.co.ke' ? (
+          <button
+            type="button"
+            onClick={() => onOpenAccount?.('signin')}
+            className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-emerald-950 text-xs font-black transition flex items-center gap-1.5 shadow-xs active:scale-95 cursor-pointer"
+            title="Log in to your account"
+          >
+            <LogIn className="w-3.5 h-3.5 stroke-[2.5]" />
+            <span>Log In</span>
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={() => onOpenAccount?.('profile')}
+            className="px-2.5 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 border border-slate-200 text-xs font-bold text-slate-700 transition flex items-center gap-1 active:scale-95 cursor-pointer"
+            title="Customer account linked to email"
+          >
+            <span>My Account</span>
+            <ArrowRight className="w-3 h-3" />
+          </button>
+        )}
         {onSignOut && (
           <button
             type="button"
             onClick={onSignOut}
-            className="px-2.5 py-1.5 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-xs font-bold transition flex items-center gap-1 active:scale-95"
+            className="px-2.5 py-1.5 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-xs font-bold transition flex items-center gap-1 active:scale-95 cursor-pointer"
             title="Log out and reset session"
           >
             <LogOut className="w-3.5 h-3.5 text-rose-600" />
@@ -375,22 +391,22 @@ export const CustomerDashboard: React.FC<CustomerDashboardProps> = ({
         </span>
       </div>
 
-      <div className="grid grid-cols-3 gap-2">
+      <div className="grid grid-cols-4 gap-1.5 sm:gap-2">
         {/* View Specials */}
         <button
           type="button"
           onClick={() => setShowSpecials(true)}
-          className="flex flex-col items-center justify-center py-2.5 px-2 bg-gradient-to-b from-amber-50/70 via-white to-amber-50/30 hover:from-amber-100 hover:to-amber-50/80 border border-amber-200/80 hover:border-amber-400 rounded-2xl transition-all duration-150 group active:scale-95 text-center shadow-2xs cursor-pointer"
+          className="flex flex-col items-center justify-center py-2 px-1 sm:px-2 bg-gradient-to-b from-amber-50/70 via-white to-amber-50/30 hover:from-amber-100 hover:to-amber-50/80 border border-amber-200/80 hover:border-amber-400 rounded-2xl transition-all duration-150 group active:scale-95 text-center shadow-2xs cursor-pointer"
           title="View discounted products and deals in this store"
         >
-          <div className="w-10 h-10 rounded-xl bg-amber-400 text-emerald-950 flex items-center justify-center font-black shadow-xs group-hover:scale-105 transition mb-1">
-            <Tag className="w-5 h-5 stroke-[2.3]" />
+          <div className="w-9 h-9 rounded-xl bg-amber-400 text-emerald-950 flex items-center justify-center font-black shadow-xs group-hover:scale-105 transition mb-1">
+            <Tag className="w-4 h-4 stroke-[2.3]" />
           </div>
-          <span className="text-xs font-black text-slate-900 group-hover:text-amber-950 leading-tight">
-            View Specials
+          <span className="text-[11px] font-black text-slate-900 group-hover:text-amber-950 leading-tight">
+            Specials
           </span>
-          <span className="text-[9px] text-amber-700 font-bold mt-0.5">
-            Deals &amp; Offers
+          <span className="text-[9px] text-amber-700 font-bold mt-0.5 hidden sm:inline">
+            Deals
           </span>
         </button>
 
@@ -398,35 +414,53 @@ export const CustomerDashboard: React.FC<CustomerDashboardProps> = ({
         <button
           type="button"
           onClick={() => setShowTips(true)}
-          className="flex flex-col items-center justify-center py-2.5 px-2 bg-gradient-to-b from-emerald-50/70 via-white to-emerald-50/30 hover:from-emerald-100 hover:to-emerald-50/80 border border-emerald-200/80 hover:border-emerald-400 rounded-2xl transition-all duration-150 group active:scale-95 text-center shadow-2xs cursor-pointer"
+          className="flex flex-col items-center justify-center py-2 px-1 sm:px-2 bg-gradient-to-b from-emerald-50/70 via-white to-emerald-50/30 hover:from-emerald-100 hover:to-emerald-50/80 border border-emerald-200/80 hover:border-emerald-400 rounded-2xl transition-all duration-150 group active:scale-95 text-center shadow-2xs cursor-pointer"
           title="Smart self-checkout tips and shopping tricks"
         >
-          <div className="w-10 h-10 rounded-xl bg-emerald-800 text-white flex items-center justify-center font-black shadow-xs group-hover:scale-105 transition mb-1">
-            <Lightbulb className="w-5 h-5 stroke-[2.3]" />
+          <div className="w-9 h-9 rounded-xl bg-emerald-800 text-white flex items-center justify-center font-black shadow-xs group-hover:scale-105 transition mb-1">
+            <Lightbulb className="w-4 h-4 stroke-[2.3]" />
           </div>
-          <span className="text-xs font-black text-slate-900 group-hover:text-emerald-950 leading-tight">
-            Shopping Tips
+          <span className="text-[11px] font-black text-slate-900 group-hover:text-emerald-950 leading-tight">
+            Tips
           </span>
-          <span className="text-[9px] text-emerald-700 font-bold mt-0.5">
-            Scan &amp; Save
+          <span className="text-[9px] text-emerald-700 font-bold mt-0.5 hidden sm:inline">
+            Guide
           </span>
         </button>
 
-        {/* Support */}
+        {/* Aisle Attendant Support */}
         <button
           type="button"
           onClick={() => setShowSupport(true)}
-          className="flex flex-col items-center justify-center py-2.5 px-2 bg-gradient-to-b from-blue-50/70 via-white to-blue-50/30 hover:from-blue-100 hover:to-blue-50/80 border border-blue-200/80 hover:border-blue-400 rounded-2xl transition-all duration-150 group active:scale-95 text-center shadow-2xs cursor-pointer"
-          title="Call store attendant, view contact info & FAQs"
+          className="flex flex-col items-center justify-center py-2 px-1 sm:px-2 bg-gradient-to-b from-blue-50/70 via-white to-blue-50/30 hover:from-blue-100 hover:to-blue-50/80 border border-blue-200/80 hover:border-blue-400 rounded-2xl transition-all duration-150 group active:scale-95 text-center shadow-2xs cursor-pointer"
+          title="Call store attendant to your aisle & FAQs"
         >
-          <div className="w-10 h-10 rounded-xl bg-blue-600 text-white flex items-center justify-center font-black shadow-xs group-hover:scale-105 transition mb-1">
-            <LifeBuoy className="w-5 h-5 stroke-[2.3]" />
+          <div className="w-9 h-9 rounded-xl bg-blue-600 text-white flex items-center justify-center font-black shadow-xs group-hover:scale-105 transition mb-1">
+            <Bell className="w-4 h-4 stroke-[2.3]" />
           </div>
-          <span className="text-xs font-black text-slate-900 group-hover:text-blue-950 leading-tight">
-            Support
+          <span className="text-[11px] font-black text-slate-900 group-hover:text-blue-950 leading-tight">
+            Attendant
           </span>
-          <span className="text-[9px] text-blue-700 font-bold mt-0.5">
-            Attendant &amp; Help
+          <span className="text-[9px] text-blue-700 font-bold mt-0.5 hidden sm:inline">
+            Aisle Help
+          </span>
+        </button>
+
+        {/* System Admin Help Center */}
+        <button
+          type="button"
+          onClick={() => setShowHelpCenter(true)}
+          className="flex flex-col items-center justify-center py-2 px-1 sm:px-2 bg-gradient-to-b from-purple-50/70 via-white to-purple-50/30 hover:from-purple-100 hover:to-purple-50/80 border border-purple-200/80 hover:border-purple-400 rounded-2xl transition-all duration-150 group active:scale-95 text-center shadow-2xs cursor-pointer"
+          title="Message System Admin regarding price discrepancies, account issues or feedback"
+        >
+          <div className="w-9 h-9 rounded-xl bg-purple-700 text-white flex items-center justify-center font-black shadow-xs group-hover:scale-105 transition mb-1">
+            <LifeBuoy className="w-4 h-4 stroke-[2.3]" />
+          </div>
+          <span className="text-[11px] font-black text-slate-900 group-hover:text-purple-950 leading-tight">
+            Help Center
+          </span>
+          <span className="text-[9px] text-purple-700 font-bold mt-0.5 hidden sm:inline">
+            Admin Line
           </span>
         </button>
       </div>
@@ -1271,6 +1305,35 @@ export const CustomerDashboard: React.FC<CustomerDashboardProps> = ({
                 )}
               </div>
 
+              {/* Direct System Admin Help Center Channel */}
+              <div className="p-3.5 rounded-2xl bg-gradient-to-r from-emerald-950 via-emerald-900 to-emerald-950 text-white space-y-2 shadow-sm border border-emerald-800">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <div className="w-7 h-7 rounded-xl bg-amber-400 text-emerald-950 flex items-center justify-center font-bold">
+                      <LifeBuoy className="w-4 h-4" />
+                    </div>
+                    <span className="font-extrabold text-xs text-white">System Admin Help Center</span>
+                  </div>
+                  <span className="text-[9px] font-black uppercase tracking-wider bg-amber-400/20 text-amber-300 border border-amber-400/30 px-2 py-0.5 rounded-full">
+                    Direct Line
+                  </span>
+                </div>
+                <p className="text-[11px] text-emerald-200 leading-relaxed">
+                  Have an unresolved shelf price discrepancy, scanner glitch, or question about your account? Message the central system administrator directly.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowSupport(false);
+                    setShowHelpCenter(true);
+                  }}
+                  className="w-full py-2 bg-amber-400 hover:bg-amber-300 text-emerald-950 font-black text-xs rounded-xl shadow transition flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  <Mail className="w-3.5 h-3.5" />
+                  <span>Open Help Center &amp; Message Admin</span>
+                </button>
+              </div>
+
               {/* Direct Supermarket Contacts */}
               <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200 space-y-2">
                 <h4 className="font-black text-slate-900 text-xs">Supermarket Contact Information</h4>
@@ -1357,6 +1420,16 @@ export const CustomerDashboard: React.FC<CustomerDashboardProps> = ({
             </div>
           </div>
         </div>
+      )}
+
+      {/* Customer to System Admin Help Center Modal */}
+      {currentUser && (
+        <CustomerHelpCenterModal
+          isOpen={showHelpCenter}
+          onClose={() => setShowHelpCenter(false)}
+          currentUser={currentUser}
+          currentSupermarket={supermarket}
+        />
       )}
     </div>
   );

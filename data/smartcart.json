@@ -8,22 +8,238 @@
       "phone": "+254 700 000 000",
       "password": "#Mark3407",
       "created_at": "2026-10-24T10:30:00.000Z"
+    },
+    {
+      "id": "usr_adm_sm_1793260342649",
+      "email": "lavington@quickmart.co.ke",
+      "name": "Store Manager",
+      "role": "SUPERMARKET_ADMIN",
+      "supermarket_id": "sm_1793260342649",
+      "phone": "+254 711 223344",
+      "password": "admin123",
+      "created_at": "2026-10-29T07:52:22.649Z"
+    },
+    {
+      "id": "usr_cust_1793260773041_3l1d",
+      "email": "shopper@smartcart.co.ke",
+      "name": "Shopper",
+      "role": "CUSTOMER",
+      "id_number": "ID-90772231",
+      "phone": "+254 700 000 000",
+      "password": "cust123",
+      "login_count": 1,
+      "last_login_at": "2026-10-29T07:59:33.041Z",
+      "created_at": "2026-10-29T07:59:33.042Z"
     }
   ],
-  "supermarkets": [],
-  "categories": [
-    { "id": "cat_1", "name": "Bakery" },
-    { "id": "cat_2", "name": "Dairy" },
-    { "id": "cat_3", "name": "Food & Groceries" },
-    { "id": "cat_4", "name": "Beverages" },
-    { "id": "cat_5", "name": "Personal Care" },
-    { "id": "cat_6", "name": "Cleaning Products" },
-    { "id": "cat_7", "name": "Fresh Produce" },
-    { "id": "cat_8", "name": "Household & Electronics" }
+  "supermarkets": [
+    {
+      "id": "sm_1793260342649",
+      "supermarket_code": "QM-LAV-01",
+      "name": "Quickmart Lavington",
+      "branch": "Lavington Branch",
+      "location": "James Gichuru Rd, Nairobi",
+      "phone": "+254 711 223344",
+      "email": "lavington@quickmart.co.ke",
+      "currency": "KSh",
+      "status": "ACTIVE",
+      "low_stock_threshold": 15,
+      "admin_password": "admin123",
+      "admin_name": "Store Manager",
+      "bg_color": "#f8fafc",
+      "bg_gradient": "",
+      "theme_color": "#064e3b",
+      "created_at": "2026-10-29T07:52:22.649Z"
+    }
   ],
-  "products": [],
-  "shopping_sessions": [],
+  "categories": [
+    {
+      "id": "cat_1",
+      "name": "Bakery"
+    },
+    {
+      "id": "cat_2",
+      "name": "Dairy"
+    },
+    {
+      "id": "cat_3",
+      "name": "Food & Groceries"
+    },
+    {
+      "id": "cat_4",
+      "name": "Beverages"
+    },
+    {
+      "id": "cat_5",
+      "name": "Personal Care"
+    },
+    {
+      "id": "cat_6",
+      "name": "Cleaning Products"
+    },
+    {
+      "id": "cat_7",
+      "name": "Fresh Produce"
+    },
+    {
+      "id": "cat_8",
+      "name": "Household & Electronics"
+    }
+  ],
+  "products": [
+    {
+      "id": "prod_1793260342649_fopc",
+      "supermarket_id": "sm_1793260342649",
+      "barcode": "6161234567890",
+      "product_name": "White Bread",
+      "brand": "Store Brand",
+      "category": "Bakery",
+      "description": "Fresh daily sliced bread",
+      "unit": "500g",
+      "selling_price": 82,
+      "discount_price": 0,
+      "stock_quantity": 120,
+      "status": "ACTIVE",
+      "created_at": "2026-10-29T07:52:22.649Z",
+      "updated_at": "2026-10-29T07:52:22.649Z"
+    },
+    {
+      "id": "prod_1793260342649_br0g",
+      "supermarket_id": "sm_1793260342649",
+      "barcode": "6161234567891",
+      "product_name": "Fresh Milk",
+      "brand": "Store Brand",
+      "category": "Dairy",
+      "description": "Pasteurized whole milk",
+      "unit": "500ml",
+      "selling_price": 72,
+      "discount_price": 0,
+      "stock_quantity": 150,
+      "status": "ACTIVE",
+      "created_at": "2026-10-29T07:52:22.649Z",
+      "updated_at": "2026-10-29T07:52:22.649Z"
+    },
+    {
+      "id": "prod_1793260342649_covc",
+      "supermarket_id": "sm_1793260342649",
+      "barcode": "6161234567892",
+      "product_name": "Pure Cane Sugar",
+      "brand": "Store Brand",
+      "category": "Food & Groceries",
+      "description": "Refined sweet crystal sugar",
+      "unit": "1kg",
+      "selling_price": 165,
+      "discount_price": 155,
+      "stock_quantity": 90,
+      "status": "ACTIVE",
+      "created_at": "2026-10-29T07:52:22.649Z",
+      "updated_at": "2026-10-29T07:52:22.649Z"
+    },
+    {
+      "id": "prod_1793260342649_tmzo",
+      "supermarket_id": "sm_1793260342649",
+      "barcode": "6161234567893",
+      "product_name": "Pishori Rice",
+      "brand": "Store Brand",
+      "category": "Food & Groceries",
+      "description": "Mwea aromatic rice",
+      "unit": "2kg",
+      "selling_price": 330,
+      "discount_price": 0,
+      "stock_quantity": 75,
+      "status": "ACTIVE",
+      "created_at": "2026-10-29T07:52:22.649Z",
+      "updated_at": "2026-10-29T07:52:22.649Z"
+    },
+    {
+      "id": "prod_1793260342649_zaf8",
+      "supermarket_id": "sm_1793260342649",
+      "barcode": "6161234567894",
+      "product_name": "Vegetable Cooking Oil",
+      "brand": "Store Brand",
+      "category": "Food & Groceries",
+      "description": "Fortified cooking oil",
+      "unit": "1L",
+      "selling_price": 255,
+      "discount_price": 245,
+      "stock_quantity": 60,
+      "status": "ACTIVE",
+      "created_at": "2026-10-29T07:52:22.649Z",
+      "updated_at": "2026-10-29T07:52:22.649Z"
+    },
+    {
+      "id": "prod_1793260342649_3o13",
+      "supermarket_id": "sm_1793260342649",
+      "barcode": "6161234567895",
+      "product_name": "Bath Soap",
+      "brand": "Store Brand",
+      "category": "Personal Care",
+      "description": "Cleansing bar soap",
+      "unit": "125g",
+      "selling_price": 115,
+      "discount_price": 0,
+      "stock_quantity": 100,
+      "status": "ACTIVE",
+      "created_at": "2026-10-29T07:52:22.649Z",
+      "updated_at": "2026-10-29T07:52:22.649Z"
+    }
+  ],
+  "shopping_sessions": [
+    {
+      "id": "sess_1793260343108_wvkj",
+      "customer_id": "usr_guest",
+      "customer_name": "Shopper",
+      "supermarket_id": "sm_1793260342649",
+      "supermarket_name": "Quickmart Lavington",
+      "started_at": "2026-10-29T07:52:23.108Z",
+      "updated_at": "2026-10-29T07:52:23.108Z",
+      "status": "ACTIVE",
+      "subtotal": 0,
+      "discount": 0,
+      "estimated_total": 0,
+      "budget": 2000,
+      "items": []
+    }
+  ],
   "activity_logs": [
+    {
+      "id": "log_1793260839374_nykn",
+      "supermarket_id": "sm_1793260342649",
+      "user_name": "Store Manager",
+      "action": "USER_LOGIN",
+      "details": "User logged in: Store Manager (lavington@quickmart.co.ke) [SUPERMARKET_ADMIN]",
+      "timestamp": "2026-10-29T08:00:39.374Z"
+    },
+    {
+      "id": "log_1793260776935_d5u9",
+      "user_name": "Hiram Mark Karanja",
+      "action": "USER_LOGIN",
+      "details": "User logged in: Hiram Mark Karanja (hirammarkkaranja@gmail.com) [SYSTEM_ADMIN]",
+      "timestamp": "2026-10-29T07:59:36.935Z"
+    },
+    {
+      "id": "log_1793260773042_3g2e",
+      "user_name": "Shopper",
+      "action": "CUSTOMER_ACCOUNT_CREATED",
+      "details": "New customer account registered and linked to email: shopper@smartcart.co.ke",
+      "timestamp": "2026-10-29T07:59:33.042Z"
+    },
+    {
+      "id": "log_1793260343108_0coh",
+      "supermarket_id": "sm_1793260342649",
+      "user_name": "Shopper",
+      "action": "SESSION_STARTED",
+      "details": "Customer started shopping session",
+      "timestamp": "2026-10-29T07:52:23.108Z"
+    },
+    {
+      "id": "log_1793260342649_dnt0",
+      "supermarket_id": "sm_1793260342649",
+      "user_name": "System Admin",
+      "action": "SUPERMARKET_CREATED",
+      "details": "Supermarket registered: Quickmart Lavington (QM-LAV-01) with system password admin123 and 6 starter inventory products",
+      "timestamp": "2026-10-29T07:52:22.649Z"
+    },
     {
       "id": "log_sys_init",
       "action": "SYSTEM_INIT",

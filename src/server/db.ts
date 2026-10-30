@@ -13,6 +13,11 @@ import {
   CustomerLoyalty,
   LoyaltyTransaction,
   StoreStaffAccount,
+  SupportTicket,
+  HelpTicketMessage,
+  TicketCategory,
+  TicketPriority,
+  TicketStatus,
 } from '../types.ts';
 
 interface DatabaseData {
@@ -23,6 +28,13 @@ interface DatabaseData {
   shopping_sessions: ShoppingSession[];
   activity_logs: ActivityLog[];
   store_staff: StoreStaffAccount[];
+  support_tickets?: SupportTicket[];
+  recovery_codes?: Array<{
+    email: string;
+    code: string;
+    expires_at: number;
+    created_at: string;
+  }>;
 }
 
 const DATA_DIR = path.resolve(process.cwd(), 'data');
@@ -99,6 +111,8 @@ class DatabaseService {
             }
           });
         }
+        if (!parsed.support_tickets) { parsed.support_tickets = []; }
+        if (!parsed.recovery_codes) { parsed.recovery_codes = []; }
         return parsed;
       }
     } catch (e) {
@@ -222,6 +236,8 @@ class DatabaseService {
       if (cleanPwd && !validSysPwds.includes(cleanPwd)) {
         return null;
       }
+    } else if (cleanPwd && user.password && user.password !== cleanPwd) {
+      return null;
     }
 
     return user;
@@ -299,24 +315,31 @@ class DatabaseService {
       throw new Error('Please enter a valid email address.');
     }
 
-    let customer = this.getCustomerByEmail(normalized);
-    if (!customer) {
-      // Auto-provision if first time signing in with this email
-      return this.loginOrCreateCustomer(normalized, undefined, undefined, password);
+    // 1. Check if user matches any role (System Admin, Store Admin, or Customer)
+    const authenticated = this.authenticate(normalized, password);
+    if (authenticated) {
+      if (authenticated.role === 'CUSTOMER') {
+        authenticated.login_count = (authenticated.login_count || 0) + 1;
+        authenticated.last_login_at = new Date().toISOString();
+        this.saveData(this.data);
+      }
+      this.log(
+        'USER_LOGIN',
+        `User logged in: ${authenticated.name} (${authenticated.email}) [${authenticated.role}]`,
+        authenticated.supermarket_id,
+        authenticated.name
+      );
+      return authenticated;
     }
 
-    if (password && customer.password && customer.password !== password.trim()) {
-      throw new Error('Incorrect password. Please contact store admin or system admin to reset.');
+    // 2. If password was given but didn't match existing user with this email
+    const existing = this.data.users.find((u) => u.email.toLowerCase() === normalized);
+    if (existing) {
+      throw new Error('Incorrect password. Please verify your password or use Forgot Password to reset.');
     }
 
-    customer.login_count = (customer.login_count || 0) + 1;
-    customer.last_login_at = new Date().toISOString();
-    if (password && !customer.password) {
-      customer.password = password.trim();
-    }
-    this.saveData(this.data);
-    this.log('CUSTOMER_LOGIN', `Customer logged in: ${customer.name} (${customer.email}) - Total logins: ${customer.login_count}`, undefined, customer.name);
-    return customer;
+    // 3. New customer email: auto-provision
+    return this.loginOrCreateCustomer(normalized, undefined, undefined, password);
   }
 
   /**
@@ -1798,6 +1821,257 @@ class DatabaseService {
     this.data.categories.push(newCat);
     this.saveData(this.data);
     return newCat;
+  }
+
+  // ==========================================
+  // RECOVERY CODE METHODS
+  // ==========================================
+  public sendRecoveryCode(email: string): {
+    success: boolean;
+    email: string;
+    code: string;
+    expiresInMinutes: number;
+    name: string;
+    message: string;
+  } {
+    const cleanEmail = email.trim().toLowerCase();
+    const user = this.data.users.find((u) => u.email.toLowerCase() === cleanEmail);
+    if (!user) {
+      throw new Error(`No account found registered with email: ${cleanEmail}`);
+    }
+
+    if (!this.data.recovery_codes) this.data.recovery_codes = [];
+    // 6-digit recovery code
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresInMinutes = 15;
+    const expiresAt = Date.now() + expiresInMinutes * 60 * 1000;
+
+    // Remove any previous recovery code for this email
+    this.data.recovery_codes = this.data.recovery_codes.filter(
+      (r) => r.email.toLowerCase() !== cleanEmail
+    );
+
+    this.data.recovery_codes.push({
+      email: cleanEmail,
+      code,
+      expires_at: expiresAt,
+      created_at: new Date().toISOString(),
+    });
+
+    this.saveData(this.data);
+    this.log(
+      'RECOVERY_CODE_SENT',
+      `Sent 6-digit recovery code [${code}] to email: ${cleanEmail}`,
+      undefined,
+      user.name
+    );
+
+    return {
+      success: true,
+      email: cleanEmail,
+      code,
+      expiresInMinutes,
+      name: user.name,
+      message: `A 6-digit recovery code has been sent to ${cleanEmail}. Valid for ${expiresInMinutes} minutes.`,
+    };
+  }
+
+  public verifyRecoveryCodeAndResetPassword(
+    email: string,
+    code: string,
+    newPassword?: string
+  ): {
+    success: boolean;
+    user: User;
+    newPassword: string;
+    message: string;
+  } {
+    const cleanEmail = email.trim().toLowerCase();
+    const cleanCode = code.trim();
+
+    if (!this.data.recovery_codes) this.data.recovery_codes = [];
+    const recordIndex = this.data.recovery_codes.findIndex(
+      (r) => r.email.toLowerCase() === cleanEmail && r.code === cleanCode
+    );
+
+    if (recordIndex === -1) {
+      throw new Error('Invalid recovery code. Please check your email or request a new code.');
+    }
+
+    const record = this.data.recovery_codes[recordIndex];
+    if (Date.now() > record.expires_at) {
+      this.data.recovery_codes.splice(recordIndex, 1);
+      this.saveData(this.data);
+      throw new Error('Recovery code has expired. Please request a new code.');
+    }
+
+    const user = this.data.users.find((u) => u.email.toLowerCase() === cleanEmail);
+    if (!user) {
+      throw new Error('Associated account could not be found.');
+    }
+
+    const finalPassword = newPassword && newPassword.trim()
+      ? newPassword.trim()
+      : 'sc' + Math.floor(100000 + Math.random() * 900000);
+
+    user.password = finalPassword;
+    // Consume recovery code
+    this.data.recovery_codes.splice(recordIndex, 1);
+    this.saveData(this.data);
+
+    this.log(
+      'PASSWORD_RESET_SUCCESS',
+      `Password successfully reset for account ${user.email} using recovery code.`,
+      undefined,
+      user.name
+    );
+
+    return {
+      success: true,
+      user,
+      newPassword: finalPassword,
+      message: 'Password has been reset successfully. You are now logged in.',
+    };
+  }
+
+  // ==========================================
+  // HELP CENTER & SYSTEM ADMIN COMMUNICATION
+  // ==========================================
+  public getSupportTickets(filter?: { customer_id?: string; customer_email?: string }): SupportTicket[] {
+    if (!this.data.support_tickets) this.data.support_tickets = [];
+    let list = [...this.data.support_tickets];
+    if (filter?.customer_id) {
+      list = list.filter((t) => t.customer_id === filter.customer_id);
+    } else if (filter?.customer_email) {
+      const em = filter.customer_email.trim().toLowerCase();
+      list = list.filter((t) => t.customer_email.toLowerCase() === em);
+    }
+    return list.sort(
+      (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
+    );
+  }
+
+  public createSupportTicket(data: {
+    customer_id: string;
+    customer_name: string;
+    customer_email: string;
+    customer_phone?: string;
+    supermarket_id?: string;
+    supermarket_name?: string;
+    subject: string;
+    category: TicketCategory;
+    priority?: TicketPriority;
+    initial_message: string;
+  }): SupportTicket {
+    if (!this.data.support_tickets) this.data.support_tickets = [];
+
+    const now = new Date().toISOString();
+    const ticketId = 'tkt_' + Date.now();
+    const newTicket: SupportTicket = {
+      id: ticketId,
+      customer_id: data.customer_id,
+      customer_name: data.customer_name || 'Customer',
+      customer_email: data.customer_email.trim().toLowerCase(),
+      customer_phone: data.customer_phone,
+      supermarket_id: data.supermarket_id,
+      supermarket_name: data.supermarket_name,
+      subject: data.subject.trim(),
+      category: data.category || 'TECHNICAL_ISSUE',
+      priority: data.priority || 'NORMAL',
+      status: 'OPEN',
+      messages: [
+        {
+          id: 'msg_' + Date.now(),
+          sender: 'CUSTOMER',
+          sender_name: data.customer_name || 'Customer',
+          sender_email: data.customer_email.trim().toLowerCase(),
+          message: data.initial_message.trim(),
+          timestamp: now,
+        },
+      ],
+      created_at: now,
+      updated_at: now,
+    };
+
+    this.data.support_tickets.push(newTicket);
+    this.saveData(this.data);
+
+    this.log(
+      'SUPPORT_TICKET_CREATED',
+      `New Help Center ticket [${ticketId}] opened by ${newTicket.customer_name}: "${newTicket.subject}"`,
+      newTicket.supermarket_id,
+      newTicket.customer_name
+    );
+
+    return newTicket;
+  }
+
+  public addTicketMessage(
+    ticketId: string,
+    message: string,
+    sender: 'CUSTOMER' | 'SYSTEM_ADMIN',
+    sender_name: string,
+    sender_email: string
+  ): SupportTicket {
+    if (!this.data.support_tickets) this.data.support_tickets = [];
+    const ticket = this.data.support_tickets.find((t) => t.id === ticketId);
+    if (!ticket) {
+      throw new Error(`Support ticket ${ticketId} not found.`);
+    }
+
+    const now = new Date().toISOString();
+    ticket.messages.push({
+      id: 'msg_' + Date.now(),
+      sender,
+      sender_name,
+      sender_email,
+      message: message.trim(),
+      timestamp: now,
+    });
+    ticket.updated_at = now;
+
+    if (sender === 'SYSTEM_ADMIN') {
+      ticket.status = 'REPLIED';
+      this.log(
+        'SUPPORT_TICKET_ADMIN_REPLY',
+        `System Admin replied to customer ${ticket.customer_name} on ticket ${ticket.id}`,
+        ticket.supermarket_id,
+        sender_name
+      );
+    } else {
+      if (ticket.status === 'RESOLVED') {
+        ticket.status = 'OPEN';
+      }
+      this.log(
+        'SUPPORT_TICKET_CUSTOMER_REPLY',
+        `Customer ${sender_name} replied on ticket ${ticket.id}`,
+        ticket.supermarket_id,
+        sender_name
+      );
+    }
+
+    this.saveData(this.data);
+    return ticket;
+  }
+
+  public updateTicketStatus(ticketId: string, status: TicketStatus): SupportTicket {
+    if (!this.data.support_tickets) this.data.support_tickets = [];
+    const ticket = this.data.support_tickets.find((t) => t.id === ticketId);
+    if (!ticket) {
+      throw new Error(`Support ticket ${ticketId} not found.`);
+    }
+
+    ticket.status = status;
+    ticket.updated_at = new Date().toISOString();
+    this.saveData(this.data);
+
+    this.log(
+      'SUPPORT_TICKET_STATUS_CHANGED',
+      `Ticket ${ticket.id} status changed to ${status}`,
+      ticket.supermarket_id
+    );
+
+    return ticket;
   }
 }
 

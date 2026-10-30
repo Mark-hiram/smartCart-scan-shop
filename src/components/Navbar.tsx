@@ -23,7 +23,7 @@ interface NavbarProps {
   onOpenSupermarketSelector: () => void;
   onOpenCart: () => void;
   onSwitchUser?: (user: User) => void;
-  onOpenAccount?: () => void;
+  onOpenAccount?: (mode?: 'profile' | 'signin' | 'register') => void;
   onSignOut: () => void;
   availableUsers?: User[];
   currentView: 'customer' | 'admin' | 'system';
@@ -201,64 +201,75 @@ export const Navbar: React.FC<NavbarProps> = ({
           </button>
 
           {/* User Account Button & Dropdown */}
-          <div className="relative">
+          {(currentUser.id === 'usr_guest' || currentUser.email === 'guest@smartcart.co.ke') ? (
             <button
-              onClick={() => setShowUserDropdown(!showUserDropdown)}
-              className="flex items-center gap-1.5 bg-emerald-950/70 hover:bg-emerald-950 text-white px-2.5 py-1.5 rounded-xl border border-emerald-800 text-xs font-medium transition"
-              title="Account and session settings"
+              type="button"
+              onClick={() => onOpenAccount?.('signin')}
+              className="flex items-center gap-1.5 bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-emerald-950 px-3 py-1.5 rounded-xl font-black text-xs shadow-sm transition active:scale-95 cursor-pointer"
+              title="Log in to your shopper or admin account"
             >
-              <UserIcon className="w-3.5 h-3.5 text-emerald-300" />
-              <span className="max-w-[100px] truncate hidden sm:inline">{currentUser.name}</span>
-              <ChevronDown className="w-3.5 h-3.5 text-emerald-400" />
+              <LogIn className="w-3.5 h-3.5 stroke-[2.5]" />
+              <span>Log In</span>
             </button>
+          ) : (
+            <div className="relative">
+              <button
+                onClick={() => setShowUserDropdown(!showUserDropdown)}
+                className="flex items-center gap-1.5 bg-emerald-950/70 hover:bg-emerald-950 text-white px-2.5 py-1.5 rounded-xl border border-emerald-800 text-xs font-medium transition cursor-pointer"
+                title="Account and session settings"
+              >
+                <UserIcon className="w-3.5 h-3.5 text-emerald-300" />
+                <span className="max-w-[100px] truncate hidden sm:inline">{currentUser.name}</span>
+                <ChevronDown className="w-3.5 h-3.5 text-emerald-400" />
+              </button>
 
-            {showUserDropdown && (
-              <div className="absolute right-0 mt-2 w-72 bg-white rounded-2xl shadow-2xl border border-slate-200 text-slate-800 p-2.5 z-50 animate-in fade-in slide-in-from-top-2 duration-150">
-                <div className="px-2.5 py-2 bg-slate-50 rounded-xl border border-slate-100 mb-2">
-                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
-                    Signed In As
-                  </p>
-                  <p className="text-xs font-extrabold text-slate-900 mt-0.5">{currentUser.name}</p>
-                  <p className="text-[11px] text-slate-500 font-mono truncate">{currentUser.email}</p>
-                  <div className="mt-1">
-                    <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 inline-block">
-                      {currentUser.role === 'CUSTOMER' && 'Shopper Account'}
-                      {currentUser.role === 'SUPERMARKET_ADMIN' && 'Store Administrator'}
-                      {currentUser.role === 'SYSTEM_ADMIN' && 'System SuperAdmin'}
-                    </span>
+              {showUserDropdown && (
+                <div className="absolute right-0 mt-2 w-72 bg-white rounded-2xl shadow-2xl border border-slate-200 text-slate-800 p-2.5 z-50 animate-in fade-in slide-in-from-top-2 duration-150">
+                  <div className="px-2.5 py-2 bg-slate-50 rounded-xl border border-slate-100 mb-2">
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                      Signed In As
+                    </p>
+                    <p className="text-xs font-extrabold text-slate-900 mt-0.5">{currentUser.name}</p>
+                    <p className="text-[11px] text-slate-500 font-mono truncate">{currentUser.email}</p>
+                    <div className="mt-1">
+                      <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 inline-block">
+                        {currentUser.role === 'CUSTOMER' && 'Shopper Account'}
+                        {currentUser.role === 'SUPERMARKET_ADMIN' && 'Store Administrator'}
+                        {currentUser.role === 'SYSTEM_ADMIN' && 'System SuperAdmin'}
+                      </span>
+                    </div>
                   </div>
-                </div>
 
-                {/* Profile & Account actions */}
-                <div className="space-y-1">
-                  <button
-                    onClick={() => {
-                      setShowUserDropdown(false);
-                      onOpenAccount?.();
-                    }}
-                    className="w-full text-left px-2.5 py-2 rounded-xl text-xs font-bold text-slate-800 hover:bg-emerald-50 hover:text-emerald-900 flex items-center justify-between transition"
-                  >
-                    <span className="flex items-center gap-2">
-                      <UserCheck className="w-3.5 h-3.5 text-emerald-700" />
-                      My Profile &amp; Account
-                    </span>
-                    <ArrowRight className="w-3.5 h-3.5 text-slate-400" />
-                  </button>
+                  {/* Profile & Account actions */}
+                  <div className="space-y-1">
+                    <button
+                      onClick={() => {
+                        setShowUserDropdown(false);
+                        onOpenAccount?.('profile');
+                      }}
+                      className="w-full text-left px-2.5 py-2 rounded-xl text-xs font-bold text-slate-800 hover:bg-emerald-50 hover:text-emerald-900 flex items-center justify-between transition cursor-pointer"
+                    >
+                      <span className="flex items-center gap-2">
+                        <UserCheck className="w-3.5 h-3.5 text-emerald-700" />
+                        My Profile &amp; Account
+                      </span>
+                      <ArrowRight className="w-3.5 h-3.5 text-slate-400" />
+                    </button>
 
-                  <button
-                    onClick={() => {
-                      setShowUserDropdown(false);
-                      onOpenAccount?.();
-                    }}
-                    className="w-full text-left px-2.5 py-2 rounded-xl text-xs font-bold text-slate-800 hover:bg-emerald-50 hover:text-emerald-900 flex items-center justify-between transition"
-                  >
-                    <span className="flex items-center gap-2">
-                      <LogIn className="w-3.5 h-3.5 text-emerald-700" />
-                      Sign In / Register New Account
-                    </span>
-                    <ArrowRight className="w-3.5 h-3.5 text-slate-400" />
-                  </button>
-                </div>
+                    <button
+                      onClick={() => {
+                        setShowUserDropdown(false);
+                        onOpenAccount?.('signin');
+                      }}
+                      className="w-full text-left px-2.5 py-2 rounded-xl text-xs font-bold text-slate-800 hover:bg-emerald-50 hover:text-emerald-900 flex items-center justify-between transition cursor-pointer"
+                    >
+                      <span className="flex items-center gap-2">
+                        <LogIn className="w-3.5 h-3.5 text-emerald-700" />
+                        Switch / Log In Another Account
+                      </span>
+                      <ArrowRight className="w-3.5 h-3.5 text-slate-400" />
+                    </button>
+                  </div>
 
                 {/* Navigation portals */}
                 <div className="border-t border-slate-100 pt-1.5 mt-1.5 space-y-1">
@@ -334,6 +345,7 @@ export const Navbar: React.FC<NavbarProps> = ({
               </div>
             )}
           </div>
+        )}
 
           {/* Direct Log Out Button for Everyone */}
           <button

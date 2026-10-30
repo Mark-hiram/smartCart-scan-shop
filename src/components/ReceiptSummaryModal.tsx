@@ -1,4 +1,4 @@
-import React, { useRef } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   FileText,
   Printer,
@@ -11,9 +11,13 @@ import {
   QrCode,
   ArrowRight,
   Award,
+  Mail,
+  Send,
+  Check,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { ShoppingSession, Supermarket } from '../types.ts';
+import { api } from '../api.ts';
 
 interface ReceiptSummaryModalProps {
   isOpen: boolean;
@@ -21,6 +25,7 @@ interface ReceiptSummaryModalProps {
   session: ShoppingSession | null;
   supermarket: Supermarket | null;
   onFinishShopping: () => void;
+  customerEmail?: string;
 }
 
 export const ReceiptSummaryModal: React.FC<ReceiptSummaryModalProps> = ({
@@ -29,10 +34,44 @@ export const ReceiptSummaryModal: React.FC<ReceiptSummaryModalProps> = ({
   session,
   supermarket,
   onFinishShopping,
+  customerEmail,
 }) => {
   const receiptRef = useRef<HTMLDivElement | null>(null);
+  const [emailInput, setEmailInput] = useState(customerEmail || '');
+  const [showEmailBox, setShowEmailBox] = useState(false);
+  const [isSendingEmail, setIsSendingEmail] = useState(false);
+  const [emailStatus, setEmailStatus] = useState<string | null>(null);
 
   if (!isOpen || !session || !supermarket) return null;
+
+  const handleSendReceiptEmail = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!emailInput || !emailInput.includes('@')) {
+      setEmailStatus('Please enter a valid email.');
+      return;
+    }
+    setIsSendingEmail(true);
+    setEmailStatus(null);
+    try {
+      const res = await api.emailReceipt({
+        email: emailInput.trim(),
+        receiptCode: session.receipt_code || 'SC' + session.id.slice(-6),
+        supermarketName: supermarket.name,
+        totalAmount: session.estimated_total,
+      });
+      if (res.success) {
+        setEmailStatus(`Receipt sent to ${emailInput.trim()}!`);
+        setTimeout(() => {
+          setShowEmailBox(false);
+          setEmailStatus(null);
+        }, 2500);
+      }
+    } catch {
+      setEmailStatus('Failed to send receipt email.');
+    } finally {
+      setIsSendingEmail(false);
+    }
+  };
 
   const pointsEarned =
     typeof session.loyalty_points_earned === 'number'
@@ -305,20 +344,76 @@ Thank you for shopping at ${supermarket.name}!
             </button>
           )}
 
-          <div className="flex gap-2">
+          {/* Email receipt box */}
+          {showEmailBox && (
+            <form onSubmit={handleSendReceiptEmail} className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl space-y-2 animate-in fade-in">
+              <div className="flex items-center justify-between text-xs font-bold text-slate-700">
+                <span className="flex items-center gap-1.5">
+                  <Mail className="w-3.5 h-3.5 text-emerald-700" />
+                  <span>Send Receipt to Email</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setShowEmailBox(false)}
+                  className="text-slate-400 hover:text-slate-600 text-xs"
+                >
+                  ✕
+                </button>
+              </div>
+              <div className="flex gap-1.5">
+                <input
+                  type="email"
+                  required
+                  value={emailInput}
+                  onChange={(e) => setEmailInput(e.target.value)}
+                  placeholder="Enter email address"
+                  className="flex-1 px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-medium focus:outline-none focus:ring-1 focus:ring-emerald-700"
+                />
+                <button
+                  type="submit"
+                  disabled={isSendingEmail}
+                  className="px-3 py-1.5 bg-emerald-800 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg transition flex items-center gap-1 shrink-0 disabled:opacity-50"
+                >
+                  {isSendingEmail ? (
+                    <span className="animate-pulse">Sending...</span>
+                  ) : (
+                    <>
+                      <Send className="w-3 h-3" />
+                      <span>Send</span>
+                    </>
+                  )}
+                </button>
+              </div>
+              {emailStatus && (
+                <p className="text-[11px] font-bold text-emerald-800 bg-emerald-50 p-1.5 rounded border border-emerald-200">
+                  {emailStatus}
+                </p>
+              )}
+            </form>
+          )}
+
+          <div className="grid grid-cols-3 gap-2">
+            <button
+              onClick={() => setShowEmailBox(!showEmailBox)}
+              className="py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 font-bold text-xs rounded-xl border border-emerald-200 transition flex items-center justify-center gap-1.5 cursor-pointer"
+              title="Email digital receipt"
+            >
+              <Mail className="w-3.5 h-3.5 text-emerald-700" />
+              <span>Email</span>
+            </button>
             <button
               onClick={handlePrint}
-              className="flex-1 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-xs rounded-xl transition flex items-center justify-center gap-1.5"
+              className="py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-xs rounded-xl transition flex items-center justify-center gap-1.5 cursor-pointer"
             >
               <Printer className="w-3.5 h-3.5" />
-              Print Receipt
+              <span>Print</span>
             </button>
             <button
               onClick={handleDownloadText}
-              className="flex-1 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-xs rounded-xl transition flex items-center justify-center gap-1.5"
+              className="py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-xs rounded-xl transition flex items-center justify-center gap-1.5 cursor-pointer"
             >
               <Download className="w-3.5 h-3.5" />
-              Download Text
+              <span>Download</span>
             </button>
           </div>
         </div>

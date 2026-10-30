@@ -8,6 +8,10 @@ import {
   AdminDashboardStats,
   CustomerLoyalty,
   StoreStaffAccount,
+  SupportTicket,
+  TicketCategory,
+  TicketPriority,
+  TicketStatus,
 } from './types.ts';
 
 async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
@@ -91,6 +95,107 @@ export const api = {
     return fetchJson('/api/auth/customer/forgot-password', {
       method: 'POST',
       body: JSON.stringify({ email }),
+    });
+  },
+
+  async sendRecoveryCode(
+    email: string
+  ): Promise<{
+    success: boolean;
+    email: string;
+    code: string;
+    expiresInMinutes: number;
+    name: string;
+    message: string;
+  }> {
+    return fetchJson('/api/auth/customer/send-recovery-code', {
+      method: 'POST',
+      body: JSON.stringify({ email }),
+    });
+  },
+
+  async verifyRecoveryCode(
+    email: string,
+    code: string,
+    newPassword?: string
+  ): Promise<{
+    success: boolean;
+    user: User;
+    newPassword: string;
+    message: string;
+  }> {
+    return fetchJson('/api/auth/customer/verify-recovery-code', {
+      method: 'POST',
+      body: JSON.stringify({ email, code, newPassword }),
+    });
+  },
+
+  async emailReceipt(data: {
+    email: string;
+    receiptCode?: string;
+    supermarketName?: string;
+    totalAmount?: number;
+  }): Promise<{
+    success: boolean;
+    message: string;
+    deliveryDetails: { email: string; timestamp: string; receiptCode: string };
+  }> {
+    return fetchJson('/api/customer/email-receipt', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  },
+
+  // Support & Help Center
+  async getSupportTickets(params?: {
+    customer_id?: string;
+    customer_email?: string;
+  }): Promise<{ success: boolean; tickets: SupportTicket[] }> {
+    const q = new URLSearchParams();
+    if (params?.customer_id) q.set('customer_id', params.customer_id);
+    if (params?.customer_email) q.set('customer_email', params.customer_email);
+    const qs = q.toString() ? `?${q.toString()}` : '';
+    return fetchJson(`/api/support/tickets${qs}`);
+  },
+
+  async createSupportTicket(data: {
+    customer_id: string;
+    customer_name: string;
+    customer_email: string;
+    customer_phone?: string;
+    supermarket_id?: string;
+    supermarket_name?: string;
+    subject: string;
+    category: TicketCategory;
+    priority?: TicketPriority;
+    initial_message: string;
+  }): Promise<{ success: boolean; ticket: SupportTicket }> {
+    return fetchJson('/api/support/tickets/create', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  },
+
+  async sendSupportMessage(data: {
+    ticket_id: string;
+    message: string;
+    sender: 'CUSTOMER' | 'SYSTEM_ADMIN';
+    sender_name: string;
+    sender_email: string;
+  }): Promise<{ success: boolean; ticket: SupportTicket }> {
+    return fetchJson('/api/support/tickets/message', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  },
+
+  async updateSupportTicketStatus(
+    ticket_id: string,
+    status: TicketStatus
+  ): Promise<{ success: boolean; ticket: SupportTicket }> {
+    return fetchJson('/api/support/tickets/status', {
+      method: 'POST',
+      body: JSON.stringify({ ticket_id, status }),
     });
   },
 

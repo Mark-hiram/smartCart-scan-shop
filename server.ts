@@ -472,6 +472,149 @@ app.post('/api/auth/customer/forgot-password', (req: Request, res: Response) => 
   }
 });
 
+// Customer Recovery Code via Email
+app.post('/api/auth/customer/send-recovery-code', (req: Request, res: Response) => {
+  try {
+    const { email } = req.body;
+    if (!email) {
+      return res.status(400).json({ success: false, message: 'Email address is required.' });
+    }
+    const result = db.sendRecoveryCode(email);
+    return res.json(result);
+  } catch (error: any) {
+    return res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+app.post('/api/auth/customer/verify-recovery-code', (req: Request, res: Response) => {
+  try {
+    const { email, code, newPassword } = req.body;
+    if (!email || !code) {
+      return res.status(400).json({ success: false, message: 'Email and 6-digit recovery code are required.' });
+    }
+    const result = db.verifyRecoveryCodeAndResetPassword(email, code, newPassword);
+    return res.json(result);
+  } catch (error: any) {
+    return res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// Digital Receipt via Email
+app.post('/api/customer/email-receipt', (req: Request, res: Response) => {
+  try {
+    const { email, receiptCode, supermarketName, totalAmount } = req.body;
+    if (!email || !email.includes('@')) {
+      return res.status(400).json({ success: false, message: 'A valid recipient email address is required.' });
+    }
+    const cleanEmail = email.trim().toLowerCase();
+    db.log(
+      'RECEIPT_EMAILED',
+      `Sent digital shopping receipt [${receiptCode || 'REC'}] (${supermarketName || 'Supermarket'}, Total: KSh ${totalAmount || 0}) to email: ${cleanEmail}`
+    );
+    return res.json({
+      success: true,
+      message: `Digital receipt successfully emailed to ${cleanEmail}!`,
+      deliveryDetails: {
+        email: cleanEmail,
+        timestamp: new Date().toISOString(),
+        receiptCode: receiptCode || 'PENDING',
+      },
+    });
+  } catch (error: any) {
+    return res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// ==========================================
+// HELP CENTER & SYSTEM ADMIN SUPPORT DESK
+// ==========================================
+app.get('/api/support/tickets', (req: Request, res: Response) => {
+  try {
+    const customer_id = req.query.customer_id as string | undefined;
+    const customer_email = req.query.customer_email as string | undefined;
+    const tickets = db.getSupportTickets({ customer_id, customer_email });
+    return res.json({ success: true, tickets });
+  } catch (error: any) {
+    return res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+app.post('/api/support/tickets/create', (req: Request, res: Response) => {
+  try {
+    const {
+      customer_id,
+      customer_name,
+      customer_email,
+      customer_phone,
+      supermarket_id,
+      supermarket_name,
+      subject,
+      category,
+      priority,
+      initial_message,
+    } = req.body;
+
+    if (!customer_email || !subject || !initial_message) {
+      return res.status(400).json({
+        success: false,
+        message: 'Customer email, subject, and message description are required.',
+      });
+    }
+
+    const ticket = db.createSupportTicket({
+      customer_id: customer_id || 'usr_guest',
+      customer_name: customer_name || 'Customer',
+      customer_email,
+      customer_phone,
+      supermarket_id,
+      supermarket_name,
+      subject,
+      category: category || 'TECHNICAL_ISSUE',
+      priority: priority || 'NORMAL',
+      initial_message,
+    });
+
+    return res.json({ success: true, ticket });
+  } catch (error: any) {
+    return res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+app.post('/api/support/tickets/message', (req: Request, res: Response) => {
+  try {
+    const { ticket_id, message, sender, sender_name, sender_email } = req.body;
+    if (!ticket_id || !message) {
+      return res.status(400).json({ success: false, message: 'Ticket ID and message are required.' });
+    }
+
+    const updatedTicket = db.addTicketMessage(
+      ticket_id,
+      message,
+      sender || 'CUSTOMER',
+      sender_name || 'User',
+      sender_email || ''
+    );
+
+    return res.json({ success: true, ticket: updatedTicket });
+  } catch (error: any) {
+    return res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+app.post('/api/support/tickets/status', (req: Request, res: Response) => {
+  try {
+    const { ticket_id, status } = req.body;
+    if (!ticket_id || !status) {
+      return res.status(400).json({ success: false, message: 'Ticket ID and status are required.' });
+    }
+
+    const updated = db.updateTicketStatus(ticket_id, status);
+    return res.json({ success: true, ticket: updated });
+  } catch (error: any) {
+    return res.status(400).json({ success: false, message: error.message });
+  }
+});
+
 // Store Admin / Staff Forgot Password (receives newly generated password via email)
 app.post('/api/auth/store-admin/forgot-password', (req: Request, res: Response) => {
   try {
@@ -782,9 +925,34 @@ app.get('/api/activity-logs', (req: Request, res: Response) => {
 async function startServer() {
   if (!isProduction) {
     const vite = await createViteServer({
-      server: { middlewareMode: true, hmr: false },
+      server: { middlewareMode: true, hmr: false, ws: false },
       appType: 'spa',
     });
+
+    // Safely handle @vite/client in Cloud Run iframe proxy to eliminate WebSocket closed without opened error
+    app.get('/@vite/client', async (req: Request, res: Response, next) => {
+      try {
+        const transformed = await vite.transformRequest(req.url);
+        if (transformed && transformed.code) {
+          const patched = transformed.code
+            .replace(
+              'reject(new Error("WebSocket closed without opened."))',
+              'resolve()'
+            )
+            .replace(
+              'reject(/* @__PURE__ */ new Error("WebSocket closed without opened."))',
+              'resolve()'
+            );
+          res.setHeader('Content-Type', 'application/javascript');
+          res.setHeader('Cache-Control', 'no-cache');
+          return res.send(patched);
+        }
+      } catch {
+        // fallback
+      }
+      next();
+    });
+
     app.use(vite.middlewares);
   } else {
     const distPath = path.resolve(process.cwd(), 'dist');

@@ -66,7 +66,37 @@ export default function App() {
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [isLoyaltyOpen, setIsLoyaltyOpen] = useState(false);
   const [isAccountOpen, setIsAccountOpen] = useState(false);
+  const [accountModalMode, setAccountModalMode] = useState<'profile' | 'signin' | 'register'>('profile');
   const [loyalty, setLoyalty] = useState<CustomerLoyalty | null>(null);
+
+  const handleOpenAccount = (mode: 'profile' | 'signin' | 'register' = 'profile') => {
+    setAccountModalMode(mode);
+    setIsAccountOpen(true);
+  };
+
+  const handleUserLogin = (user: User) => {
+    try {
+      localStorage.setItem('smartcart_active_user', JSON.stringify(user));
+    } catch {
+      // ignore
+    }
+    setCurrentUser(user);
+    if (user.role === 'SYSTEM_ADMIN') {
+      setCurrentView('system');
+    } else if (user.role === 'SUPERMARKET_ADMIN') {
+      setCurrentView('admin');
+      if (user.supermarket_id) {
+        const sm = supermarkets.find((s) => s.id === user.supermarket_id);
+        if (sm) setCurrentSupermarket(sm);
+      }
+    } else {
+      setCurrentView('customer');
+      if (currentSupermarket) {
+        initSession(user.id, currentSupermarket.id, user.name);
+      }
+      loadCustomerLoyalty(user.id);
+    }
+  };
 
   // Initial startup
   useEffect(() => {
@@ -295,7 +325,7 @@ export default function App() {
         estimatedTotal={session?.estimated_total || 0}
         onOpenSupermarketSelector={() => setIsSelectorOpen(true)}
         onOpenCart={() => setIsCartOpen(true)}
-        onOpenAccount={() => setIsAccountOpen(true)}
+        onOpenAccount={handleOpenAccount}
         onSignOut={handleSignOut}
         currentView={currentView}
         onNavigateView={(view) => setCurrentView(view)}
@@ -310,7 +340,7 @@ export default function App() {
               supermarket={currentSupermarket}
               session={session}
               loyalty={loyalty}
-              onOpenAccount={() => setIsAccountOpen(true)}
+              onOpenAccount={handleOpenAccount}
               onOpenScanner={() => setIsScannerOpen(true)}
               onOpenSearch={() => setIsSearchOpen(true)}
               onOpenCart={() => setIsCartOpen(true)}
@@ -357,10 +387,10 @@ export default function App() {
                   <span>Open System Admin</span>
                 </button>
                 <button
-                  onClick={() => setIsAccountOpen(true)}
+                  onClick={() => handleOpenAccount('signin')}
                   className="w-full sm:w-auto px-6 py-3 rounded-2xl bg-white hover:bg-slate-50 border border-slate-300 text-slate-800 font-bold text-sm shadow-sm transition cursor-pointer"
                 >
-                  Customer Account
+                  Customer Log In / Sign Up
                 </button>
               </div>
             </div>
@@ -484,6 +514,7 @@ export default function App() {
         session={session}
         supermarket={currentSupermarket}
         onFinishShopping={handleFinishShopping}
+        customerEmail={currentUser.email}
       />
 
       {currentSupermarket && (
@@ -516,13 +547,8 @@ export default function App() {
         isOpen={isAccountOpen}
         onClose={() => setIsAccountOpen(false)}
         currentUser={currentUser}
-        onUserChanged={(user) => {
-          setCurrentUser(user);
-          if (currentSupermarket) {
-            initSession(user.id, currentSupermarket.id, user.name);
-          }
-          loadCustomerLoyalty(user.id);
-        }}
+        initialMode={accountModalMode}
+        onUserChanged={handleUserLogin}
         currentSupermarket={currentSupermarket}
         loyalty={loyalty}
         onRefreshLoyalty={loadCustomerLoyalty}

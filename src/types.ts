@@ -157,3 +157,39 @@ export interface AdminDashboardStats {
   totalSessionsInStore: number;
 }
 
+export interface HelpTicketMessage {
+  id: string;
+  sender: 'CUSTOMER' | 'SYSTEM_ADMIN';
+  sender_name: string;
+  sender_email: string;
+  message: string;
+  timestamp: string;
+}
+
+export type TicketCategory =
+  | 'PRICE_DISPUTE'
+  | 'TECHNICAL_ISSUE'
+  | 'ACCOUNT_HELP'
+  | 'FEEDBACK'
+  | 'EMERGENCY';
+
+export type TicketStatus = 'OPEN' | 'IN_PROGRESS' | 'REPLIED' | 'RESOLVED';
+export type TicketPriority = 'LOW' | 'NORMAL' | 'HIGH' | 'URGENT';
+
+export interface SupportTicket {
+  id: string;
+  customer_id: string;
+  customer_name: string;
+  customer_email: string;
+  customer_phone?: string;
+  supermarket_id?: string;
+  supermarket_name?: string;
+  subject: string;
+  category: TicketCategory;
+  priority: TicketPriority;
+  status: TicketStatus;
+  messages: HelpTicketMessage[];
+  created_at: string;
+  updated_at: string;
+}
+

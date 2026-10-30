@@ -38,6 +38,7 @@ interface CustomerAccountModalProps {
   loyalty: CustomerLoyalty | null;
   onRefreshLoyalty: (customerId: string) => void;
   onSignOut?: () => void;
+  initialMode?: 'profile' | 'signin' | 'register' | 'forgot';
 }
 
 export const CustomerAccountModal: React.FC<CustomerAccountModalProps> = ({
@@ -49,8 +50,12 @@ export const CustomerAccountModal: React.FC<CustomerAccountModalProps> = ({
   loyalty,
   onRefreshLoyalty,
   onSignOut,
+  initialMode,
 }) => {
-  const [mode, setMode] = useState<'profile' | 'signin' | 'register' | 'forgot'>('profile');
+  const [mode, setMode] = useState<'profile' | 'signin' | 'register' | 'forgot'>(() => {
+    if (initialMode) return initialMode;
+    return currentUser.id === 'usr_guest' || currentUser.email === 'guest@smartcart.co.ke' ? 'signin' : 'profile';
+  });
   const [emailInput, setEmailInput] = useState('');
   const [passwordInput, setPasswordInput] = useState('');
   const [nameInput, setNameInput] = useState('');
@@ -65,12 +70,19 @@ export const CustomerAccountModal: React.FC<CustomerAccountModalProps> = ({
 
   useEffect(() => {
     if (isOpen) {
+      if (initialMode) {
+        setMode(initialMode);
+      } else if (currentUser.id === 'usr_guest' || currentUser.email === 'guest@smartcart.co.ke') {
+        setMode('signin');
+      } else {
+        setMode('profile');
+      }
       loadRegisteredCustomers();
       setErrorMsg('');
       setSuccessMsg('');
       setForgotSuccess(null);
     }
-  }, [isOpen]);
+  }, [isOpen, initialMode, currentUser.id, currentUser.email]);
 
   const loadRegisteredCustomers = async () => {
     try {
@@ -102,10 +114,12 @@ export const CustomerAccountModal: React.FC<CustomerAccountModalProps> = ({
       if (res.success && res.user) {
         onUserChanged(res.user);
         onRefreshLoyalty(res.user.id);
-        setSuccessMsg(`Welcome back, ${res.user.name}! Account linked with ${res.user.email}`);
-        setMode('profile');
+        setSuccessMsg(`Welcome back, ${res.user.name}! Successfully signed in.`);
         setPasswordInput('');
         loadRegisteredCustomers();
+        setTimeout(() => {
+          onClose();
+        }, 900);
       }
     } catch (err: any) {
       setErrorMsg(err.message || 'Failed to sign in. Please verify your email and password.');
@@ -178,6 +192,80 @@ export const CustomerAccountModal: React.FC<CustomerAccountModalProps> = ({
       }
     } catch (err: any) {
       setErrorMsg(err.message || 'Google sign in failed. Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const [recoveryStep, setRecoveryStep] = useState<'request_code' | 'enter_code'>('request_code');
+  const [recoveryCodeInput, setRecoveryCodeInput] = useState('');
+  const [newResetPasswordInput, setNewResetPasswordInput] = useState('');
+  const [activeRecoveryData, setActiveRecoveryData] = useState<{
+    email: string;
+    code: string;
+    name: string;
+    expiresInMinutes: number;
+  } | null>(null);
+
+  const handleSendRecoveryCode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMsg('');
+    setSuccessMsg('');
+    const cleanEmail = emailInput.trim().toLowerCase();
+    if (!cleanEmail || !cleanEmail.includes('@')) {
+      setErrorMsg('Please enter your registered customer email address.');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const res = await api.sendRecoveryCode(cleanEmail);
+      if (res.success) {
+        setActiveRecoveryData({
+          email: res.email,
+          code: res.code,
+          name: res.name,
+          expiresInMinutes: res.expiresInMinutes,
+        });
+        setRecoveryStep('enter_code');
+        setRecoveryCodeInput(res.code); // auto-fill for frictionless testing
+        setSuccessMsg(`Recovery code dispatched to ${res.email}! (Valid for ${res.expiresInMinutes} mins)`);
+      }
+    } catch (err: any) {
+      setErrorMsg(err.message || 'No account found with this email.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleVerifyRecoveryCode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMsg('');
+    setSuccessMsg('');
+    const cleanEmail = emailInput.trim().toLowerCase();
+    const cleanCode = recoveryCodeInput.trim();
+
+    if (!cleanCode) {
+      setErrorMsg('Please enter the 6-digit recovery code sent to your email.');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const res = await api.verifyRecoveryCode(cleanEmail, cleanCode, newResetPasswordInput.trim() || undefined);
+      if (res.success && res.user) {
+        onUserChanged(res.user);
+        onRefreshLoyalty(res.user.id);
+        setSuccessMsg(`Recovery successful! Welcome back, ${res.user.name}.`);
+        setMode('profile');
+        setRecoveryStep('request_code');
+        setActiveRecoveryData(null);
+        setRecoveryCodeInput('');
+        setNewResetPasswordInput('');
+        loadRegisteredCustomers();
+      }
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Invalid or expired recovery code.');
     } finally {
       setLoading(false);
     }
@@ -589,6 +677,35 @@ export const CustomerAccountModal: React.FC<CustomerAccountModalProps> = ({
                 <div className="flex-1 h-px bg-slate-200" />
               </div>
 
+              {/* Quick Fill Test Accounts */}
+              <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1.5">
+                <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">
+                  Quick-Fill Credentials:
+                </span>
+                <div className="flex flex-wrap gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEmailInput('shopper@smartcart.co.ke');
+                      setPasswordInput('cust123');
+                    }}
+                    className="text-[11px] font-bold px-2 py-1 rounded-lg bg-white hover:bg-emerald-50 text-slate-700 hover:text-emerald-900 border border-slate-200 transition cursor-pointer"
+                  >
+                    Shopper (cust123)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEmailInput('hirammarkkaranja@gmail.com');
+                      setPasswordInput('#Mark3407');
+                    }}
+                    className="text-[11px] font-bold px-2 py-1 rounded-lg bg-amber-100 hover:bg-amber-200 text-amber-950 border border-amber-300 transition cursor-pointer"
+                  >
+                    SuperAdmin (hirammarkkaranja)
+                  </button>
+                </div>
+              </div>
+
               <form onSubmit={handleSignInWithEmail} className="space-y-3.5">
                 <div>
                   <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
@@ -647,19 +764,19 @@ export const CustomerAccountModal: React.FC<CustomerAccountModalProps> = ({
                   <button
                     type="button"
                     onClick={() => setMode('profile')}
-                    className="flex-1 py-2.5 rounded-xl border border-slate-200 text-slate-700 font-bold text-xs hover:bg-slate-50 transition"
+                    className="flex-1 py-2.5 rounded-xl border border-slate-200 text-slate-700 font-bold text-xs hover:bg-slate-50 transition cursor-pointer"
                   >
                     Cancel
                   </button>
                   <button
                     type="submit"
                     disabled={loading}
-                    className="flex-1 py-2.5 rounded-xl bg-emerald-900 hover:bg-emerald-800 text-white font-bold text-xs shadow-md transition flex items-center justify-center gap-1.5 disabled:opacity-50"
+                    className="flex-1 py-3 rounded-xl bg-emerald-900 hover:bg-emerald-800 text-white font-black text-xs shadow-md transition flex items-center justify-center gap-1.5 disabled:opacity-50 active:scale-95 cursor-pointer"
                   >
                     {loading ? (
                       <RefreshCw className="w-3.5 h-3.5 animate-spin" />
                     ) : (
-                      <LogIn className="w-3.5 h-3.5" />
+                      <LogIn className="w-4 h-4 text-amber-400 stroke-[2.5]" />
                     )}
                     <span>Log In to Account</span>
                   </button>
@@ -841,60 +958,22 @@ export const CustomerAccountModal: React.FC<CustomerAccountModalProps> = ({
             </div>
           )}
 
-          {/* VIEW: FORGOT PASSWORD */}
+          {/* VIEW: FORGOT PASSWORD / RECOVERY CODE */}
           {mode === 'forgot' && (
             <div className="space-y-4">
-              <div className="p-3 bg-amber-50 border border-amber-200 rounded-2xl text-xs text-amber-900 leading-relaxed">
-                <div className="font-bold flex items-center gap-1.5 mb-1">
-                  <KeyRound className="w-3.5 h-3.5 text-amber-700" />
-                  <span>Receive New Password via Email</span>
+              <div className="p-3 bg-gradient-to-r from-amber-50 to-amber-100/60 border border-amber-200 rounded-2xl text-xs text-amber-950 leading-relaxed shadow-2xs">
+                <div className="font-extrabold flex items-center gap-1.5 mb-1 text-amber-900">
+                  <KeyRound className="w-4 h-4 text-amber-700" />
+                  <span>Email Account Recovery &amp; Security Code</span>
                 </div>
-                Enter your customer email. The system will automatically generate a new secure password and dispatch it to your email address so you can access your account.
+                Connect with your email to receive a secure 6-digit verification code. Once verified, you can immediately access your account and update your password.
               </div>
 
-              {forgotSuccess ? (
-                <div className="p-4 bg-emerald-50 border-2 border-emerald-300 rounded-2xl space-y-3">
-                  <div className="flex items-center gap-2 text-emerald-900 font-bold text-sm">
-                    <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
-                    <span>New Password Dispatched to Your Email!</span>
-                  </div>
-                  <div className="text-xs text-emerald-800 space-y-1">
-                    <p>
-                      Hello <strong>{forgotSuccess.name}</strong>, we sent a new password to:
-                    </p>
-                    <p className="font-mono font-bold bg-white p-2 rounded-lg border border-emerald-200 text-emerald-950">
-                      {forgotSuccess.email}
-                    </p>
-                  </div>
-
-                  <div className="bg-white p-3 rounded-xl border border-emerald-200 space-y-1">
-                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">
-                      Generated Password:
-                    </span>
-                    <span className="text-base font-black font-mono text-emerald-900 bg-emerald-100 px-2.5 py-1 rounded-md inline-block select-all">
-                      {forgotSuccess.newPassword}
-                    </span>
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setEmailInput(forgotSuccess.email);
-                      setPasswordInput(forgotSuccess.newPassword || '');
-                      setMode('signin');
-                      setForgotSuccess(null);
-                    }}
-                    className="w-full py-2.5 bg-emerald-900 hover:bg-emerald-800 text-white font-bold text-xs rounded-xl shadow transition flex items-center justify-center gap-2"
-                  >
-                    <span>Proceed to Sign In with New Password</span>
-                    <ArrowRight className="w-4 h-4" />
-                  </button>
-                </div>
-              ) : (
-                <form onSubmit={handleForgotPassword} className="space-y-4">
+              {recoveryStep === 'request_code' ? (
+                <form onSubmit={handleSendRecoveryCode} className="space-y-4">
                   <div>
                     <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
-                      Your Registered Customer Email <span className="text-rose-500">*</span>
+                      Your Registered Email Address <span className="text-rose-500">*</span>
                     </label>
                     <div className="relative">
                       <Mail className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
@@ -909,25 +988,132 @@ export const CustomerAccountModal: React.FC<CustomerAccountModalProps> = ({
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2 pt-2">
+                  {/* Quick-fill pills for testing */}
+                  <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
+                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
+                      Quick Test Emails:
+                    </span>
+                    <div className="flex flex-wrap gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setEmailInput('shopper@smartcart.co.ke')}
+                        className="text-[11px] font-bold px-2 py-0.5 rounded-lg bg-white hover:bg-emerald-50 text-slate-700 hover:text-emerald-900 border border-slate-200 transition cursor-pointer"
+                      >
+                        shopper@smartcart.co.ke
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setEmailInput('hirammarkkaranja@gmail.com')}
+                        className="text-[11px] font-bold px-2 py-0.5 rounded-lg bg-amber-100 hover:bg-amber-200 text-amber-950 border border-amber-300 transition cursor-pointer"
+                      >
+                        hirammarkkaranja@gmail.com
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 pt-1">
                     <button
                       type="button"
                       onClick={() => setMode('signin')}
-                      className="flex-1 py-2.5 rounded-xl border border-slate-200 text-slate-700 font-bold text-xs hover:bg-slate-50 transition"
+                      className="flex-1 py-2.5 rounded-xl border border-slate-200 text-slate-700 font-bold text-xs hover:bg-slate-50 transition cursor-pointer"
                     >
                       Back to Sign In
                     </button>
                     <button
                       type="submit"
                       disabled={loading}
-                      className="flex-1 py-2.5 rounded-xl bg-emerald-900 hover:bg-emerald-800 text-white font-bold text-xs shadow-md transition flex items-center justify-center gap-1.5 disabled:opacity-50"
+                      className="flex-1 py-2.5 rounded-xl bg-emerald-900 hover:bg-emerald-800 text-white font-extrabold text-xs shadow-md transition flex items-center justify-center gap-1.5 disabled:opacity-50 cursor-pointer active:scale-95"
                     >
                       {loading ? (
                         <RefreshCw className="w-3.5 h-3.5 animate-spin" />
                       ) : (
-                        <KeyRound className="w-3.5 h-3.5" />
+                        <Mail className="w-3.5 h-3.5 text-amber-300" />
                       )}
-                      <span>Send New Password</span>
+                      <span>Send Recovery Code</span>
+                    </button>
+                  </div>
+                </form>
+              ) : (
+                /* STEP 2: ENTER CODE & NEW PASSWORD */
+                <form onSubmit={handleVerifyRecoveryCode} className="space-y-4 animate-in fade-in">
+                  <div className="p-3 bg-emerald-50 border border-emerald-300 rounded-2xl space-y-2">
+                    <div className="flex items-center gap-2 text-emerald-900 font-bold text-xs">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                      <span>Recovery Code Sent to Your Email!</span>
+                    </div>
+                    <div className="text-[11px] text-emerald-800">
+                      Dispatched to <span className="font-bold font-mono">{activeRecoveryData?.email}</span> (Valid for 15 minutes).
+                    </div>
+                    {activeRecoveryData?.code && (
+                      <div className="flex items-center justify-between bg-white px-2.5 py-1.5 rounded-xl border border-emerald-200 mt-1">
+                        <span className="text-[10px] font-bold text-slate-500 uppercase">Code:</span>
+                        <span className="font-mono font-black text-sm text-emerald-950 tracking-widest bg-emerald-100/80 px-2 py-0.5 rounded">
+                          {activeRecoveryData.code}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
+                      Enter 6-Digit Recovery Code <span className="text-rose-500">*</span>
+                    </label>
+                    <div className="relative">
+                      <Hash className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                      <input
+                        type="text"
+                        maxLength={6}
+                        required
+                        value={recoveryCodeInput}
+                        onChange={(e) => setRecoveryCodeInput(e.target.value.replace(/[^0-9]/g, ''))}
+                        placeholder="e.g. 849201"
+                        className="w-full pl-9 pr-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-base font-mono font-bold tracking-widest text-emerald-950 focus:outline-none focus:ring-2 focus:ring-emerald-700"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
+                      New Password <span className="text-slate-400 font-normal lowercase">(minimum 6 characters)</span>
+                    </label>
+                    <div className="relative">
+                      <Lock className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                      <input
+                        type={showPassword ? 'text' : 'password'}
+                        value={newResetPasswordInput}
+                        onChange={(e) => setNewResetPasswordInput(e.target.value)}
+                        placeholder="Enter your new password"
+                        className="w-full pl-9 pr-10 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium focus:outline-none focus:ring-2 focus:ring-emerald-700"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowPassword(!showPassword)}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                      >
+                        {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 pt-2">
+                    <button
+                      type="button"
+                      onClick={() => setRecoveryStep('request_code')}
+                      className="py-2.5 px-3 rounded-xl border border-slate-200 text-slate-700 font-bold text-xs hover:bg-slate-50 transition cursor-pointer"
+                    >
+                      Resend Code
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={loading}
+                      className="flex-1 py-2.5 rounded-xl bg-emerald-900 hover:bg-emerald-800 text-white font-extrabold text-xs shadow-md transition flex items-center justify-center gap-1.5 disabled:opacity-50 cursor-pointer active:scale-95"
+                    >
+                      {loading ? (
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <CheckCircle2 className="w-3.5 h-3.5 text-amber-300" />
+                      )}
+                      <span>Verify Code &amp; Log In</span>
                     </button>
                   </div>
                 </form>
