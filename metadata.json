@@ -1,0 +1,9 @@
+{
+  "name": "Smart Cart",
+  "description": "Mobile-first PWA for multi-chain supermarket shoppers to scan barcodes, check prices, and track running totals before checkout.",
+  "requestFramePermissions": [
+    "camera",
+    "geolocation"
+  ],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
