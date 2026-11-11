@@ -2551,6 +2551,19 @@ app.get('/api/audit-logs', requireAuth, (req, res) => {
 
 async function startServer() {
   const isProd = process.env.NODE_ENV === 'production';
+
+  // Explicitly serve /public assets (sw.js, offline.html, manifest.json, icons)
+  app.use(
+    express.static(path.resolve(process.cwd(), 'public'), {
+      setHeaders: (res, filePath) => {
+        if (filePath.endsWith('sw.js')) {
+          res.setHeader('Service-Worker-Allowed', '/');
+          res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        }
+      },
+    })
+  );
+
   if (isProd) {
     app.use(express.static(path.resolve(process.cwd(), 'dist')));
     app.get('*', (req, res) => {

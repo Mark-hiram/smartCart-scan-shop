@@ -24,6 +24,8 @@ function AppContent() {
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [currentPath, setCurrentPath] = useState<string>(() => window.location.pathname);
 
+  const [isOnline, setIsOnline] = useState<boolean>(() => (typeof navigator !== 'undefined' ? navigator.onLine : true));
+
   // Sync route path on popstate
   useEffect(() => {
     const handleLocationChange = () => {
@@ -33,9 +35,23 @@ function AppContent() {
     return () => window.removeEventListener('popstate', handleLocationChange);
   }, []);
 
-  // Register Service Worker for PWA
+  // Monitor network connectivity status
   useEffect(() => {
-    if ('serviceWorker' in navigator && process.env.NODE_ENV !== 'development') {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  // Register Service Worker for PWA (browser-safe, no process.env)
+  useEffect(() => {
+    if ('serviceWorker' in navigator) {
       navigator.serviceWorker
         .register('/sw.js')
         .then((reg) => console.log('Service Worker registered with scope:', reg.scope))
@@ -150,6 +166,14 @@ function AppContent() {
         onSwitchPortal={setActivePortal}
         onClose={() => setIsAuthModalOpen(false)}
       />
+
+      {/* Real-Time Offline Mode Indicator Banner */}
+      {!isOnline && (
+        <div className="fixed bottom-4 left-4 z-50 flex items-center gap-2 rounded-xl bg-amber-500 text-white px-3.5 py-2 text-xs font-semibold shadow-lg shadow-amber-500/20 border border-amber-400">
+          <span className="w-2 h-2 rounded-full bg-white animate-pulse" />
+          <span>Offline Mode — Working from local branch cache</span>
+        </div>
+      )}
     </div>
   );
 }

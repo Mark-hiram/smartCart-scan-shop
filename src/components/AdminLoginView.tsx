@@ -29,8 +29,8 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({ onSuccess, initi
   const { t } = useTranslation();
 
   const [mode, setMode] = useState<'setup' | 'login' | 'forgot' | 'reset-token'>('login');
-  const [email, setEmail] = useState('');
-  const [name, setName] = useState('');
+  const [email, setEmail] = useState('hirammarkkaranja@gmail.com');
+  const [name, setName] = useState('Hiram Karanja');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
 
