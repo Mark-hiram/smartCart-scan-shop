@@ -19,12 +19,22 @@ import {
 } from '../types';
 import { calculateEAN13CheckDigit, calculateUPCACheckDigit, calculateEAN8CheckDigit, validateBarcode } from '../utils/barcode';
 
-const DB_FILE = path.resolve(process.cwd(), 'smartcart_db.json');
+const DB_FILE = process.env.DB_PATH ? path.resolve(process.env.DB_PATH) : path.resolve(process.cwd(), 'smartcart_db.json');
+
+export interface ResetCodeRecord {
+  code?: string;
+  token?: string;
+  identifier?: string;
+  email?: string;
+  expiresAt: number;
+  failedAttempts?: number;
+  used?: boolean;
+}
 
 export interface DatabaseSchema {
   users: User[];
   passwords: Record<string, { hash: string; salt: string }>; // userId -> hash, salt
-  resetCodes: Record<string, { code: string; expiresAt: number }>; // identifier -> code, expiry
+  resetCodes: Record<string, ResetCodeRecord>; // identifier/tokenKey -> reset code record
   supermarkets: Supermarket[];
   branches: Branch[];
   products: Product[];
@@ -144,113 +154,118 @@ export function createInitialDatabase(): DatabaseSchema {
     },
   ];
 
-  // Users with diverse Staff Permission Presets (Note: Exactly ONE System Admin is created via First-Time Setup)
-  const users: User[] = [
-    {
-      id: 'usr_owner_naivas',
-      name: 'Grace Wambui (Naivas Owner)',
-      email: 'owner@naivas.com',
-      phone: '+254711111111',
-      role: 'owner',
-      supermarketId: 'sm_naivas',
-      status: 'active',
-      failedAttempts: 0,
-      lockedUntil: null,
-      createdAt: now,
-    },
-    // Preset 1: Cashier (only verifyCarts)
-    {
-      id: 'usr_staff_westlands',
-      name: 'Kevin Omondi (Cashier Preset)',
-      email: 'staff.westlands@naivas.com',
-      phone: '+254722222222',
-      role: 'staff',
-      supermarketId: 'sm_naivas',
-      branchId: 'br_westlands',
-      permissions: { ...STAFF_PRESETS.cashier },
-      status: 'active',
-      failedAttempts: 0,
-      lockedUntil: null,
-      createdAt: now,
-    },
-    // Preset 2: Stock Clerk (viewStock, editStock, viewPrices)
-    {
-      id: 'usr_staff_kilimani',
-      name: 'Alice Chebet (Stock Clerk Preset)',
-      email: 'staff.kilimani@naivas.com',
-      phone: '+254722333444',
-      role: 'staff',
-      supermarketId: 'sm_naivas',
-      branchId: 'br_kilimani',
-      permissions: { ...STAFF_PRESETS.stock_clerk },
-      status: 'active',
-      failedAttempts: 0,
-      lockedUntil: null,
-      createdAt: now,
-    },
-    // Preset 3: Branch Manager (all permissions for that branch)
-    {
-      id: 'usr_manager_westlands',
-      name: 'James Mwangi (Branch Manager Preset)',
-      email: 'manager.westlands@naivas.com',
-      phone: '+254722555666',
-      role: 'staff',
-      supermarketId: 'sm_naivas',
-      branchId: 'br_westlands',
-      permissions: { ...STAFF_PRESETS.branch_manager },
-      status: 'active',
-      failedAttempts: 0,
-      lockedUntil: null,
-      createdAt: now,
-    },
-    {
-      id: 'usr_owner_quickmart',
-      name: 'Peter Kiprono (Quickmart Owner)',
-      email: 'owner@quickmart.com',
-      phone: '+254733333333',
-      role: 'owner',
-      supermarketId: 'sm_quickmart',
-      status: 'active',
-      failedAttempts: 0,
-      lockedUntil: null,
-      createdAt: now,
-    },
-    {
-      id: 'usr_staff_cbd',
-      name: 'Sarah Achieng (CBD Cashier)',
-      email: 'staff.cbd@quickmart.com',
-      phone: '+254744444444',
-      role: 'staff',
-      supermarketId: 'sm_quickmart',
-      branchId: 'br_cbd',
-      permissions: { ...STAFF_PRESETS.cashier },
-      status: 'active',
-      failedAttempts: 0,
-      lockedUntil: null,
-      createdAt: now,
-    },
-    {
-      id: 'usr_shopper',
-      name: 'Brian Mwangi (Shopper)',
-      email: 'shopper@gmail.com',
-      phone: '+254755555555',
-      role: 'shopper',
-      status: 'active',
-      failedAttempts: 0,
-      lockedUntil: null,
-      createdAt: now,
-    },
-  ];
+  // Users and passwords: ONLY seed demo accounts when DEMO_MODE=true
+  const isDemoMode = process.env.DEMO_MODE === 'true';
+  const users: User[] = isDemoMode
+    ? [
+        {
+          id: 'usr_owner_naivas',
+          name: 'Grace Wambui (Naivas Owner)',
+          email: 'owner@naivas.com',
+          phone: '+254711111111',
+          role: 'owner',
+          supermarketId: 'sm_naivas',
+          status: 'active',
+          failedAttempts: 0,
+          lockedUntil: null,
+          createdAt: now,
+        },
+        // Preset 1: Cashier (only verifyCarts)
+        {
+          id: 'usr_staff_westlands',
+          name: 'Kevin Omondi (Cashier Preset)',
+          email: 'staff.westlands@naivas.com',
+          phone: '+254722222222',
+          role: 'staff',
+          supermarketId: 'sm_naivas',
+          branchId: 'br_westlands',
+          permissions: { ...STAFF_PRESETS.cashier },
+          status: 'active',
+          failedAttempts: 0,
+          lockedUntil: null,
+          createdAt: now,
+        },
+        // Preset 2: Stock Clerk (viewStock, editStock, viewPrices)
+        {
+          id: 'usr_staff_kilimani',
+          name: 'Alice Chebet (Stock Clerk Preset)',
+          email: 'staff.kilimani@naivas.com',
+          phone: '+254722333444',
+          role: 'staff',
+          supermarketId: 'sm_naivas',
+          branchId: 'br_kilimani',
+          permissions: { ...STAFF_PRESETS.stock_clerk },
+          status: 'active',
+          failedAttempts: 0,
+          lockedUntil: null,
+          createdAt: now,
+        },
+        // Preset 3: Branch Manager (all permissions for that branch)
+        {
+          id: 'usr_manager_westlands',
+          name: 'James Mwangi (Branch Manager Preset)',
+          email: 'manager.westlands@naivas.com',
+          phone: '+254722555666',
+          role: 'staff',
+          supermarketId: 'sm_naivas',
+          branchId: 'br_westlands',
+          permissions: { ...STAFF_PRESETS.branch_manager },
+          status: 'active',
+          failedAttempts: 0,
+          lockedUntil: null,
+          createdAt: now,
+        },
+        {
+          id: 'usr_owner_quickmart',
+          name: 'Peter Kiprono (Quickmart Owner)',
+          email: 'owner@quickmart.com',
+          phone: '+254733333333',
+          role: 'owner',
+          supermarketId: 'sm_quickmart',
+          status: 'active',
+          failedAttempts: 0,
+          lockedUntil: null,
+          createdAt: now,
+        },
+        {
+          id: 'usr_staff_cbd',
+          name: 'Sarah Achieng (CBD Cashier)',
+          email: 'staff.cbd@quickmart.com',
+          phone: '+254744444444',
+          role: 'staff',
+          supermarketId: 'sm_quickmart',
+          branchId: 'br_cbd',
+          permissions: { ...STAFF_PRESETS.cashier },
+          status: 'active',
+          failedAttempts: 0,
+          lockedUntil: null,
+          createdAt: now,
+        },
+        {
+          id: 'usr_shopper',
+          name: 'Brian Mwangi (Shopper)',
+          email: 'shopper@gmail.com',
+          phone: '+254755555555',
+          role: 'shopper',
+          status: 'active',
+          failedAttempts: 0,
+          lockedUntil: null,
+          createdAt: now,
+        },
+      ]
+    : [];
 
-  const passwords: Record<string, { hash: string; salt: string }> = {
-    usr_owner_naivas: hashPassword('Owner123!'),
-    usr_staff_westlands: hashPassword('Staff123!'),
-    usr_staff_kilimani: hashPassword('Staff123!'),
-    usr_manager_westlands: hashPassword('Staff123!'),
-    usr_owner_quickmart: hashPassword('Owner123!'),
-    usr_staff_cbd: hashPassword('Staff123!'),
-    usr_shopper: hashPassword('Shopper123!'),
-  };
+  const passwords: Record<string, { hash: string; salt: string }> = isDemoMode
+    ? {
+        usr_owner_naivas: hashPassword('Owner123!'),
+        usr_staff_westlands: hashPassword('Staff123!'),
+        usr_staff_kilimani: hashPassword('Staff123!'),
+        usr_manager_westlands: hashPassword('Staff123!'),
+        usr_owner_quickmart: hashPassword('Owner123!'),
+        usr_staff_cbd: hashPassword('Staff123!'),
+        usr_shopper: hashPassword('Shopper123!'),
+      }
+    : {};
 
   // Seed 30 authentic supermarket products with discrete aisle, shelf, and aisleShelf
   const rawProducts = [
@@ -856,6 +871,32 @@ export class Database {
           needsSave = true;
         }
 
+        // When DEMO_MODE is not explicitly true, purge pre-seeded demo accounts
+        if (process.env.DEMO_MODE !== 'true') {
+          const demoUserIds = [
+            'usr_owner_naivas',
+            'usr_staff_westlands',
+            'usr_staff_kilimani',
+            'usr_manager_westlands',
+            'usr_owner_quickmart',
+            'usr_staff_cbd',
+            'usr_shopper',
+          ];
+          if (parsed.users) {
+            const countBefore = parsed.users.length;
+            parsed.users = parsed.users.filter((u: any) => !demoUserIds.includes(u.id));
+            if (parsed.users.length !== countBefore) needsSave = true;
+          }
+          if (parsed.passwords) {
+            demoUserIds.forEach((id) => {
+              if (parsed.passwords[id]) {
+                delete parsed.passwords[id];
+                needsSave = true;
+              }
+            });
+          }
+        }
+
         if (needsSave) {
           this.saveDirect(parsed);
         }
@@ -871,9 +912,15 @@ export class Database {
 
   private saveDirect(data: DatabaseSchema) {
     try {
-      fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2), 'utf-8');
+      const dir = path.dirname(DB_FILE);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      const tempFile = `${DB_FILE}.${Date.now()}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+      fs.writeFileSync(tempFile, JSON.stringify(data, null, 2), 'utf-8');
+      fs.renameSync(tempFile, DB_FILE);
     } catch (e) {
-      console.error('Failed to save DB file:', e);
+      console.error('Failed to save DB file atomically:', e);
     }
   }
 

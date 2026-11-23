@@ -12,7 +12,7 @@ interface AuthModalProps {
 }
 
 export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, portal = 'shopper', onSwitchPortal }) => {
-  const { login, register, quickLogin } = useAuth();
+  const { login, register, quickLogin, demoMode } = useAuth();
   const { t } = useTranslation();
 
   const [activePortalTab, setActivePortalTab] = useState<PortalType>(portal);
@@ -44,7 +44,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, portal = 
     e.preventDefault();
     setErrorMsg(null);
     setIsSubmitting(true);
-    const res = await login(identifier, password);
+    const res = await login(identifier, password, 'shopper');
     setIsSubmitting(false);
 
     if (res.success) {
@@ -213,75 +213,60 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, portal = 
             </div>
           )}
 
-          {/* Quick Demo Accounts Box relevant to active portal */}
-          <div className="p-3 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700">
-            <span className="text-[11px] font-bold text-slate-600 dark:text-slate-300 block mb-2">
-              ⚡ {t.demoAccounts} (One-tap test login):
-            </span>
+          {/* Quick Demo Accounts Box relevant to active portal (Only when demoMode is active) */}
+          {demoMode && (
+            <div className="p-3 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700">
+              <span className="text-[11px] font-bold text-slate-600 dark:text-slate-300 block mb-2">
+                ⚡ {t.demoAccounts} (One-tap test login):
+              </span>
 
-            {activePortalTab === 'shopper' && (
-              <button
-                type="button"
-                onClick={() => handleDemoClick('shopper')}
-                className="w-full py-2 px-3 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:border-emerald-500 text-left text-xs font-semibold text-slate-800 dark:text-slate-200 active:scale-95 transition flex items-center justify-between"
-              >
-                <div className="flex items-center gap-2">
-                  <ShoppingCart className="w-4 h-4 text-emerald-600" />
-                  <span>🛒 Shopper (Mary Wanjiku)</span>
-                </div>
-                <span className="text-[10px] text-emerald-600 font-bold">Fast In-Store Scan</span>
-              </button>
-            )}
-
-            {activePortalTab === 'staff' && (
-              <div className="space-y-1.5">
+              {activePortalTab === 'shopper' && (
                 <button
                   type="button"
-                  onClick={() => handleDemoClick('staff')}
-                  className="w-full py-2 px-3 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:border-blue-500 text-left text-xs font-semibold text-slate-800 dark:text-slate-200 active:scale-95 transition flex items-center justify-between"
+                  onClick={() => handleDemoClick('shopper')}
+                  className="w-full py-2 px-3 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:border-emerald-500 text-left text-xs font-semibold text-slate-800 dark:text-slate-200 active:scale-95 transition flex items-center justify-between"
                 >
                   <div className="flex items-center gap-2">
-                    <Store className="w-4 h-4 text-blue-600" />
-                    <span>🏷️ Cashier (Westlands Branch)</span>
+                    <ShoppingCart className="w-4 h-4 text-emerald-600" />
+                    <span>🛒 Shopper (Mary Wanjiku)</span>
                   </div>
-                  <span className="text-[10px] text-blue-600 font-bold">Till Verification</span>
+                  <span className="text-[10px] text-emerald-600 font-bold">Fast In-Store Scan</span>
                 </button>
-              </div>
-            )}
+              )}
 
-            {activePortalTab === 'management' && (
-              <div className="space-y-1.5">
-                <button
-                  type="button"
-                  onClick={() => handleDemoClick('owner')}
-                  className="w-full py-1.5 px-2.5 rounded-lg bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:border-indigo-500 text-left text-xs font-semibold text-slate-800 dark:text-slate-200 active:scale-95 transition flex items-center justify-between"
-                >
-                  <div className="flex items-center gap-1.5">
-                    <Building2 className="w-3.5 h-3.5 text-indigo-600" />
-                    <span>🏢 Chain Owner Demo</span>
-                  </div>
-                  <span className="text-[10px] text-indigo-600 font-bold">Naivas Chain</span>
-                </button>
+              {activePortalTab === 'staff' && (
+                <div className="space-y-1.5">
+                  <button
+                    type="button"
+                    onClick={() => handleDemoClick('staff')}
+                    className="w-full py-2 px-3 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:border-blue-500 text-left text-xs font-semibold text-slate-800 dark:text-slate-200 active:scale-95 transition flex items-center justify-between"
+                  >
+                    <div className="flex items-center gap-2">
+                      <Store className="w-4 h-4 text-blue-600" />
+                      <span>🏷️ Cashier (Westlands Branch)</span>
+                    </div>
+                    <span className="text-[10px] text-blue-600 font-bold">Till Verification</span>
+                  </button>
+                </div>
+              )}
 
-                <a
-                  href="/admin/login"
-                  onClick={(e) => {
-                    e.preventDefault();
-                    onClose();
-                    window.history.pushState({}, '', '/admin/login');
-                    window.dispatchEvent(new PopStateEvent('popstate'));
-                  }}
-                  className="w-full py-1.5 px-2.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold active:scale-95 transition flex items-center justify-between shadow-xs cursor-pointer"
-                >
-                  <div className="flex items-center gap-1.5">
-                    <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-                    <span>System Admin Portal (/admin/login)</span>
-                  </div>
-                  <span className="text-[10px] text-emerald-400 font-bold">1 Admin Policy →</span>
-                </a>
-              </div>
-            )}
-          </div>
+              {activePortalTab === 'management' && (
+                <div className="space-y-1.5">
+                  <button
+                    type="button"
+                    onClick={() => handleDemoClick('owner')}
+                    className="w-full py-1.5 px-2.5 rounded-lg bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:border-indigo-500 text-left text-xs font-semibold text-slate-800 dark:text-slate-200 active:scale-95 transition flex items-center justify-between"
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <Building2 className="w-3.5 h-3.5 text-indigo-600" />
+                      <span>🏢 Chain Owner Demo</span>
+                    </div>
+                    <span className="text-[10px] text-indigo-600 font-bold">Naivas Chain</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Mode 1: Login Form (Dual field: Email or Phone in same input) */}
           {mode === 'login' && (

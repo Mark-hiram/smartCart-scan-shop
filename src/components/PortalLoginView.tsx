@@ -31,10 +31,10 @@ export const PortalLoginView: React.FC<PortalLoginViewProps> = ({
   onSwitchPortal,
   onContinueAsGuest,
 }) => {
-  const { login, register, quickLogin } = useAuth();
+  const { login, register, quickLogin, demoMode } = useAuth();
   const { t } = useTranslation();
 
-  const [mode, setMode] = useState<'login' | 'register' | 'forgot'>('login');
+  const [mode, setMode] = useState<'login' | 'register' | 'forgot' | 'apply'>('login');
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
@@ -42,6 +42,17 @@ export const PortalLoginView: React.FC<PortalLoginViewProps> = ({
   const [email, setEmail] = useState('');
   const [resetCode, setResetCode] = useState('');
   const [newPassword, setNewPassword] = useState('');
+
+  // Supermarket application state
+  const [chainName, setChainName] = useState('');
+  const [applicantName, setApplicantName] = useState('');
+  const [contactEmail, setContactEmail] = useState('');
+  const [contactPhone, setContactPhone] = useState('');
+  const [city, setCity] = useState('');
+  const [firstBranchName, setFirstBranchName] = useState('');
+  const [initialProductCount, setInitialProductCount] = useState('');
+  const [notes, setNotes] = useState('');
+  const [ownerPassword, setOwnerPassword] = useState('');
 
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
@@ -86,11 +97,46 @@ export const PortalLoginView: React.FC<PortalLoginViewProps> = ({
     e.preventDefault();
     setErrorMsg(null);
     setIsSubmitting(true);
-    const res = await login(identifier, password);
+    const res = await login(identifier, password, portal);
     setIsSubmitting(false);
 
     if (!res.success) {
       setErrorMsg(res.error || 'Authentication failed');
+    }
+  };
+
+  const handleApplySupermarket = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMsg(null);
+    setSuccessMsg(null);
+    setIsSubmitting(true);
+    try {
+      const res = await fetch('/api/supermarket/apply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chainName,
+          contactEmail,
+          contactPhone,
+          city,
+          firstBranchName,
+          initialProductCount: initialProductCount ? parseInt(initialProductCount) : 0,
+          notes,
+          password: ownerPassword,
+          ownerName: applicantName,
+        }),
+      });
+      const data = await res.json();
+      setIsSubmitting(false);
+      if (res.ok) {
+        setSuccessMsg(data.message || 'Application submitted. The Smart Cart team will review your application. Once approved, you will be able to sign in.');
+        setMode('login');
+      } else {
+        setErrorMsg(data.error || 'Failed to submit application.');
+      }
+    } catch (e: any) {
+      setIsSubmitting(false);
+      setErrorMsg(e.message || 'Network error.');
     }
   };
 
@@ -244,78 +290,56 @@ export const PortalLoginView: React.FC<PortalLoginViewProps> = ({
             </div>
           )}
 
-          {/* Dedicated Quick Demo Logins for THIS Portal */}
-          <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 space-y-2">
-            <span className="text-[11px] font-bold text-slate-700 dark:text-slate-300 block">
-              ⚡ Quick Demo Sign-In ({portalMeta.title}):
-            </span>
+          {/* Dedicated Quick Demo Logins for THIS Portal (Only when demoMode is active) */}
+          {demoMode && (
+            <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 space-y-2">
+              <span className="text-[11px] font-bold text-slate-700 dark:text-slate-300 block">
+                ⚡ Quick Demo Sign-In ({portalMeta.title}):
+              </span>
 
-            {portal === 'shopper' && (
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={() => quickLogin('shopper')}
-                  className="flex-1 py-2 px-3 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:border-emerald-500 text-xs font-semibold text-slate-800 dark:text-slate-200 active:scale-95 transition flex items-center justify-center gap-1.5 shadow-xs"
-                >
-                  <ShoppingCart className="w-3.5 h-3.5 text-emerald-600" />
-                  <span>Demo Shopper (Mary Wanjiku)</span>
-                </button>
-              </div>
-            )}
+              {portal === 'shopper' && (
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => quickLogin('shopper')}
+                    className="flex-1 py-2 px-3 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:border-emerald-500 text-xs font-semibold text-slate-800 dark:text-slate-200 active:scale-95 transition flex items-center justify-center gap-1.5 shadow-xs"
+                  >
+                    <ShoppingCart className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>Demo Shopper (Mary Wanjiku)</span>
+                  </button>
+                </div>
+              )}
 
-            {portal === 'staff' && (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={() => quickLogin('staff')}
-                  className="py-2 px-3 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:border-blue-500 text-xs font-semibold text-slate-800 dark:text-slate-200 active:scale-95 transition flex items-center gap-1.5 shadow-xs"
-                >
-                  <Tag className="w-3.5 h-3.5 text-blue-600" />
-                  <span>Cashier / Staff Demo</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => login('alice.stock@naivas.com', 'Staff123!')}
-                  className="py-2 px-3 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:border-blue-500 text-xs font-semibold text-slate-800 dark:text-slate-200 active:scale-95 transition flex items-center gap-1.5 shadow-xs"
-                >
-                  <Users className="w-3.5 h-3.5 text-blue-600" />
-                  <span>Stock Clerk Preset</span>
-                </button>
-              </div>
-            )}
+              {portal === 'staff' && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => quickLogin('staff')}
+                    className="py-2 px-3 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:border-blue-500 text-xs font-semibold text-slate-800 dark:text-slate-200 active:scale-95 transition flex items-center gap-1.5 shadow-xs"
+                  >
+                    <Tag className="w-3.5 h-3.5 text-blue-600" />
+                    <span>Cashier / Staff Demo</span>
+                  </button>
+                </div>
+              )}
 
-            {portal === 'management' && (
-              <div className="space-y-2">
-                <button
-                  type="button"
-                  onClick={() => quickLogin('owner')}
-                  className="w-full py-2 px-3 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:border-indigo-500 text-xs font-semibold text-slate-800 dark:text-slate-200 active:scale-95 transition flex items-center justify-between shadow-xs"
-                >
-                  <div className="flex items-center gap-2">
-                    <Building2 className="w-4 h-4 text-indigo-600" />
-                    <span>Chain Owner Demo (Grace Wambui)</span>
-                  </div>
-                  <span className="text-[10px] text-indigo-600 font-bold">Naivas Chain</span>
-                </button>
-
-                <a
-                  href="/admin/login"
-                  onClick={(e) => {
-                    e.preventDefault();
-                    window.history.pushState({}, '', '/admin/login');
-                    window.dispatchEvent(new PopStateEvent('popstate'));
-                  }}
-                  className="w-full py-2 px-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold active:scale-95 transition flex items-center justify-between shadow-xs cursor-pointer"
-                >
-                  <div className="flex items-center gap-2">
-                    <ShieldCheck className="w-4 h-4 text-emerald-400" />
-                    <span>System Admin Portal (/admin/login)</span>
-                  </div>
-                  <ArrowRight className="w-3.5 h-3.5 text-emerald-400" />
-                </a>
-              </div>
-            )}
-          </div>
+              {portal === 'management' && (
+                <div className="space-y-2">
+                  <button
+                    type="button"
+                    onClick={() => quickLogin('owner')}
+                    className="w-full py-2 px-3 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:border-indigo-500 text-xs font-semibold text-slate-800 dark:text-slate-200 active:scale-95 transition flex items-center justify-between shadow-xs"
+                  >
+                    <div className="flex items-center gap-2">
+                      <Building2 className="w-4 h-4 text-indigo-600" />
+                      <span>Chain Owner Demo (Grace Wambui)</span>
+                    </div>
+                    <span className="text-[10px] text-indigo-600 font-bold">Naivas Chain</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Mode 1: Login Form (Supports Email or Phone) */}
           {mode === 'login' && (
@@ -415,11 +439,28 @@ export const PortalLoginView: React.FC<PortalLoginViewProps> = ({
                     </button>
                   )}
                 </div>
-              ) : (
-                <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/40 text-[11px] text-slate-500 text-center">
-                  {portal === 'staff'
-                    ? 'Staff accounts are issued by your Supermarket Chain Owner.'
-                    : 'Corporate access is restricted to verified Chain Owners & System Admins.'}
+                <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/40 text-[11px] text-slate-500 text-center space-y-2">
+                  <p>
+                    {portal === 'staff'
+                      ? 'Staff accounts are issued by your Supermarket Chain Owner.'
+                      : 'Corporate access is restricted to verified Chain Owners.'}
+                  </p>
+                  {portal === 'management' && (
+                    <div className="pt-2 border-t border-slate-200 dark:border-slate-700">
+                      <span>Want to bring your store chain to Smart Cart? </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setMode('apply');
+                          setErrorMsg(null);
+                          setSuccessMsg(null);
+                        }}
+                        className="font-bold text-indigo-600 dark:text-indigo-400 hover:underline"
+                      >
+                        Register a supermarket
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
             </form>
@@ -577,6 +618,172 @@ export const PortalLoginView: React.FC<PortalLoginViewProps> = ({
                     className="text-xs text-slate-500 hover:underline"
                   >
                     Back to Login
+                  </button>
+                </div>
+              </form>
+            </div>
+          )}
+
+          {/* Mode 4: Supermarket Chain Application Form */}
+          {mode === 'apply' && portal === 'management' && (
+            <div className="space-y-4">
+              <div className="p-3.5 rounded-2xl bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800 text-xs text-indigo-900 dark:text-indigo-200">
+                <div className="flex items-center gap-2 font-bold mb-1">
+                  <Building2 className="w-4 h-4 text-indigo-600" />
+                  <span>Register a Supermarket Chain</span>
+                </div>
+                <p className="text-[11px] text-slate-600 dark:text-slate-300">
+                  Submit your chain details for administrative verification. Once approved by the Smart Cart platform admin, you will receive full owner access to configure your branches, staff, catalog, and promotions.
+                </p>
+              </div>
+
+              <form onSubmit={handleApplySupermarket} className="space-y-3">
+                <div>
+                  <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
+                    Supermarket Chain Name *
+                  </label>
+                  <input
+                    type="text"
+                    value={chainName}
+                    onChange={(e) => setChainName(e.target.value)}
+                    placeholder="e.g. QuickMart Supermarkets"
+                    required
+                    className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
+                      Contact Email *
+                    </label>
+                    <input
+                      type="email"
+                      value={contactEmail}
+                      onChange={(e) => setContactEmail(e.target.value)}
+                      placeholder="owner@quickmart.com"
+                      required
+                      className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
+                      Contact Phone *
+                    </label>
+                    <input
+                      type="tel"
+                      value={contactPhone}
+                      onChange={(e) => setContactPhone(e.target.value)}
+                      placeholder="+254712345678"
+                      required
+                      className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
+                      City / Region of 1st Branch *
+                    </label>
+                    <input
+                      type="text"
+                      value={city}
+                      onChange={(e) => setCity(e.target.value)}
+                      placeholder="e.g. Nairobi, Kilimani"
+                      required
+                      className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
+                      First Branch Name (Optional)
+                    </label>
+                    <input
+                      type="text"
+                      value={firstBranchName}
+                      onChange={(e) => setFirstBranchName(e.target.value)}
+                      placeholder="e.g. Kilimani Junction Branch"
+                      className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
+                      Owner Account Name (Optional)
+                    </label>
+                    <input
+                      type="text"
+                      value={applicantName}
+                      onChange={(e) => setApplicantName(e.target.value)}
+                      placeholder="e.g. John Kamau"
+                      className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
+                      Initial Product Count (Optional)
+                    </label>
+                    <input
+                      type="number"
+                      value={initialProductCount}
+                      onChange={(e) => setInitialProductCount(e.target.value)}
+                      placeholder="e.g. 500"
+                      className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
+                    Owner Password * (min 8 characters)
+                  </label>
+                  <input
+                    type="password"
+                    value={ownerPassword}
+                    onChange={(e) => setOwnerPassword(e.target.value)}
+                    placeholder="Create a secure owner password"
+                    required
+                    minLength={8}
+                    className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
+                    Additional Notes (Optional)
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={notes}
+                    onChange={(e) => setNotes(e.target.value)}
+                    placeholder="Provide any details about your store POS or inventory..."
+                    className="w-full p-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={isSubmitting}
+                  className="w-full h-11 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs shadow-md transition active:scale-98 flex items-center justify-center gap-2"
+                >
+                  <span>{isSubmitting ? 'Submitting Application...' : 'Submit Supermarket Application'}</span>
+                  <ArrowRight className="w-4 h-4" />
+                </button>
+
+                <div className="text-center pt-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMode('login');
+                      setErrorMsg(null);
+                      setSuccessMsg(null);
+                    }}
+                    className="text-xs text-slate-500 hover:underline"
+                  >
+                    Already have an account? Back to Sign In
                   </button>
                 </div>
               </form>

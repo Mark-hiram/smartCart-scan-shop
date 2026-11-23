@@ -66,7 +66,12 @@ export interface Supermarket {
   code: string;
   contactEmail: string;
   contactPhone: string;
-  status: 'active' | 'suspended';
+  status: 'active' | 'suspended' | 'pending';
+  city?: string;
+  notes?: string;
+  firstBranchName?: string;
+  initialProductCount?: number;
+  applicationDate?: string;
   logo?: string;
   currency: string;
   createdAt: string;

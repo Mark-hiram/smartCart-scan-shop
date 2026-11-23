@@ -29,8 +29,9 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({ onSuccess, initi
   const { t } = useTranslation();
 
   const [mode, setMode] = useState<'setup' | 'login' | 'forgot' | 'reset-token'>('login');
-  const [email, setEmail] = useState('hirammarkkaranja@gmail.com');
-  const [name, setName] = useState('Hiram Karanja');
+  const [email, setEmail] = useState('');
+  const [name, setName] = useState('');
+  const [setupKey, setSetupKey] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
 
@@ -62,9 +63,9 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({ onSuccess, initi
     }
 
     checkSetupStatus().then((status) => {
-      if (status && !status.hasAdmin) {
+      if (status && !status.isSetupComplete) {
         setMode('setup');
-      } else if (initialMode === 'setup' && status?.hasAdmin) {
+      } else if (initialMode === 'setup' && status?.isSetupComplete) {
         setMode('login');
       }
     });
@@ -84,7 +85,7 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({ onSuccess, initi
     setSuccessMsg(null);
     setIsSubmitting(true);
 
-    const res = await setupAdmin(email, name);
+    const res = await setupAdmin(email, name, undefined, setupKey);
     setIsSubmitting(false);
 
     if (res.success && res.tempPassword) {
@@ -102,7 +103,7 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({ onSuccess, initi
     setSuccessMsg(null);
     setIsSubmitting(true);
 
-    const res = await login(email, password);
+    const res = await login(email, password, 'admin');
     setIsSubmitting(false);
 
     if (res.success) {
@@ -314,7 +315,24 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({ onSuccess, initi
                         type="email"
                         value={email}
                         onChange={(e) => setEmail(e.target.value)}
-                        placeholder="[your email here]"
+                        placeholder="admin@smartcart.internal"
+                        required
+                        className="w-full h-11 pl-9 pr-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white text-xs font-mono focus:outline-emerald-500"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
+                      Setup Key (ADMIN_SETUP_KEY) *
+                    </label>
+                    <div className="relative">
+                      <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-3.5" />
+                      <input
+                        type="password"
+                        value={setupKey}
+                        onChange={(e) => setSetupKey(e.target.value)}
+                        placeholder="Enter server ADMIN_SETUP_KEY secret"
                         required
                         className="w-full h-11 pl-9 pr-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white text-xs font-mono focus:outline-emerald-500"
                       />

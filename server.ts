@@ -24,19 +24,145 @@ const app = express();
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Simple Bearer token session cache: token -> userId
-const sessions = new Map<string, string>();
+// Session record interface with sliding inactivity timeout
+export interface SessionRecord {
+  token: string;
+  userId: string;
+  portal: string;
+  createdAt: number;
+  expiresAt: number;
+}
+const sessions = new Map<string, SessionRecord>();
+
+// Memory store for tracking failed login attempts on all identifiers (existing and non-existing)
+interface FailedAttemptRecord {
+  count: number;
+  lockedUntil: number | null;
+}
+const memoryFailedAttempts = new Map<string, FailedAttemptRecord>();
+
+// IP Rate Limiting helper
+function getClientIp(req: Request): string {
+  if (process.env.TRUST_PROXY === 'true') {
+    const forwarded = req.headers['x-forwarded-for'];
+    if (typeof forwarded === 'string') {
+      return forwarded.split(',')[0].trim();
+    }
+  }
+  return req.socket.remoteAddress || req.ip || 'unknown';
+}
+
+interface RateLimitEntry {
+  count: number;
+  resetAt: number;
+}
+const ipRateLimits = new Map<string, RateLimitEntry>();
+
+function createIpRateLimiter(maxRequests: number, windowMs: number, keyPrefix: string) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    const ip = getClientIp(req);
+    const key = `${keyPrefix}:${ip}`;
+    const now = Date.now();
+    const entry = ipRateLimits.get(key);
+
+    if (!entry || entry.resetAt <= now) {
+      ipRateLimits.set(key, { count: 1, resetAt: now + windowMs });
+      return next();
+    }
+
+    if (entry.count >= maxRequests) {
+      return res.status(429).json({
+        error: 'Too many requests from this IP address. Please try again later.',
+      });
+    }
+
+    entry.count += 1;
+    next();
+  };
+}
+
+// Rate limiters:
+// Login: max 30 attempts per 10 minutes per IP
+const loginRateLimiter = createIpRateLimiter(30, 10 * 60 * 1000, 'login');
+// Sensitive operations: max 10 attempts per hour per IP
+const sensitiveOpsRateLimiter = createIpRateLimiter(10, 60 * 60 * 1000, 'sensitive');
+
+function getSessionDurationMs(portal?: string, role?: string): number {
+  if (role === 'admin' || portal === 'admin') {
+    return 2 * 60 * 60 * 1000; // 2 hours for admin
+  }
+  const customHours = process.env.SESSION_HOURS ? parseFloat(process.env.SESSION_HOURS) : 12;
+  const hours = isNaN(customHours) || customHours <= 0 ? 12 : customHours;
+  return hours * 60 * 60 * 1000;
+}
+
+function revokeUserSessions(userId: string) {
+  for (const [token, session] of sessions.entries()) {
+    if (session.userId === userId) {
+      sessions.delete(token);
+    }
+  }
+}
+
+function revokeSupermarketSessions(supermarketId: string) {
+  const data = db.getRaw();
+  const smUsers = data.users.filter((u) => u.supermarketId === supermarketId);
+  const smUserIds = new Set(smUsers.map((u) => u.id));
+  for (const [token, session] of sessions.entries()) {
+    if (smUserIds.has(session.userId)) {
+      sessions.delete(token);
+    }
+  }
+}
+
+function cleanupExpiredSessions() {
+  const now = Date.now();
+  for (const [token, session] of sessions.entries()) {
+    if (session.expiresAt <= now) {
+      sessions.delete(token);
+    }
+  }
+}
+setInterval(cleanupExpiredSessions, 15 * 60 * 1000);
+
+if (process.env.TRUST_PROXY === 'true') {
+  app.set('trust proxy', 1);
+}
 
 // Helper to authenticate user from Authorization header
 function getAuthUser(req: Request): User | null {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
   const token = authHeader.split(' ')[1];
-  const userId = sessions.get(token);
-  if (!userId) return null;
+  const session = sessions.get(token);
+  if (!session) return null;
+
+  if (session.expiresAt <= Date.now()) {
+    sessions.delete(token);
+    return null;
+  }
+
   const data = db.getRaw();
-  const user = data.users.find((u) => u.id === userId);
-  if (!user || user.status === 'suspended') return null;
+  const user = data.users.find((u) => u.id === session.userId);
+  if (!user || user.status === 'suspended') {
+    sessions.delete(token);
+    return null;
+  }
+
+  // Reject requests if user belongs to a supermarket that is suspended or pending approval
+  if (user.supermarketId) {
+    const supermarket = data.supermarkets.find((s) => s.id === user.supermarketId);
+    if (supermarket && (supermarket.status === 'suspended' || supermarket.status === 'pending')) {
+      sessions.delete(token);
+      return null;
+    }
+  }
+
+  // Sliding inactivity timeout: refresh expiresAt on valid request
+  const duration = getSessionDurationMs(session.portal, user.role);
+  session.expiresAt = Date.now() + duration;
+
+  (req as any).session = session;
   return user;
 }
 
@@ -194,9 +320,71 @@ function recalculateCart(cart: Cart, branchId: string, promotions: Promotion[]) 
   cart.updatedAt = new Date().toISOString();
 }
 
+// ==========================================
+// STORE AND ROLE SEPARATION ACCESS HELPERS
+// ==========================================
+
+function canAccessSupermarket(user: User | null, smId: string): boolean {
+  if (!user) return false;
+  if (user.role === 'admin') return true;
+  if (user.role === 'owner' && user.supermarketId === smId) return true;
+  return false;
+}
+
+function canAccessBranch(user: User | null, branchId: string): boolean {
+  if (!user) return false;
+  if (user.role === 'admin') return true;
+  const data = db.getRaw();
+  const branch = data.branches.find((b) => b.id === branchId);
+  if (!branch) return false;
+  if (user.role === 'owner' && user.supermarketId === branch.supermarketId) return true;
+  if (user.role === 'staff' && user.branchId === branchId) return true;
+  return false;
+}
+
+function getShopperOrGuestId(req: Request, user: User | null): string {
+  if (user) return user.id;
+  const rawGuestId = (req.headers['x-guest-id'] as string) || (req.headers['guestcartid'] as string);
+  if (rawGuestId && typeof rawGuestId === 'string' && rawGuestId.trim() && rawGuestId.trim() !== 'guest') {
+    return `guest_${rawGuestId.trim()}`;
+  }
+  // If no guest ID header provided, generate unique ephemeral ID per connection so guests never share 'guest'
+  const ip = req.ip || req.socket.remoteAddress || 'unknown';
+  return `guest_${crypto.createHash('sha256').update(ip + Date.now().toString()).digest('hex').substring(0, 16)}`;
+}
+
+function canAccessCart(user: User | null, cart: Cart, guestId?: string): boolean {
+  if (user) {
+    if (user.role === 'admin') return true;
+    if (user.role === 'owner' && user.supermarketId === cart.supermarketId) return true;
+    if (user.role === 'staff' && user.branchId === cart.branchId) return true;
+    if (cart.shopperId === user.id) return true;
+    return false;
+  }
+  if (guestId && cart.shopperId === guestId && guestId !== 'guest') {
+    return true;
+  }
+  return false;
+}
+
+// Generate collision-resistant 4-digit short codes using crypto.randomInt
 function generateShortCode(): string {
-  const digits = Math.floor(1000 + Math.random() * 9000);
-  return `SC-${digits}`;
+  const data = db.getRaw();
+  const openShortCodes = new Set(
+    data.carts
+      .filter((c) => c.status === 'active' || c.status === 'locked')
+      .map((c) => c.shortCode)
+  );
+
+  let code = '';
+  let attempts = 0;
+  do {
+    const digits = crypto.randomInt(1000, 10000);
+    code = `SC-${digits}`;
+    attempts++;
+  } while (openShortCodes.has(code) && attempts < 200);
+
+  return code;
 }
 
 // ==========================================
@@ -204,18 +392,43 @@ function generateShortCode(): string {
 // ==========================================
 
 // Check if System Admin first-time setup has been completed
+// STRICT SECURITY RULE: Returns ONLY { isSetupComplete: boolean }. Never returns the admin's email.
 app.get('/api/admin/setup-status', (req, res) => {
   const admin = db.getAdmin();
   res.json({
     isSetupComplete: Boolean(admin),
-    adminEmail: admin ? admin.email : null,
-    hasAdmin: Boolean(admin),
   });
 });
 
 // First-time System Admin setup endpoint
-// Exactly ONE admin account can ever exist. Created once using the provided email.
-app.post('/api/admin/setup', (req, res) => {
+// Exactly ONE admin account can ever exist. Requires secret ADMIN_SETUP_KEY.
+app.post('/api/admin/setup', sensitiveOpsRateLimiter, (req, res) => {
+  const expectedKey = process.env.ADMIN_SETUP_KEY;
+  const isProduction = process.env.NODE_ENV === 'production';
+
+  // In production, if ADMIN_SETUP_KEY is not configured on the server, refuse setup
+  if (isProduction && !expectedKey) {
+    return res.status(503).json({
+      error: 'Administrator setup is unavailable because ADMIN_SETUP_KEY environment variable is not configured on the server.',
+    });
+  }
+
+  const { email, name, phone, setupKey } = req.body;
+
+  // Validate setup key if expectedKey is configured
+  if (expectedKey) {
+    if (!setupKey || typeof setupKey !== 'string' || setupKey.trim() !== expectedKey.trim()) {
+      logAudit(
+        null,
+        'ADMIN_SETUP_INVALID_KEY',
+        'user',
+        'unknown',
+        'Failed administrator setup attempt due to invalid setup key.'
+      );
+      return res.status(401).json({ error: 'Invalid or missing administrator setup key.' });
+    }
+  }
+
   const data = db.getRaw();
   const existingAdmin = data.users.find((u) => u.role === 'admin');
   if (existingAdmin) {
@@ -231,7 +444,6 @@ app.post('/api/admin/setup', (req, res) => {
     });
   }
 
-  const { email, name, phone } = req.body;
   if (!email || typeof email !== 'string') {
     return res.status(400).json({ error: 'Valid email address is required for system administrator setup.' });
   }
@@ -246,20 +458,20 @@ app.post('/api/admin/setup', (req, res) => {
     return res.status(400).json({ error: 'This email is already in use by another user account.' });
   }
 
-  // Generate a cryptographically strong, high-entropy temporary password
-  // (e.g. Sc!7b4F92 + 3 random digits)
+  // Generate a cryptographically strong, high-entropy temporary password using crypto.randomInt
   const randomPart = crypto.randomBytes(4).toString('hex').toUpperCase();
-  const randomSuffix = Math.floor(100 + Math.random() * 900);
+  const randomSuffix = crypto.randomInt(100, 1000);
   const rawTempPassword = `Sc!${randomPart}${randomSuffix}`;
 
   const adminId = `usr_sys_admin_${Date.now()}`;
   const now = new Date().toISOString();
 
+  // Do not default the admin phone to any shared number
   const newAdmin: User = {
     id: adminId,
     name: name?.trim() || 'System Administrator',
     email: cleanEmail,
-    phone: phone ? phone.trim() : '+254700000000',
+    phone: phone && phone.trim() ? phone.trim() : '',
     role: 'admin',
     status: 'active',
     failedAttempts: 0,
@@ -286,7 +498,6 @@ app.post('/api/admin/setup', (req, res) => {
   res.json({
     success: true,
     message: 'System Administrator account created successfully.',
-    adminEmail: cleanEmail,
     tempPassword: rawTempPassword,
   });
 });
@@ -397,11 +608,19 @@ app.post('/api/admin/reset-password-with-token', (req, res) => {
   });
 });
 
-// Login with either email or phone in the same field
-app.post('/api/auth/login', async (req, res) => {
-  const { identifier, password } = req.body;
+// Login with email or phone, strictly enforced portal separation, uniform timing, and audit logs
+app.post('/api/auth/login', loginRateLimiter, async (req, res) => {
+  const startTime = Date.now();
+  const { identifier, password, portal } = req.body;
+
   if (!identifier || !password) {
     return res.status(400).json({ error: 'Identifier (email or phone) and password are required' });
+  }
+
+  const validPortals = ['shopper', 'staff', 'management', 'admin'];
+  const selectedPortal = portal && validPortals.includes(portal) ? portal : (portal ? null : 'shopper');
+  if (!selectedPortal) {
+    return res.status(400).json({ error: 'Valid portal parameter (shopper, staff, management, admin) is required' });
   }
 
   const cleanIdentifier = identifier.trim().toLowerCase();
@@ -411,77 +630,133 @@ app.post('/api/auth/login', async (req, res) => {
   const user = data.users.find(
     (u) =>
       u.email.toLowerCase() === cleanIdentifier ||
-      u.phone.replace(/[\s\-()]/g, '') === cleanPhone
+      (cleanPhone && u.phone.replace(/[\s\-()]/g, '') === cleanPhone)
   );
 
-  if (!user) {
-    return res.status(401).json({ error: 'Invalid email/phone or password' });
-  }
+  const memRecord = memoryFailedAttempts.get(cleanIdentifier);
+  const isUserLocked = user?.lockedUntil && user.lockedUntil > Date.now();
+  const isMemLocked = memRecord?.lockedUntil && memRecord.lockedUntil > Date.now();
 
-  if (user.status === 'suspended') {
-    return res.status(403).json({ error: 'This account has been suspended by an administrator.' });
-  }
-
-  if (user.lockedUntil && user.lockedUntil > Date.now()) {
-    const remainingMinutes = Math.ceil((user.lockedUntil - Date.now()) / 60000);
+  if (isUserLocked || isMemLocked) {
+    const lockedUntil = (user?.lockedUntil && user.lockedUntil > Date.now()) ? user.lockedUntil : memRecord!.lockedUntil!;
+    const remainingMinutes = Math.max(1, Math.ceil((lockedUntil - Date.now()) / 60000));
+    const elapsed = Date.now() - startTime;
+    if (elapsed < 200) await new Promise((r) => setTimeout(r, 200 - elapsed));
     return res.status(429).json({
       error: `Account is temporarily locked due to repeated failed attempts. Please try again in ${remainingMinutes} minute(s) or reset your password.`,
-      lockedUntil: user.lockedUntil,
+      lockedUntil,
     });
   }
 
-  if (user.failedAttempts > 0) {
-    const delay = Math.min(1000, user.failedAttempts * 200);
-    await new Promise((r) => setTimeout(r, delay));
+  // Validate portal against role
+  let portalMatch = false;
+  if (user) {
+    if (selectedPortal === 'shopper' && user.role === 'shopper') portalMatch = true;
+    if (selectedPortal === 'staff' && user.role === 'staff') portalMatch = true;
+    if (selectedPortal === 'management' && user.role === 'owner') portalMatch = true;
+    if (selectedPortal === 'admin' && user.role === 'admin') portalMatch = true;
   }
 
-  const userPwd = data.passwords[user.id];
-  const isValid = userPwd && verifyPassword(password, userPwd.hash, userPwd.salt);
+  const userPwd = user ? data.passwords[user.id] : null;
+  const passwordMatch = userPwd ? verifyPassword(password, userPwd.hash, userPwd.salt) : false;
+  const isValid = portalMatch && passwordMatch;
+
+  // STRICT AUDIT RULE: Log every admin login attempt (success, failure, wrong portal)
+  if (selectedPortal === 'admin' || user?.role === 'admin') {
+    if (isValid && user?.role === 'admin') {
+      logAudit(user, 'ADMIN_LOGIN_SUCCESS', 'user', user.id, 'System Administrator logged in successfully at /admin/login.');
+    } else if (user?.role === 'admin' && selectedPortal !== 'admin') {
+      logAudit(user, 'ADMIN_LOGIN_WRONG_PORTAL', 'user', user.id, `Admin account attempted login on non-admin portal: ${selectedPortal}`);
+    } else {
+      logAudit(user || null, 'ADMIN_LOGIN_FAILED', 'user', user?.id || 'unknown', `Failed admin login attempt on portal: ${selectedPortal}`);
+    }
+  }
 
   if (!isValid) {
-    user.failedAttempts = (user.failedAttempts || 0) + 1;
-    let message = 'Invalid email/phone or password.';
-    if (user.failedAttempts >= 5) {
-      user.lockedUntil = Date.now() + 15 * 60 * 1000;
-      message = 'Account temporarily locked for 15 minutes due to 5 failed login attempts.';
+    // Increment failed attempts for account lock limit (5 attempts = 15 minute lock)
+    if (user) {
+      user.failedAttempts = (user.failedAttempts || 0) + 1;
+      if (user.failedAttempts >= 5) {
+        user.lockedUntil = Date.now() + 15 * 60 * 1000;
+      }
+      db.save();
     } else {
-      const remaining = 5 - user.failedAttempts;
-      message += ` (${remaining} attempt${remaining === 1 ? '' : 's'} remaining before temporary lock)`;
+      const rec = memoryFailedAttempts.get(cleanIdentifier) || { count: 0, lockedUntil: null };
+      rec.count += 1;
+      if (rec.count >= 5) {
+        rec.lockedUntil = Date.now() + 15 * 60 * 1000;
+      }
+      memoryFailedAttempts.set(cleanIdentifier, rec);
     }
-    db.save();
-    return res.status(401).json({ error: message, remainingAttempts: Math.max(0, 5 - user.failedAttempts) });
+
+    // Uniform timing (~200ms delay) to prevent user/portal enumeration
+    const elapsed = Date.now() - startTime;
+    if (elapsed < 200) {
+      await new Promise((r) => setTimeout(r, 200 - elapsed));
+    }
+
+    return res.status(401).json({
+      error: 'Incorrect details or wrong sign-in page.',
+    });
   }
 
-  user.failedAttempts = 0;
-  user.lockedUntil = null;
+  // Account suspension check
+  if (user!.status === 'suspended') {
+    return res.status(403).json({ error: 'This account has been suspended by an administrator.' });
+  }
+
+  // Supermarket pending/suspended check for owner and staff
+  if (user!.supermarketId) {
+    const sm = data.supermarkets.find((s) => s.id === user!.supermarketId);
+    if (sm) {
+      if (sm.status === 'pending') {
+        return res.status(403).json({ error: 'Your application is awaiting approval by the platform administrator.' });
+      }
+      if (sm.status === 'suspended') {
+        return res.status(403).json({ error: 'This supermarket has been suspended.' });
+      }
+    }
+  }
+
+  // Reset failed attempts upon successful login
+  user!.failedAttempts = 0;
+  user!.lockedUntil = null;
+  memoryFailedAttempts.delete(cleanIdentifier);
   db.save();
 
   const token = `tok_${crypto.randomBytes(24).toString('hex')}`;
-  sessions.set(token, user.id);
+  const duration = getSessionDurationMs(selectedPortal, user!.role);
+  sessions.set(token, {
+    token,
+    userId: user!.id,
+    portal: selectedPortal,
+    createdAt: Date.now(),
+    expiresAt: Date.now() + duration,
+  });
 
   let supermarket = null;
   let branch = null;
-  if (user.supermarketId) {
-    supermarket = data.supermarkets.find((s) => s.id === user.supermarketId) || null;
+  if (user!.supermarketId) {
+    supermarket = data.supermarkets.find((s) => s.id === user!.supermarketId) || null;
   }
-  if (user.branchId) {
-    branch = data.branches.find((b) => b.id === user.branchId) || null;
+  if (user!.branchId) {
+    branch = data.branches.find((b) => b.id === user!.branchId) || null;
   }
 
   res.json({
     token,
     user: {
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      phone: user.phone,
-      role: user.role,
-      supermarketId: user.supermarketId,
-      branchId: user.branchId,
-      permissions: user.permissions,
-      status: user.status,
-      mustChangePassword: user.mustChangePassword ?? false,
-      isPermanentAdmin: user.isPermanentAdmin ?? false,
+      id: user!.id,
+      name: user!.name,
+      email: user!.email,
+      phone: user!.phone,
+      role: user!.role,
+      supermarketId: user!.supermarketId,
+      branchId: user!.branchId,
+      permissions: user!.permissions,
+      status: user!.status,
+      mustChangePassword: user!.mustChangePassword ?? false,
+      isPermanentAdmin: user!.isPermanentAdmin ?? false,
     },
     supermarket,
     branch,
@@ -490,7 +765,7 @@ app.post('/api/auth/login', async (req, res) => {
 
 // Self-register for shoppers ONLY
 // Strictly blocks any attempt to create an admin account and logs it
-app.post('/api/auth/register', (req, res) => {
+app.post('/api/auth/register', sensitiveOpsRateLimiter, (req, res) => {
   const { name, email, phone, password, role } = req.body;
 
   // Strict backend rule: reject any attempt to register an admin account
@@ -545,12 +820,29 @@ app.post('/api/auth/register', (req, res) => {
   db.save();
 
   const token = `tok_${crypto.randomBytes(24).toString('hex')}`;
-  sessions.set(token, newUser.id);
+  const duration = getSessionDurationMs('shopper', 'shopper');
+  sessions.set(token, {
+    token,
+    userId: newUser.id,
+    portal: 'shopper',
+    createdAt: Date.now(),
+    expiresAt: Date.now() + duration,
+  });
 
   res.json({
     token,
     user: newUser,
   });
+});
+
+// Logout endpoint: deletes caller's session from store
+app.post('/api/auth/logout', (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.split(' ')[1];
+    sessions.delete(token);
+  }
+  res.json({ success: true, message: 'Logged out successfully.' });
 });
 
 app.get('/api/auth/me', (req, res) => {
@@ -573,105 +865,166 @@ app.get('/api/auth/me', (req, res) => {
   });
 });
 
+// Message delivery helper: console log in non-configured environments
+function sendResetMessage(target: string, type: 'email' | 'sms' | 'admin_link', content: string) {
+  // If email/SMS provider is configured (e.g. SMTP/SendGrid/Twilio), deliver here.
+  // When unconfigured, write safely to the server console only.
+  console.log(`[RESET MESSAGE] [${type.toUpperCase()}] Delivered to ${target}: ${content}`);
+}
+
+// Client configuration endpoint
+app.get('/api/auth/config', (req, res) => {
+  const isProd = process.env.NODE_ENV === 'production';
+  const demoMode = !isProd && process.env.DEMO_MODE === 'true';
+  res.json({ demoMode });
+});
+
 // Password recovery endpoint
-// STRICT RULE: Admin password recovery works ONLY through the registered email address with a time-limited link.
-// Every recovery attempt is logged in the audit log.
-app.post('/api/auth/forgot-password', (req, res) => {
+// STRICT SECURITY RULES:
+// 1. Never return code, token or link in response unless DEMO_MODE=true in non-production.
+// 2. Uniform response message and identical response timing (anti-enumeration).
+// 3. Admin recovery is strictly email-only with a time-limited link. Do not reveal admin status.
+// 4. Crypto.randomInt codes, 15-min expiry, single-use, 5 failed attempts invalidation.
+app.post('/api/auth/forgot-password', sensitiveOpsRateLimiter, async (req, res) => {
+  const startTime = Date.now();
   const { identifier } = req.body;
-  if (!identifier) return res.status(400).json({ error: 'Identifier is required' });
+
+  if (!identifier || typeof identifier !== 'string') {
+    return res.status(400).json({ error: 'Identifier (email or phone) is required.' });
+  }
 
   const clean = identifier.trim().toLowerCase();
   const cleanPhone = identifier.replace(/[\s\-()]/g, '');
   const data = db.getRaw();
+  const isDemo = process.env.DEMO_MODE === 'true' && process.env.NODE_ENV !== 'production';
+
+  const user = data.users.find(
+    (u) => u.email.toLowerCase() === clean || u.phone.replace(/[\s\-()]/g, '') === cleanPhone
+  );
+
+  let demoPayload: any = null;
+
+  if (user) {
+    // Admin password recovery: strictly email-only time-limited link
+    if (user.role === 'admin') {
+      // If identifier was phone number, do NOT send link, and do NOT reveal that account is admin
+      if (clean === user.email.toLowerCase()) {
+        const resetToken = crypto.randomBytes(24).toString('hex');
+        const tokenKey = `admin_token_${resetToken}`;
+        data.resetCodes[tokenKey] = {
+          email: user.email,
+          token: resetToken,
+          identifier: user.email,
+          expiresAt: Date.now() + 15 * 60 * 1000,
+          failedAttempts: 0,
+          used: false,
+        };
+        db.save();
+
+        const resetLink = `/admin/login?resetToken=${resetToken}`;
+        sendResetMessage(user.email, 'admin_link', resetLink);
+        logAudit(
+          user,
+          'ADMIN_PASSWORD_RESET_LINK_GENERATED',
+          'user',
+          user.id,
+          'Time-limited password recovery link generated for admin email (expires in 15 minutes).'
+        );
+
+        if (isDemo) {
+          demoPayload = { resetLink, demoCode: resetToken };
+        }
+      }
+    } else {
+      // Standard user recovery (shopper, staff, owner) via 6-digit code using crypto.randomInt
+      const code = crypto.randomInt(100000, 1000000).toString();
+      const record = {
+        code,
+        identifier: clean,
+        expiresAt: Date.now() + 15 * 60 * 1000,
+        failedAttempts: 0,
+        used: false,
+      };
+      data.resetCodes[clean] = record;
+      if (cleanPhone) data.resetCodes[cleanPhone] = record;
+      db.save();
+
+      const deliveryTarget = user.email || user.phone;
+      const deliveryType = user.email && clean === user.email.toLowerCase() ? 'email' : 'sms';
+      sendResetMessage(deliveryTarget, deliveryType as any, code);
+      logAudit(user, 'PASSWORD_RESET_REQUESTED', 'user', user.id, 'Password reset verification code generated.');
+
+      if (isDemo) {
+        demoPayload = { demoCode: code };
+      }
+    }
+  }
+
+  // Enforce uniform response time (~200ms) regardless of whether user exists
+  const minDuration = 200;
+  const elapsed = Date.now() - startTime;
+  if (elapsed < minDuration) {
+    await new Promise((resolve) => setTimeout(resolve, minDuration - elapsed));
+  }
+
+  // Always return the exact same generic message
+  const response: any = {
+    success: true,
+    message: 'If an account exists, a recovery message has been sent.',
+  };
+
+  if (demoPayload) {
+    Object.assign(response, demoPayload);
+  }
+
+  res.json(response);
+});
+
+// Reset password using verification code
+// Enforces single-use, 15-minute expiry, invalidation after 5 wrong attempts, min 8-char password
+app.post('/api/auth/reset-password', sensitiveOpsRateLimiter, (req, res) => {
+  const { identifier, code, newPassword } = req.body;
+  if (!identifier || !code || !newPassword) {
+    return res.status(400).json({ error: 'Identifier, verification code, and new password are required.' });
+  }
+
+  if (typeof newPassword !== 'string' || newPassword.length < 8) {
+    return res.status(400).json({ error: 'New password must be at least 8 characters long.' });
+  }
+
+  const clean = identifier.trim().toLowerCase();
+  const cleanPhone = identifier.replace(/[\s\-()]/g, '');
+  const data = db.getRaw();
+
+  const resetRecord = data.resetCodes[clean] || (cleanPhone ? data.resetCodes[cleanPhone] : undefined);
+  if (!resetRecord || resetRecord.used || resetRecord.expiresAt < Date.now()) {
+    return res.status(400).json({ error: 'Invalid or expired verification code.' });
+  }
+
+  if (resetRecord.code !== code.trim()) {
+    resetRecord.failedAttempts = (resetRecord.failedAttempts || 0) + 1;
+    if (resetRecord.failedAttempts >= 5) {
+      delete data.resetCodes[clean];
+      if (cleanPhone) delete data.resetCodes[cleanPhone];
+      db.save();
+      return res.status(400).json({
+        error: 'Too many incorrect attempts. This verification code has been invalidated. Please request a new code.',
+      });
+    }
+    db.save();
+    const remaining = 5 - resetRecord.failedAttempts;
+    return res.status(400).json({
+      error: `Incorrect verification code. ${remaining} attempt${remaining === 1 ? '' : 's'} remaining before code is invalidated.`,
+    });
+  }
 
   const user = data.users.find(
     (u) => u.email.toLowerCase() === clean || u.phone.replace(/[\s\-()]/g, '') === cleanPhone
   );
 
   if (!user) {
-    return res.json({ success: true, message: 'If an account exists, a recovery code or link has been dispatched.' });
+    return res.status(404).json({ error: 'User account not found.' });
   }
-
-  // Admin password recovery: EMAIL ONLY with time-limited link
-  if (user.role === 'admin') {
-    // If identifier was phone number, refuse phone reset for admin
-    if (clean !== user.email.toLowerCase()) {
-      logAudit(
-        user,
-        'ADMIN_PHONE_RESET_ATTEMPT_BLOCKED',
-        'user',
-        user.id,
-        'Blocked phone number reset attempt for system admin account. Email recovery required.'
-      );
-      return res.status(403).json({
-        error: 'System administrator password recovery is only allowed through the registered email address. Phone/SMS recovery is disabled for admin security.',
-      });
-    }
-
-    // Generate high-entropy 48-char time-limited link token (15 mins)
-    const resetToken = crypto.randomBytes(24).toString('hex');
-    const tokenKey = `admin_token_${resetToken}`;
-    (data.resetCodes as any)[tokenKey] = {
-      email: user.email,
-      token: resetToken,
-      expiresAt: Date.now() + 15 * 60 * 1000,
-      used: false,
-    };
-    db.save();
-
-    logAudit(
-      user,
-      'ADMIN_PASSWORD_RESET_LINK_GENERATED',
-      'user',
-      user.id,
-      `Time-limited password recovery link generated for admin email ${user.email} (expires in 15 minutes).`
-    );
-
-    return res.json({
-      success: true,
-      isAdminReset: true,
-      message: 'A secure, time-limited password recovery link has been generated for your administrator email address.',
-      resetLink: `/admin/login?resetToken=${resetToken}`,
-      expiresMinutes: 15,
-      demoCode: resetToken,
-    });
-  }
-
-  // Standard recovery for shoppers and staff via 6-digit code
-  const code = Math.floor(100000 + Math.random() * 900000).toString();
-  data.resetCodes[clean] = { code, expiresAt: Date.now() + 15 * 60 * 1000 };
-  data.resetCodes[cleanPhone] = { code, expiresAt: Date.now() + 15 * 60 * 1000 };
-  db.save();
-
-  logAudit(user, 'PASSWORD_RESET_REQUESTED', 'staff', user.id, `Password reset code generated`);
-
-  res.json({
-    success: true,
-    message: 'Verification code sent.',
-    demoCode: code,
-  });
-});
-
-app.post('/api/auth/reset-password', (req, res) => {
-  const { identifier, code, newPassword } = req.body;
-  if (!identifier || !code || !newPassword) {
-    return res.status(400).json({ error: 'Identifier, code, and new password are required' });
-  }
-
-  const clean = identifier.trim().toLowerCase();
-  const cleanPhone = identifier.replace(/[\s\-()]/g, '');
-  const data = db.getRaw();
-
-  const resetRecord = data.resetCodes[clean] || data.resetCodes[cleanPhone];
-  if (!resetRecord || resetRecord.code !== code.trim() || resetRecord.expiresAt < Date.now()) {
-    return res.status(400).json({ error: 'Invalid or expired verification code' });
-  }
-
-  const user = data.users.find(
-    (u) => u.email.toLowerCase() === clean || u.phone.replace(/[\s\-()]/g, '') === cleanPhone
-  );
-
-  if (!user) return res.status(404).json({ error: 'User not found' });
 
   // System admin cannot reset via 6-digit code, must use time-limited link
   if (user.role === 'admin') {
@@ -684,10 +1037,16 @@ app.post('/api/auth/reset-password', (req, res) => {
   data.passwords[user.id] = { hash, salt };
   user.failedAttempts = 0;
   user.lockedUntil = null;
-  delete data.resetCodes[clean];
-  delete data.resetCodes[cleanPhone];
 
-  logAudit(user, 'PASSWORD_RESET_COMPLETED', 'staff', user.id, `Password successfully reset`);
+  // Single-use: delete reset code
+  resetRecord.used = true;
+  delete data.resetCodes[clean];
+  if (cleanPhone) delete data.resetCodes[cleanPhone];
+
+  // Revoke all active sessions immediately
+  revokeUserSessions(user.id);
+
+  logAudit(user, 'PASSWORD_RESET_COMPLETED', 'user', user.id, 'Password successfully reset.');
   db.save();
 
   res.json({ success: true, message: 'Password reset successfully. You can now log in.' });
@@ -697,6 +1056,113 @@ app.post('/api/auth/reset-password', (req, res) => {
 // 2. SUPERMARKET & BRANCH APIS
 // ==========================================
 
+// Supermarket owner application endpoint
+app.post(['/api/supermarket/apply', '/api/supermarkets/apply'], sensitiveOpsRateLimiter, async (req, res) => {
+  const {
+    chainName,
+    contactEmail,
+    contactPhone,
+    city,
+    firstBranchName,
+    initialProductCount,
+    notes,
+    password,
+    ownerName,
+  } = req.body;
+
+  if (!chainName || !contactEmail || !contactPhone || !password) {
+    return res.status(400).json({ error: 'Chain name, contact email, contact phone, and password are required.' });
+  }
+
+  if (typeof password !== 'string' || password.length < 8) {
+    return res.status(400).json({ error: 'Password must be at least 8 characters long.' });
+  }
+
+  const cleanEmail = contactEmail.trim().toLowerCase();
+  const cleanPhone = contactPhone.replace(/[\s\-()]/g, '');
+  const data = db.getRaw();
+
+  if (data.users.some((u) => u.email.toLowerCase() === cleanEmail)) {
+    return res.status(400).json({ error: 'This email is already in use by another user account.' });
+  }
+
+  if (data.users.some((u) => u.phone.replace(/[\s\-()]/g, '') === cleanPhone)) {
+    return res.status(400).json({ error: 'This phone number is already registered.' });
+  }
+
+  const smId = `sm_${Date.now()}`;
+  const ownerId = `usr_owner_${Date.now()}`;
+  const now = new Date().toISOString();
+  const cleanCode = chainName.replace(/[^a-zA-Z0-9]/g, '').substring(0, 6).toUpperCase() || 'CHAIN';
+
+  const newSupermarket: Supermarket = {
+    id: smId,
+    name: chainName.trim(),
+    code: cleanCode,
+    contactEmail: cleanEmail,
+    contactPhone: contactPhone.trim(),
+    status: 'pending',
+    city: city?.trim() || '',
+    notes: notes?.trim() || '',
+    firstBranchName: firstBranchName?.trim() || '',
+    initialProductCount: Number(initialProductCount) || 0,
+    applicationDate: now,
+    currency: 'KES',
+    createdAt: now,
+  };
+
+  const newOwner: User = {
+    id: ownerId,
+    name: ownerName?.trim() || `${chainName.trim()} Owner`,
+    email: cleanEmail,
+    phone: contactPhone.trim(),
+    role: 'owner',
+    supermarketId: smId,
+    status: 'active',
+    failedAttempts: 0,
+    lockedUntil: null,
+    createdAt: now,
+  };
+
+  const { hash, salt } = hashPassword(password);
+  data.supermarkets.push(newSupermarket);
+  data.users.push(newOwner);
+  data.passwords[ownerId] = { hash, salt };
+
+  if (firstBranchName && firstBranchName.trim()) {
+    const branchId = `br_${Date.now()}`;
+    const branch: Branch = {
+      id: branchId,
+      supermarketId: smId,
+      name: firstBranchName.trim(),
+      code: `${cleanCode}-01`,
+      address: city?.trim() || 'Main Branch',
+      city: city?.trim() || 'Nairobi',
+      latitude: -1.286389,
+      longitude: 36.817223,
+      phone: contactPhone.trim(),
+      isActive: false,
+    };
+    data.branches.push(branch);
+    newOwner.branchId = branchId;
+  }
+
+  logAudit(
+    newOwner,
+    'SUPERMARKET_APPLICATION_SUBMITTED',
+    'supermarket',
+    smId,
+    `New supermarket application submitted for "${newSupermarket.name}" (${newSupermarket.contactEmail}). Status: pending approval.`
+  );
+  db.save();
+
+  res.json({
+    success: true,
+    message: 'Application submitted. The Smart Cart team will review your application. Once approved, you will be able to sign in.',
+    supermarket: newSupermarket,
+  });
+});
+
 app.get('/api/supermarkets', (req, res) => {
   const user = getAuthUser(req);
   const data = db.getRaw();
@@ -705,10 +1171,16 @@ app.get('/api/supermarkets', (req, res) => {
 });
 
 app.get('/api/branches', (req, res) => {
+  const user = getAuthUser(req);
   const { supermarketId, lat, lng } = req.query;
   const data = db.getRaw();
 
-  let branches = data.branches.filter((b) => b.isActive);
+  const activeSupermarkets = user?.role === 'admin'
+    ? data.supermarkets
+    : data.supermarkets.filter((s) => s.status === 'active');
+  const activeSmIds = new Set(activeSupermarkets.map((s) => s.id));
+
+  let branches = data.branches.filter((b) => b.isActive && activeSmIds.has(b.supermarketId));
   if (supermarketId) {
     branches = branches.filter((b) => b.supermarketId === supermarketId);
   }
@@ -854,12 +1326,13 @@ app.post('/api/shopper/scan-lookup', (req, res) => {
 
 app.get('/api/shopper/cart', (req, res) => {
   const user = getAuthUser(req);
+  const callerId = getShopperOrGuestId(req, user);
   const { branchId } = req.query;
   const data = db.getRaw();
 
   let cart = data.carts.find(
     (c) =>
-      c.shopperId === (user?.id || 'guest') &&
+      c.shopperId === callerId &&
       (c.status === 'active' || c.status === 'locked') &&
       (!branchId || c.branchId === branchId)
   );
@@ -868,10 +1341,10 @@ app.get('/api/shopper/cart', (req, res) => {
     const branch = data.branches.find((b) => b.id === branchId);
     if (branch) {
       cart = {
-        id: `cart_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+        id: `cart_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
         shortCode: generateShortCode(),
-        shopperId: user?.id || 'guest',
-        shopperName: user?.name || 'Shopper',
+        shopperId: callerId,
+        shopperName: user?.name || 'Guest Shopper',
         shopperPhone: user?.phone || '',
         supermarketId: branch.supermarketId,
         branchId: branch.id,
@@ -895,7 +1368,8 @@ app.get('/api/shopper/cart', (req, res) => {
 // Add item with permanent locked price
 app.post('/api/shopper/cart/add', (req, res) => {
   const user = getAuthUser(req);
-  const { branchId, barcode, quantity = 1 } = req.body;
+  const callerId = getShopperOrGuestId(req, user);
+  const { branchId, barcode, quantity = 1, cartId } = req.body;
   if (!branchId || !barcode) {
     return res.status(400).json({ error: 'branchId and barcode are required' });
   }
@@ -915,19 +1389,29 @@ app.post('/api/shopper/cart/add', (req, res) => {
   const bp = data.branchProducts.find((b) => b.branchId === branchId && b.productId === product.id);
   const currentBranchPrice = bp?.priceOverride ?? product.basePrice;
 
-  let cart = data.carts.find(
-    (c) =>
-      c.shopperId === (user?.id || 'guest') &&
-      c.branchId === branchId &&
-      (c.status === 'active' || c.status === 'locked')
-  );
+  let cart: Cart | undefined;
+  if (cartId) {
+    cart = data.carts.find((c) => c.id === cartId);
+    if (cart && !canAccessCart(user, cart, callerId)) {
+      return res.status(403).json({ error: 'Forbidden: You cannot modify another shopper\'s cart.' });
+    }
+  }
+
+  if (!cart) {
+    cart = data.carts.find(
+      (c) =>
+        c.shopperId === callerId &&
+        c.branchId === branchId &&
+        (c.status === 'active' || c.status === 'locked')
+    );
+  }
 
   if (!cart) {
     cart = {
-      id: `cart_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      id: `cart_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
       shortCode: generateShortCode(),
-      shopperId: user?.id || 'guest',
-      shopperName: user?.name || 'Shopper',
+      shopperId: callerId,
+      shopperName: user?.name || 'Guest Shopper',
       shopperPhone: user?.phone || '',
       supermarketId: branch.supermarketId,
       branchId: branch.id,
@@ -952,7 +1436,7 @@ app.post('/api/shopper/cart/add', (req, res) => {
     existingItem.quantity += quantity;
   } else {
     const newItem: CartItem = {
-      id: `ci_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
+      id: `ci_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
       productId: product.id,
       barcode: product.barcode,
       name: product.name,
@@ -977,12 +1461,19 @@ app.post('/api/shopper/cart/add', (req, res) => {
   res.json(cart);
 });
 
-// Update item quantity
+// Update item quantity with ownership verification
 app.put('/api/shopper/cart/quantity', (req, res) => {
+  const user = getAuthUser(req);
+  const callerId = getShopperOrGuestId(req, user);
   const { cartId, itemId, quantity } = req.body;
   const data = db.getRaw();
   const cart = data.carts.find((c) => c.id === cartId);
   if (!cart) return res.status(404).json({ error: 'Cart not found' });
+
+  // Ownership verification: shopper can only modify their own cart
+  if (!canAccessCart(user, cart, callerId)) {
+    return res.status(403).json({ error: 'Forbidden: You cannot modify another shopper\'s cart.' });
+  }
 
   const itemIndex = cart.items.findIndex((i) => i.id === itemId);
   if (itemIndex === -1) return res.status(404).json({ error: 'Item not in cart' });
@@ -999,24 +1490,38 @@ app.put('/api/shopper/cart/quantity', (req, res) => {
   res.json(cart);
 });
 
-// Set daily budget limit
+// Set daily budget limit with ownership verification
 app.post('/api/shopper/cart/budget', (req, res) => {
+  const user = getAuthUser(req);
+  const callerId = getShopperOrGuestId(req, user);
   const { cartId, budgetLimit } = req.body;
   const data = db.getRaw();
   const cart = data.carts.find((c) => c.id === cartId);
   if (!cart) return res.status(404).json({ error: 'Cart not found' });
+
+  // Ownership verification
+  if (!canAccessCart(user, cart, callerId)) {
+    return res.status(403).json({ error: 'Forbidden: You cannot modify another shopper\'s cart.' });
+  }
 
   cart.budgetLimit = budgetLimit ? parseFloat(budgetLimit) : null;
   db.save();
   res.json(cart);
 });
 
-// Lock cart & get till shortcode
+// Lock cart & get till shortcode with ownership verification
 app.post('/api/shopper/cart/lock', (req, res) => {
+  const user = getAuthUser(req);
+  const callerId = getShopperOrGuestId(req, user);
   const { cartId } = req.body;
   const data = db.getRaw();
   const cart = data.carts.find((c) => c.id === cartId);
   if (!cart) return res.status(404).json({ error: 'Cart not found' });
+
+  // Ownership verification
+  if (!canAccessCart(user, cart, callerId)) {
+    return res.status(403).json({ error: 'Forbidden: You cannot lock another shopper\'s cart.' });
+  }
 
   if (cart.items.length === 0) {
     return res.status(400).json({ error: 'Cannot checkout an empty cart.' });
@@ -1084,16 +1589,21 @@ app.post('/api/shopper/cart/sync', (req, res) => {
 });
 
 app.delete('/api/shopper/cart/:id', (req, res) => {
+  const user = getAuthUser(req);
+  const callerId = getShopperOrGuestId(req, user);
   const data = db.getRaw();
-  const cartIndex = data.carts.findIndex((c) => c.id === req.params.id);
-  if (cartIndex !== -1) {
-    data.carts[cartIndex].items = [];
-    recalculateCart(data.carts[cartIndex], data.carts[cartIndex].branchId, data.promotions);
-    data.carts[cartIndex].status = 'active';
-    db.save();
-    return res.json(data.carts[cartIndex]);
+  const cart = data.carts.find((c) => c.id === req.params.id);
+  if (!cart) return res.status(404).json({ error: 'Cart not found' });
+
+  if (!canAccessCart(user, cart, callerId)) {
+    return res.status(403).json({ error: 'Forbidden: You cannot modify another shopper\'s cart.' });
   }
-  res.status(404).json({ error: 'Cart not found' });
+
+  cart.items = [];
+  recalculateCart(cart, cart.branchId, data.promotions);
+  cart.status = 'active';
+  db.save();
+  return res.json(cart);
 });
 
 // ==========================================
@@ -1409,13 +1919,19 @@ app.post('/api/shopper/shopping-lists/convert-to-cart', requireAuth, (req, res) 
 
 app.get('/api/cashier/lookup/:shortCode', requireAuth, (req, res) => {
   const user = (req as any).user as User;
-  const rawCode = req.params.shortCode.trim().toUpperCase();
-  const data = db.getRaw();
+
+  // Block shoppers completely
+  if (user.role === 'shopper') {
+    return res.status(403).json({ error: 'Forbidden: Shoppers cannot access cashier verification.' });
+  }
 
   // Verify staff permission
   if (user.role === 'staff' && !user.permissions?.verifyCarts) {
     return res.status(403).json({ error: 'Permission denied: Staff cannot verify carts.' });
   }
+
+  const rawCode = req.params.shortCode.trim().toUpperCase();
+  const data = db.getRaw();
 
   const cart = data.carts.find(
     (c) => c.shortCode.toUpperCase() === rawCode || c.id === rawCode
@@ -1425,11 +1941,11 @@ app.get('/api/cashier/lookup/:shortCode', requireAuth, (req, res) => {
     return res.status(404).json({ error: `No active cart found with code "${rawCode}".` });
   }
 
-  if (user.role === 'staff' && user.branchId && cart.branchId !== user.branchId) {
-    return res.status(403).json({ error: 'This cart belongs to a different branch.' });
+  if (user.role === 'staff' && cart.branchId !== user.branchId) {
+    return res.status(403).json({ error: 'Forbidden: This cart belongs to a different branch.' });
   }
-  if (user.role === 'owner' && user.supermarketId && cart.supermarketId !== user.supermarketId) {
-    return res.status(403).json({ error: 'This cart belongs to a different supermarket chain.' });
+  if (user.role === 'owner' && cart.supermarketId !== user.supermarketId) {
+    return res.status(403).json({ error: 'Forbidden: This cart belongs to a different supermarket chain.' });
   }
 
   const branch = data.branches.find((b) => b.id === cart.branchId);
@@ -1446,6 +1962,9 @@ app.get('/api/cashier/lookup/:shortCode', requireAuth, (req, res) => {
 
 app.post('/api/cashier/toggle-check', requireAuth, (req, res) => {
   const user = (req as any).user as User;
+  if (user.role === 'shopper') {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
   if (user.role === 'staff' && !user.permissions?.verifyCarts) {
     return res.status(403).json({ error: 'Permission denied: Staff cannot verify carts.' });
   }
@@ -1454,6 +1973,17 @@ app.post('/api/cashier/toggle-check', requireAuth, (req, res) => {
   const data = db.getRaw();
   const cart = data.carts.find((c) => c.id === cartId);
   if (!cart) return res.status(404).json({ error: 'Cart not found' });
+
+  if (user.role === 'staff' && cart.branchId !== user.branchId) {
+    return res.status(403).json({ error: 'Forbidden: Cart belongs to another branch.' });
+  }
+  if (user.role === 'owner' && cart.supermarketId !== user.supermarketId) {
+    return res.status(403).json({ error: 'Forbidden: Cart belongs to another supermarket.' });
+  }
+
+  if (cart.status === 'completed') {
+    return res.status(400).json({ error: 'Cart is already completed' });
+  }
 
   const item = cart.items.find((i) => i.id === itemId);
   if (!item) return res.status(404).json({ error: 'Item not in cart' });
@@ -1465,6 +1995,9 @@ app.post('/api/cashier/toggle-check', requireAuth, (req, res) => {
 
 app.post('/api/cashier/flag', requireAuth, (req, res) => {
   const user = (req as any).user as User;
+  if (user.role === 'shopper') {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
   if (user.role === 'staff' && !user.permissions?.verifyCarts) {
     return res.status(403).json({ error: 'Permission denied: Staff cannot flag carts.' });
   }
@@ -1473,6 +2006,17 @@ app.post('/api/cashier/flag', requireAuth, (req, res) => {
   const data = db.getRaw();
   const cart = data.carts.find((c) => c.id === cartId);
   if (!cart) return res.status(404).json({ error: 'Cart not found' });
+
+  if (user.role === 'staff' && cart.branchId !== user.branchId) {
+    return res.status(403).json({ error: 'Forbidden: Cart belongs to another branch.' });
+  }
+  if (user.role === 'owner' && cart.supermarketId !== user.supermarketId) {
+    return res.status(403).json({ error: 'Forbidden: Cart belongs to another supermarket.' });
+  }
+
+  if (cart.status === 'completed') {
+    return res.status(400).json({ error: 'Cart is already completed' });
+  }
 
   cart.status = 'flagged';
   cart.mismatchNotes = reason;
@@ -1494,6 +2038,9 @@ app.post('/api/cashier/flag', requireAuth, (req, res) => {
 
 app.post('/api/cashier/verify', requireAuth, (req, res) => {
   const user = (req as any).user as User;
+  if (user.role === 'shopper') {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
   if (user.role === 'staff' && !user.permissions?.verifyCarts) {
     return res.status(403).json({ error: 'Permission denied: Staff cannot verify carts.' });
   }
@@ -1502,6 +2049,17 @@ app.post('/api/cashier/verify', requireAuth, (req, res) => {
   const data = db.getRaw();
   const cart = data.carts.find((c) => c.id === cartId);
   if (!cart) return res.status(404).json({ error: 'Cart not found' });
+
+  if (user.role === 'staff' && cart.branchId !== user.branchId) {
+    return res.status(403).json({ error: 'Forbidden: Cart belongs to another branch.' });
+  }
+  if (user.role === 'owner' && cart.supermarketId !== user.supermarketId) {
+    return res.status(403).json({ error: 'Forbidden: Cart belongs to another supermarket.' });
+  }
+
+  if (cart.status === 'completed') {
+    return res.status(400).json({ error: 'Cart is already completed' });
+  }
 
   cart.status = 'verified';
   cart.verifiedByStaffId = user.id;
@@ -1524,6 +2082,9 @@ app.post('/api/cashier/verify', requireAuth, (req, res) => {
 
 app.post('/api/cashier/complete', requireAuth, (req, res) => {
   const user = (req as any).user as User;
+  if (user.role === 'shopper') {
+    return res.status(403).json({ error: 'Forbidden: Shoppers cannot complete checkouts.' });
+  }
   if (user.role === 'staff' && !user.permissions?.verifyCarts) {
     return res.status(403).json({ error: 'Permission denied: Staff cannot complete checkouts.' });
   }
@@ -1532,6 +2093,21 @@ app.post('/api/cashier/complete', requireAuth, (req, res) => {
   const data = db.getRaw();
   const cart = data.carts.find((c) => c.id === cartId);
   if (!cart) return res.status(404).json({ error: 'Cart not found' });
+
+  if (user.role === 'staff' && cart.branchId !== user.branchId) {
+    return res.status(403).json({ error: 'Forbidden: Cart belongs to another branch.' });
+  }
+  if (user.role === 'owner' && cart.supermarketId !== user.supermarketId) {
+    return res.status(403).json({ error: 'Forbidden: Cart belongs to another supermarket.' });
+  }
+
+  // Idempotency: return clear 400 error if already completed or cancelled
+  if (cart.status === 'completed') {
+    return res.status(400).json({ error: 'Cart is already completed' });
+  }
+  if (cart.status === 'cancelled') {
+    return res.status(400).json({ error: 'Cart is cancelled' });
+  }
 
   cart.status = 'completed';
   cart.updatedAt = new Date().toISOString();
@@ -1647,13 +2223,28 @@ app.post('/api/owner/staff', requireAuth, requireRole(['owner', 'admin']), (req,
   const { name, email, phone, password, branchId, permissions, preset } = req.body;
   const targetSmId = user.role === 'admin' ? req.body.supermarketId : user.supermarketId;
 
+  if (!targetSmId || !canAccessSupermarket(user, targetSmId)) {
+    return res.status(403).json({ error: 'Forbidden: Cannot create staff for another supermarket.' });
+  }
+
   if (!name || !email || !phone || !password || !branchId) {
     return res.status(400).json({ error: 'Name, email, phone, password, and branchId are required' });
+  }
+
+  // Minimum password length of at least 8 characters
+  if (typeof password !== 'string' || password.length < 8) {
+    return res.status(400).json({ error: 'Password must be at least 8 characters long.' });
   }
 
   const cleanEmail = email.trim().toLowerCase();
   const cleanPhone = phone.replace(/[\s\-()]/g, '');
   const data = db.getRaw();
+
+  // Verify that branchId belongs to the owner's supermarket
+  const branch = data.branches.find((b) => b.id === branchId);
+  if (!branch || branch.supermarketId !== targetSmId) {
+    return res.status(400).json({ error: 'Cannot assign staff to a branch of another supermarket.' });
+  }
 
   if (data.users.some((u) => u.email.toLowerCase() === cleanEmail)) {
     return res.status(400).json({ error: 'Email already exists across the platform' });
@@ -1720,8 +2311,25 @@ app.put('/api/owner/staff/:id', requireAuth, requireRole(['owner', 'admin']), (r
   const staff = data.users.find((u) => u.id === req.params.id);
   if (!staff) return res.status(404).json({ error: 'Staff not found' });
 
-  if (branchId) staff.branchId = branchId;
-  if (status) staff.status = status;
+  if (staff.supermarketId && !canAccessSupermarket(user, staff.supermarketId)) {
+    return res.status(403).json({ error: 'Forbidden: Cannot edit staff belonging to another supermarket.' });
+  }
+
+  if (branchId) {
+    const branch = data.branches.find((b) => b.id === branchId);
+    if (!branch || branch.supermarketId !== staff.supermarketId) {
+      return res.status(400).json({ error: 'Cannot assign staff to a branch of another supermarket.' });
+    }
+    staff.branchId = branchId;
+  }
+
+  // Allowed status values: only "active" and "suspended"
+  if (status !== undefined) {
+    if (status !== 'active' && status !== 'suspended') {
+      return res.status(400).json({ error: 'Invalid status. Allowed values are "active" and "suspended".' });
+    }
+    staff.status = status;
+  }
 
   if (preset && STAFF_PRESETS[preset as keyof typeof STAFF_PRESETS]) {
     staff.permissions = { ...STAFF_PRESETS[preset as keyof typeof STAFF_PRESETS] };
@@ -1753,28 +2361,59 @@ app.put('/api/owner/staff/:id', requireAuth, requireRole(['owner', 'admin']), (r
       staff.supermarketId,
       staff.branchId
     );
-  }
+  // Revoke active sessions for this staff member when permissions or status change
+  revokeUserSessions(staff.id);
 
   db.save();
   res.json(staff);
 });
 
 // Adjust Branch Product: Enforces backend permissions
+// Adjust Branch Product: Enforces backend branch access, role permissions, and input validation
 app.post('/api/owner/branch-product-override', requireAuth, (req, res) => {
   const user = (req as any).user as User;
   const { branchId, productId, priceOverride, stock, lowStockThresholdOverride, aisleOverride, shelfOverride } = req.body;
   const data = db.getRaw();
 
-  // Strict backend security rule enforcement
+  // Block shoppers completely
+  if (user.role === 'shopper') {
+    return res.status(403).json({ error: 'Forbidden: Shoppers cannot modify branch products.' });
+  }
+
+  // Caller must be able to access the branch (admin, owner of this chain, or staff of this branch)
+  if (!canAccessBranch(user, branchId)) {
+    return res.status(403).json({ error: 'Security violation: You do not have access to manage this branch.' });
+  }
+
+  // Staff permission checks
   if (user.role === 'staff') {
-    if (user.branchId !== branchId) {
-      return res.status(403).json({ error: 'Security violation: Staff cannot access another branch.' });
-    }
     if (priceOverride !== undefined && !user.permissions?.editPrices) {
       return res.status(403).json({ error: 'Security violation: Staff account lacks "editPrices" permission.' });
     }
     if (stock !== undefined && !user.permissions?.editStock) {
       return res.status(403).json({ error: 'Security violation: Staff account lacks "editStock" permission.' });
+    }
+  }
+
+  // Number validation: price >= 0, stock >= 0 and integer. Reject negative or NaN.
+  if (priceOverride !== undefined && priceOverride !== null && priceOverride !== '') {
+    const numPrice = Number(priceOverride);
+    if (isNaN(numPrice) || numPrice < 0) {
+      return res.status(400).json({ error: 'Price override must be a non-negative number.' });
+    }
+  }
+
+  if (stock !== undefined && stock !== null && stock !== '') {
+    const numStock = Number(stock);
+    if (isNaN(numStock) || numStock < 0 || !Number.isInteger(numStock)) {
+      return res.status(400).json({ error: 'Stock must be a non-negative integer.' });
+    }
+  }
+
+  if (lowStockThresholdOverride !== undefined && lowStockThresholdOverride !== null && lowStockThresholdOverride !== '') {
+    const numThreshold = Number(lowStockThresholdOverride);
+    if (isNaN(numThreshold) || numThreshold < 0 || !Number.isInteger(numThreshold)) {
+      return res.status(400).json({ error: 'Low stock threshold override must be a non-negative integer.' });
     }
   }
 
@@ -1794,14 +2433,14 @@ app.post('/api/owner/branch-product-override', requireAuth, (req, res) => {
   }
 
   if (priceOverride !== undefined) {
-    bp.priceOverride = priceOverride === null || priceOverride === '' ? null : parseFloat(priceOverride);
+    bp.priceOverride = priceOverride === null || priceOverride === '' ? null : Number(priceOverride);
   }
   if (stock !== undefined) {
-    bp.stock = parseInt(stock, 10);
+    bp.stock = stock === null || stock === '' ? 0 : Number(stock);
   }
   if (lowStockThresholdOverride !== undefined) {
     bp.lowStockThresholdOverride =
-      lowStockThresholdOverride === null || lowStockThresholdOverride === '' ? null : parseInt(lowStockThresholdOverride, 10);
+      lowStockThresholdOverride === null || lowStockThresholdOverride === '' ? null : Number(lowStockThresholdOverride);
   }
   if (aisleOverride !== undefined) {
     bp.aisleOverride = aisleOverride || null;
@@ -2089,9 +2728,22 @@ app.post('/api/owner/products/csv-import', requireAuth, requireRole(['owner', 'a
 });
 
 // Promotions CRUD
+// Promotions CRUD with strict supermarket scoping and input validation
 app.get('/api/owner/promotions', requireAuth, (req, res) => {
   const user = (req as any).user as User;
+  if (user.role === 'shopper') {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
   const supermarketId = user.role === 'admin' ? (req.query.supermarketId as string) : user.supermarketId;
+  if (!supermarketId) {
+    return res.status(400).json({ error: 'Supermarket ID is required' });
+  }
+
+  if (!canAccessSupermarket(user, supermarketId)) {
+    return res.status(403).json({ error: 'Forbidden: Cannot access promotions for another supermarket' });
+  }
+
   const data = db.getRaw();
   const promos = data.promotions.filter((p) => p.supermarketId === supermarketId);
   res.json(promos);
@@ -2099,31 +2751,101 @@ app.get('/api/owner/promotions', requireAuth, (req, res) => {
 
 app.post('/api/owner/promotions', requireAuth, (req, res) => {
   const user = (req as any).user as User;
+  if (user.role === 'shopper') {
+    return res.status(403).json({ error: 'Forbidden: Shoppers cannot create promotions.' });
+  }
+
+  const targetSmId = user.role === 'admin' ? req.body.supermarketId : user.supermarketId;
+  if (!targetSmId || !canAccessSupermarket(user, targetSmId)) {
+    return res.status(403).json({ error: 'Forbidden: You do not have permission to manage promotions for this supermarket.' });
+  }
+
   if (user.role === 'staff' && !user.permissions?.managePromotions) {
-    return res.status(403).json({ error: 'Permission denied: Staff cannot manage promotions.' });
+    return res.status(403).json({ error: 'Permission denied: Staff account lacks "managePromotions" permission.' });
   }
 
   const { name, type, discountPercent, fixedPrice, bundleQuantity, bundlePrice, productBarcodes, branchId, startDate, endDate } = req.body;
-  const targetSmId = user.role === 'admin' ? req.body.supermarketId : user.supermarketId;
 
-  if (!name || !type || !productBarcodes || productBarcodes.length === 0) {
-    return res.status(400).json({ error: 'Promotion name, type, and at least one product barcode are required' });
+  if (!name || typeof name !== 'string' || !name.trim()) {
+    return res.status(400).json({ error: 'Promotion name is required.' });
+  }
+
+  if (!type || !['percent_off', 'fixed_price', 'bundle'].includes(type)) {
+    return res.status(400).json({ error: 'Invalid promotion type. Allowed types: percent_off, fixed_price, bundle.' });
+  }
+
+  if (!Array.isArray(productBarcodes) || productBarcodes.length === 0) {
+    return res.status(400).json({ error: 'At least one product barcode is required.' });
   }
 
   const data = db.getRaw();
+
+  // Verify branchId belongs to target supermarket if provided
+  if (branchId) {
+    const branch = data.branches.find((b) => b.id === branchId);
+    if (!branch || branch.supermarketId !== targetSmId) {
+      return res.status(400).json({ error: 'Branch does not belong to this supermarket.' });
+    }
+    if (user.role === 'staff' && user.branchId && user.branchId !== branchId) {
+      return res.status(403).json({ error: 'Staff can only create promotions for their own branch.' });
+    }
+  }
+
+  // Validate all product barcodes belong to this supermarket
+  const smProducts = data.products.filter((p) => p.supermarketId === targetSmId);
+  const smBarcodes = new Set(smProducts.map((p) => p.barcode));
+  for (const bc of productBarcodes) {
+    if (!smBarcodes.has(bc)) {
+      return res.status(400).json({ error: `Product barcode "${bc}" does not belong to this supermarket catalogue.` });
+    }
+  }
+
+  // Validate discount percentage (1-100)
+  if (type === 'percent_off') {
+    const pct = Number(discountPercent);
+    if (isNaN(pct) || pct < 1 || pct > 100) {
+      return res.status(400).json({ error: 'Discount percent must be a number between 1 and 100.' });
+    }
+  }
+
+  if (type === 'fixed_price') {
+    const fp = Number(fixedPrice);
+    if (isNaN(fp) || fp <= 0) {
+      return res.status(400).json({ error: 'Fixed price must be a positive number.' });
+    }
+  }
+
+  if (type === 'bundle') {
+    const bq = Number(bundleQuantity);
+    const bp = Number(bundlePrice);
+    if (isNaN(bq) || bq < 2 || !Number.isInteger(bq) || isNaN(bp) || bp <= 0) {
+      return res.status(400).json({ error: 'Bundle must specify quantity (at least 2) and positive bundle price.' });
+    }
+  }
+
+  // Validate dates: valid ISO and endDate >= startDate
+  const sDate = startDate ? new Date(startDate) : new Date();
+  const eDate = endDate ? new Date(endDate) : new Date(Date.now() + 86400000 * 30);
+  if (isNaN(sDate.getTime()) || isNaN(eDate.getTime())) {
+    return res.status(400).json({ error: 'Invalid promotion start or end date format.' });
+  }
+  if (eDate < sDate) {
+    return res.status(400).json({ error: 'Promotion end date must be after start date.' });
+  }
+
   const newPromo: Promotion = {
-    id: `promo_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
+    id: `promo_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
     supermarketId: targetSmId,
     branchId: branchId || null,
     name: name.trim(),
     type,
-    discountPercent: discountPercent ? parseFloat(discountPercent) : undefined,
-    fixedPrice: fixedPrice ? parseFloat(fixedPrice) : undefined,
-    bundleQuantity: bundleQuantity ? parseInt(bundleQuantity, 10) : undefined,
-    bundlePrice: bundlePrice ? parseFloat(bundlePrice) : undefined,
+    discountPercent: discountPercent ? Number(discountPercent) : undefined,
+    fixedPrice: fixedPrice ? Number(fixedPrice) : undefined,
+    bundleQuantity: bundleQuantity ? Number(bundleQuantity) : undefined,
+    bundlePrice: bundlePrice ? Number(bundlePrice) : undefined,
     productBarcodes,
-    startDate: startDate || new Date().toISOString(),
-    endDate: endDate || new Date(Date.now() + 86400000 * 30).toISOString(),
+    startDate: sDate.toISOString(),
+    endDate: eDate.toISOString(),
     isActive: true,
   };
 
@@ -2136,13 +2858,21 @@ app.post('/api/owner/promotions', requireAuth, (req, res) => {
 
 app.put('/api/owner/promotions/:id/toggle', requireAuth, (req, res) => {
   const user = (req as any).user as User;
-  if (user.role === 'staff' && !user.permissions?.managePromotions) {
-    return res.status(403).json({ error: 'Permission denied: Staff cannot toggle promotions.' });
+  if (user.role === 'shopper') {
+    return res.status(403).json({ error: 'Forbidden' });
   }
 
   const data = db.getRaw();
   const promo = data.promotions.find((p) => p.id === req.params.id);
   if (!promo) return res.status(404).json({ error: 'Promotion not found' });
+
+  if (!canAccessSupermarket(user, promo.supermarketId)) {
+    return res.status(403).json({ error: 'Forbidden: You cannot modify promotions for this supermarket.' });
+  }
+
+  if (user.role === 'staff' && !user.permissions?.managePromotions) {
+    return res.status(403).json({ error: 'Permission denied: Staff cannot toggle promotions.' });
+  }
 
   promo.isActive = !promo.isActive;
   logAudit(user, 'PROMOTION_TOGGLED', 'promotion', promo.id, `Promotion "${promo.name}" set to ${promo.isActive ? 'active' : 'inactive'}`, promo.supermarketId);
@@ -2260,17 +2990,27 @@ app.get('/api/reports', requireAuth, (req, res) => {
     targetSmId = supermarketId || null;
     targetBranchId = branchId || null;
   } else if (user.role === 'owner') {
+    if (supermarketId && supermarketId !== user.supermarketId) {
+      return res.status(403).json({ error: 'Forbidden: Cannot access reports for another supermarket.' });
+    }
     targetSmId = user.supermarketId || null;
-    targetBranchId = branchId || null;
+    if (branchId) {
+      if (!canAccessBranch(user, branchId)) {
+        return res.status(403).json({ error: 'Forbidden: Branch does not belong to your supermarket.' });
+      }
+      targetBranchId = branchId;
+    }
   } else if (user.role === 'staff') {
     if (!user.permissions?.viewReports) {
       return res.status(403).json({ error: 'Permission denied: Staff cannot view branch reports.' });
     }
-    // Staff restricted exclusively to their branch
+    if (branchId && branchId !== user.branchId) {
+      return res.status(403).json({ error: 'Forbidden: Staff can only access reports for their assigned branch.' });
+    }
     targetSmId = user.supermarketId || null;
     targetBranchId = user.branchId || null;
   } else {
-    return res.status(403).json({ error: 'Forbidden' });
+    return res.status(403).json({ error: 'Forbidden: Insufficient role privileges to view reports.' });
   }
 
   const reports = computeReports(data, targetSmId, targetBranchId, startDate, endDate);
@@ -2283,11 +3023,34 @@ app.get('/api/reports/csv', requireAuth, (req, res) => {
   const data = db.getRaw();
   const { reportType, branchId, startDate, endDate, supermarketId } = req.query as Record<string, string>;
 
-  let targetSmId = user.role === 'admin' ? supermarketId || null : user.supermarketId || null;
-  let targetBranchId = user.role === 'staff' ? user.branchId || null : branchId || null;
+  let targetSmId: string | null = null;
+  let targetBranchId: string | null = null;
 
-  if (user.role === 'staff' && !user.permissions?.viewReports) {
-    return res.status(403).json({ error: 'Permission denied' });
+  if (user.role === 'admin') {
+    targetSmId = supermarketId || null;
+    targetBranchId = branchId || null;
+  } else if (user.role === 'owner') {
+    if (supermarketId && supermarketId !== user.supermarketId) {
+      return res.status(403).json({ error: 'Forbidden: Cannot access reports for another supermarket.' });
+    }
+    targetSmId = user.supermarketId || null;
+    if (branchId) {
+      if (!canAccessBranch(user, branchId)) {
+        return res.status(403).json({ error: 'Forbidden: Branch does not belong to your supermarket.' });
+      }
+      targetBranchId = branchId;
+    }
+  } else if (user.role === 'staff') {
+    if (!user.permissions?.viewReports) {
+      return res.status(403).json({ error: 'Permission denied: Staff cannot view reports.' });
+    }
+    if (branchId && branchId !== user.branchId) {
+      return res.status(403).json({ error: 'Forbidden: Staff can only access reports for their assigned branch.' });
+    }
+    targetSmId = user.supermarketId || null;
+    targetBranchId = user.branchId || null;
+  } else {
+    return res.status(403).json({ error: 'Forbidden: Insufficient role privileges to view reports.' });
   }
 
   const reports = computeReports(data, targetSmId, targetBranchId, startDate, endDate);
@@ -2334,11 +3097,17 @@ app.get('/api/admin/metrics', requireAuth, requireRole(['admin']), (req, res) =>
 app.put('/api/admin/supermarkets/:id/status', requireAuth, requireRole(['admin']), (req, res) => {
   const user = (req as any).user as User;
   const { status } = req.body;
+  if (!['active', 'suspended', 'pending'].includes(status)) {
+    return res.status(400).json({ error: 'Invalid status. Allowed: active, suspended, pending.' });
+  }
   const data = db.getRaw();
   const sm = data.supermarkets.find((s) => s.id === req.params.id);
   if (!sm) return res.status(404).json({ error: 'Supermarket not found' });
 
   sm.status = status;
+  if (status === 'suspended' || status === 'pending') {
+    revokeSupermarketSessions(sm.id);
+  }
   logAudit(user, `SUPERMARKET_${status.toUpperCase()}`, 'supermarket', sm.id, `Supermarket ${sm.name} ${status} by admin`);
   db.save();
   res.json(sm);
@@ -2385,6 +3154,9 @@ app.put('/api/admin/users/:id/status', requireAuth, requireRole(['admin']), (req
   }
 
   targetUser.status = status;
+  if (status === 'suspended' || (role && role !== targetUser.role)) {
+    revokeUserSessions(targetUser.id);
+  }
   logAudit(adminUser, `USER_${status.toUpperCase()}`, 'staff', targetUser.id, `User ${targetUser.name} status set to ${status}`);
   db.save();
   res.json(targetUser);
@@ -2408,6 +3180,8 @@ app.post('/api/admin/users/:id/reset-password', requireAuth, requireRole(['admin
   data.passwords[targetUser.id] = { hash, salt };
   targetUser.failedAttempts = 0;
   targetUser.lockedUntil = null;
+
+  revokeUserSessions(targetUser.id);
 
   logAudit(adminUser, 'USER_PASSWORD_RESET', 'staff', targetUser.id, `Admin reset password for ${targetUser.name}`);
   db.save();
@@ -2492,8 +3266,22 @@ app.get('/api/support', requireAuth, (req, res) => {
 
 app.post('/api/support', requireAuth, (req, res) => {
   const user = (req as any).user as User;
-  const { subject, message, category = 'other', supermarketId } = req.body;
-  if (!subject || !message) return res.status(400).json({ error: 'Subject and message are required' });
+  const { subject, message, category, supermarketId } = req.body;
+
+  const allowedCategories = ['general', 'technical', 'billing', 'catalogue', 'scanner', 'cashier', 'stock', 'other'];
+
+  if (!subject || typeof subject !== 'string' || subject.trim().length < 3 || subject.trim().length > 100) {
+    return res.status(400).json({ error: 'Ticket subject must be between 3 and 100 characters.' });
+  }
+
+  if (!message || typeof message !== 'string' || message.trim().length < 10 || message.trim().length > 2000) {
+    return res.status(400).json({ error: 'Ticket message must be between 10 and 2000 characters.' });
+  }
+
+  const cleanCategory = (category || 'other').toString().trim().toLowerCase();
+  if (!allowedCategories.includes(cleanCategory)) {
+    return res.status(400).json({ error: `Invalid category. Allowed categories: ${allowedCategories.join(', ')}` });
+  }
 
   const data = db.getRaw();
   const newTicket: SupportTicket = {
@@ -2503,7 +3291,7 @@ app.post('/api/support', requireAuth, (req, res) => {
     userEmail: user.email,
     userPhone: user.phone,
     supermarketId: supermarketId || user.supermarketId || null,
-    category,
+    category: cleanCategory as any,
     subject: subject.trim(),
     message: message.trim(),
     status: 'open',

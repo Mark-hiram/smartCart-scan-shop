@@ -114,11 +114,30 @@ export const ShopperView: React.FC<ShopperViewProps> = ({ onOpenStoreModal }) =>
     }
   };
 
+  // Helper to ensure guest carts are uniquely keyed by random ID in localStorage, sent via x-guest-id
+  const getGuestHeaders = (): Record<string, string> => {
+    let gid = localStorage.getItem('smartcart_guest_id');
+    if (!gid) {
+      gid = 'g_' + Math.random().toString(36).substring(2, 10) + Date.now().toString(36);
+      localStorage.setItem('smartcart_guest_id', gid);
+    }
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'x-guest-id': gid,
+    };
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
+    return headers;
+  };
+
   // Fetch or initialize cart
   const loadCart = async () => {
     if (!branch) return;
     try {
-      const res = await fetch(`/api/shopper/cart?branchId=${branch.id}`);
+      const res = await fetch(`/api/shopper/cart?branchId=${branch.id}`, {
+        headers: getGuestHeaders(),
+      });
       if (res.ok) {
         const data = await res.json();
         setCart(data);
@@ -214,7 +233,7 @@ export const ShopperView: React.FC<ShopperViewProps> = ({ onOpenStoreModal }) =>
     try {
       const res = await fetch('/api/shopper/cart/sync', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        headers: getGuestHeaders(),
         body: JSON.stringify({
           branchId: branch.id,
           cartId: localCart.id,
@@ -391,8 +410,8 @@ export const ShopperView: React.FC<ShopperViewProps> = ({ onOpenStoreModal }) =>
     try {
       const res = await fetch('/api/shopper/cart/add', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ branchId: branch.id, barcode, quantity: 1 }),
+        headers: getGuestHeaders(),
+        body: JSON.stringify({ branchId: branch.id, barcode, quantity: 1, cartId: cart?.id }),
       });
       const updatedCart = await res.json();
       if (res.ok) {
@@ -448,7 +467,7 @@ export const ShopperView: React.FC<ShopperViewProps> = ({ onOpenStoreModal }) =>
     try {
       const res = await fetch('/api/shopper/cart/quantity', {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getGuestHeaders(),
         body: JSON.stringify({ cartId: cart.id, itemId, quantity: newQty }),
       });
       if (res.ok) {
@@ -472,7 +491,7 @@ export const ShopperView: React.FC<ShopperViewProps> = ({ onOpenStoreModal }) =>
         try {
           await fetch('/api/shopper/cart/budget', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: getGuestHeaders(),
             body: JSON.stringify({ cartId: cart.id, budgetLimit: limit }),
           });
         } catch (e) {}
@@ -494,7 +513,7 @@ export const ShopperView: React.FC<ShopperViewProps> = ({ onOpenStoreModal }) =>
     try {
       const res = await fetch('/api/shopper/cart/lock', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getGuestHeaders(),
         body: JSON.stringify({ cartId: cart.id }),
       });
       if (res.ok) {
@@ -523,7 +542,10 @@ export const ShopperView: React.FC<ShopperViewProps> = ({ onOpenStoreModal }) =>
     }
 
     try {
-      const res = await fetch(`/api/shopper/cart/${cart.id}`, { method: 'DELETE' });
+      const res = await fetch(`/api/shopper/cart/${cart.id}`, {
+        method: 'DELETE',
+        headers: getGuestHeaders(),
+      });
       if (res.ok) {
         const emptied = await res.json();
         setCart(emptied);
@@ -537,7 +559,7 @@ export const ShopperView: React.FC<ShopperViewProps> = ({ onOpenStoreModal }) =>
     try {
       const res = await fetch('/api/shopper/cart/re-add', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        headers: getGuestHeaders(),
         body: JSON.stringify({ branchId: branch.id, cartId: pastCartId }),
       });
       if (res.ok) {
