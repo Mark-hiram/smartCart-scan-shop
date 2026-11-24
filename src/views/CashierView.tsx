@@ -286,20 +286,6 @@ export const CashierView: React.FC = () => {
           </p>
         </div>
 
-        {/* Demo Shortcut buttons to load pre-seeded cart */}
-        {permissions.verifyCarts && (
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => {
-                setCartCodeInput('SC-8429');
-                handleLookupCart(undefined, 'SC-8429');
-              }}
-              className="px-3 py-1.5 rounded-xl border border-emerald-500 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 text-xs font-semibold hover:bg-emerald-100 transition active:scale-95"
-            >
-              Load Demo Cart (SC-8429)
-            </button>
-          </div>
-        )}
       </div>
 
       {/* Staff Segmented Navigation based on active permissions */}

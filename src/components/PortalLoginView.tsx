@@ -24,14 +24,16 @@ interface PortalLoginViewProps {
   portal: PortalType;
   onSwitchPortal: (portal: PortalType) => void;
   onContinueAsGuest?: () => void;
+  onOpenAdminLogin?: () => void;
 }
 
 export const PortalLoginView: React.FC<PortalLoginViewProps> = ({
   portal,
   onSwitchPortal,
   onContinueAsGuest,
+  onOpenAdminLogin,
 }) => {
-  const { login, register, quickLogin, demoMode } = useAuth();
+  const { login, register } = useAuth();
   const { t } = useTranslation();
 
   const [mode, setMode] = useState<'login' | 'register' | 'forgot' | 'apply'>('login');
@@ -56,7 +58,6 @@ export const PortalLoginView: React.FC<PortalLoginViewProps> = ({
 
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
-  const [demoCode, setDemoCode] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Portal metadata styling
@@ -166,10 +167,6 @@ export const PortalLoginView: React.FC<PortalLoginViewProps> = ({
       setIsSubmitting(false);
       if (res.ok) {
         setSuccessMsg(data.message);
-        if (data.demoCode) {
-          setDemoCode(data.demoCode);
-          setResetCode(data.demoCode);
-        }
       } else {
         setErrorMsg(data.error);
       }
@@ -290,57 +287,6 @@ export const PortalLoginView: React.FC<PortalLoginViewProps> = ({
             </div>
           )}
 
-          {/* Dedicated Quick Demo Logins for THIS Portal (Only when demoMode is active) */}
-          {demoMode && (
-            <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 space-y-2">
-              <span className="text-[11px] font-bold text-slate-700 dark:text-slate-300 block">
-                ⚡ Quick Demo Sign-In ({portalMeta.title}):
-              </span>
-
-              {portal === 'shopper' && (
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => quickLogin('shopper')}
-                    className="flex-1 py-2 px-3 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:border-emerald-500 text-xs font-semibold text-slate-800 dark:text-slate-200 active:scale-95 transition flex items-center justify-center gap-1.5 shadow-xs"
-                  >
-                    <ShoppingCart className="w-3.5 h-3.5 text-emerald-600" />
-                    <span>Demo Shopper (Mary Wanjiku)</span>
-                  </button>
-                </div>
-              )}
-
-              {portal === 'staff' && (
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => quickLogin('staff')}
-                    className="py-2 px-3 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:border-blue-500 text-xs font-semibold text-slate-800 dark:text-slate-200 active:scale-95 transition flex items-center gap-1.5 shadow-xs"
-                  >
-                    <Tag className="w-3.5 h-3.5 text-blue-600" />
-                    <span>Cashier / Staff Demo</span>
-                  </button>
-                </div>
-              )}
-
-              {portal === 'management' && (
-                <div className="space-y-2">
-                  <button
-                    type="button"
-                    onClick={() => quickLogin('owner')}
-                    className="w-full py-2 px-3 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:border-indigo-500 text-xs font-semibold text-slate-800 dark:text-slate-200 active:scale-95 transition flex items-center justify-between shadow-xs"
-                  >
-                    <div className="flex items-center gap-2">
-                      <Building2 className="w-4 h-4 text-indigo-600" />
-                      <span>Chain Owner Demo (Grace Wambui)</span>
-                    </div>
-                    <span className="text-[10px] text-indigo-600 font-bold">Naivas Chain</span>
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
-
           {/* Mode 1: Login Form (Supports Email or Phone) */}
           {mode === 'login' && (
             <form onSubmit={handleLogin} className="space-y-3.5">
@@ -356,10 +302,10 @@ export const PortalLoginView: React.FC<PortalLoginViewProps> = ({
                     onChange={(e) => setIdentifier(e.target.value)}
                     placeholder={
                       portal === 'shopper'
-                        ? 'e.g. shopper@gmail.com or +254712345678'
+                        ? 'e.g. shopper@example.com or +254712345678'
                         : portal === 'staff'
-                        ? 'e.g. staff.westlands@naivas.com'
-                        : 'e.g. owner@naivas.com or admin@smartcart.com'
+                        ? 'e.g. staff@store.com'
+                        : 'e.g. owner@store.com'
                     }
                     required
                     className="w-full h-11 pl-9 pr-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white text-xs focus:outline-emerald-500"
@@ -572,12 +518,6 @@ export const PortalLoginView: React.FC<PortalLoginViewProps> = ({
                 </button>
               </form>
 
-              {demoCode && (
-                <div className="p-2.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 text-xs text-amber-800 dark:text-amber-300">
-                  Demo SMS/Email OTP Dispatched: <strong className="font-mono text-sm">{demoCode}</strong>
-                </div>
-              )}
-
               <form onSubmit={handleConfirmReset} className="space-y-3 pt-3 border-t border-slate-100 dark:border-slate-800">
                 <div>
                   <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
@@ -639,76 +579,76 @@ export const PortalLoginView: React.FC<PortalLoginViewProps> = ({
               </div>
 
               <form onSubmit={handleApplySupermarket} className="space-y-3">
-                <div>
-                  <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
-                    Supermarket Chain Name *
-                  </label>
-                  <input
-                    type="text"
-                    value={chainName}
-                    onChange={(e) => setChainName(e.target.value)}
-                    placeholder="e.g. QuickMart Supermarkets"
-                    required
-                    className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
-                  />
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
                     <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
-                      Contact Email *
-                    </label>
-                    <input
-                      type="email"
-                      value={contactEmail}
-                      onChange={(e) => setContactEmail(e.target.value)}
-                      placeholder="owner@quickmart.com"
-                      required
-                      className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
-                      Contact Phone *
-                    </label>
-                    <input
-                      type="tel"
-                      value={contactPhone}
-                      onChange={(e) => setContactPhone(e.target.value)}
-                      placeholder="+254712345678"
-                      required
-                      className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
-                    />
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
-                      City / Region of 1st Branch *
+                      Supermarket Chain Name *
                     </label>
                     <input
                       type="text"
-                      value={city}
-                      onChange={(e) => setCity(e.target.value)}
-                      placeholder="e.g. Nairobi, Kilimani"
+                      value={chainName}
+                      onChange={(e) => setChainName(e.target.value)}
+                      placeholder="e.g. Metro Supermarkets"
                       required
                       className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
                     />
                   </div>
-                  <div>
-                    <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
-                      First Branch Name (Optional)
-                    </label>
-                    <input
-                      type="text"
-                      value={firstBranchName}
-                      onChange={(e) => setFirstBranchName(e.target.value)}
-                      placeholder="e.g. Kilimani Junction Branch"
-                      className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
-                    />
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
+                        Contact Email *
+                      </label>
+                      <input
+                        type="email"
+                        value={contactEmail}
+                        onChange={(e) => setContactEmail(e.target.value)}
+                        placeholder="owner@store.com"
+                        required
+                        className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
+                        Contact Phone *
+                      </label>
+                      <input
+                        type="tel"
+                        value={contactPhone}
+                        onChange={(e) => setContactPhone(e.target.value)}
+                        placeholder="+254712345678"
+                        required
+                        className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
+                      />
+                    </div>
                   </div>
-                </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
+                        City / Region of 1st Branch *
+                      </label>
+                      <input
+                        type="text"
+                        value={city}
+                        onChange={(e) => setCity(e.target.value)}
+                        placeholder="e.g. Nairobi"
+                        required
+                        className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
+                        First Branch Name (Optional)
+                      </label>
+                      <input
+                        type="text"
+                        value={firstBranchName}
+                        onChange={(e) => setFirstBranchName(e.target.value)}
+                        placeholder="e.g. Central Branch"
+                        className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
+                      />
+                    </div>
+                  </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
@@ -793,9 +733,27 @@ export const PortalLoginView: React.FC<PortalLoginViewProps> = ({
 
           {/* Switch Portal Selector at Footer */}
           <div className="pt-4 border-t border-slate-100 dark:border-slate-800">
-            <span className="text-[11px] font-semibold text-slate-400 block mb-2">
-              {t.selectPortal}:
-            </span>
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-[11px] font-semibold text-slate-400">
+                {t.selectPortal}:
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  if (onOpenAdminLogin) {
+                    onOpenAdminLogin();
+                  } else {
+                    window.history.pushState({}, '', '/admin/login');
+                    window.dispatchEvent(new PopStateEvent('popstate'));
+                  }
+                }}
+                title={t.adminLoginTitle}
+                aria-label="System Admin Login"
+                className="p-1 rounded-md text-slate-300 dark:text-slate-600 hover:text-slate-600 dark:hover:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition"
+              >
+                <Shield className="w-3 h-3" />
+              </button>
+            </div>
             <div className="grid grid-cols-3 gap-2">
               <button
                 type="button"

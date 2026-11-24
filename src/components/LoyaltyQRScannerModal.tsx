@@ -1,8 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { X, QrCode, Camera, Upload, Trash2, Award, CheckCircle, AlertCircle, Sparkles } from 'lucide-react';
+import { X, QrCode, Camera, Upload, Trash2, Award, CheckCircle, AlertCircle } from 'lucide-react';
 import jsQR from 'jsqr';
-import QRCode from 'qrcode';
-import { LoyaltyCard, Supermarket } from '../types';
+import { LoyaltyCard } from '../types';
 import { useTranslation } from '../utils/i18n';
 
 interface LoyaltyQRScannerModalProps {
@@ -14,13 +13,6 @@ interface LoyaltyQRScannerModalProps {
   onCardLinked: (card: LoyaltyCard) => void;
   onCardRemoved: (cardId: string) => void;
   getHeaders: () => Record<string, string>;
-}
-
-interface SampleQrItem {
-  supermarketName: string;
-  supermarketCode: string;
-  payload: string;
-  dataUrl: string;
 }
 
 export const LoyaltyQRScannerModal: React.FC<LoyaltyQRScannerModalProps> = ({
@@ -39,7 +31,6 @@ export const LoyaltyQRScannerModal: React.FC<LoyaltyQRScannerModalProps> = ({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
-  const [sampleQrs, setSampleQrs] = useState<SampleQrItem[]>([]);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -71,36 +62,6 @@ export const LoyaltyQRScannerModal: React.FC<LoyaltyQRScannerModalProps> = ({
   useEffect(() => {
     return () => stopCamera();
   }, []);
-
-  // Load active supermarkets to generate store-specific sample QR codes
-  useEffect(() => {
-    if (!isOpen) return;
-    let cancelled = false;
-    fetch('/api/supermarkets')
-      .then((r) => r.json())
-      .then(async (list: Supermarket[]) => {
-        if (!Array.isArray(list) || cancelled) return;
-        const samples = await Promise.all(
-          list.slice(0, 4).map(async (sm, idx) => {
-            const code = sm.code.toUpperCase();
-            const cardNum = `${code.substring(0, 2)}-${884210 + idx * 137}`;
-            const payload = `SMARTCART:LOYALTY:${code}:${cardNum}`;
-            const dataUrl = await QRCode.toDataURL(payload, { width: 128, margin: 1 });
-            return {
-              supermarketName: sm.name,
-              supermarketCode: code,
-              payload,
-              dataUrl,
-            };
-          })
-        );
-        if (!cancelled) setSampleQrs(samples);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [isOpen]);
 
   const submitQrPayload = async (rawPayload: string) => {
     const trimmed = rawPayload.trim();
@@ -404,38 +365,6 @@ export const LoyaltyQRScannerModal: React.FC<LoyaltyQRScannerModalProps> = ({
             </div>
           )}
 
-          {/* Store-Specific Sample QR Cards for Testing */}
-          {sampleQrs.length > 0 && (
-            <div className="pt-2 border-t border-slate-100 dark:border-slate-800 space-y-2">
-              <p className="text-[11px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
-                <Sparkles className="w-3.5 h-3.5 text-emerald-500" />
-                <span>{t.loyaltySamplesTitle}</span>
-              </p>
-              <div className="grid grid-cols-2 gap-2">
-                {sampleQrs.map((sq) => (
-                  <button
-                    key={sq.supermarketCode}
-                    type="button"
-                    onClick={() => submitQrPayload(sq.payload)}
-                    disabled={isSubmitting}
-                    className="p-2.5 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-800 hover:border-emerald-500 text-center flex flex-col items-center gap-1.5 transition active:scale-98"
-                  >
-                    <img
-                      src={sq.dataUrl}
-                      alt={`${sq.supermarketName} Loyalty QR`}
-                      className="w-20 h-20 rounded-lg border border-slate-100"
-                    />
-                    <span className="text-[11px] font-bold text-slate-800 dark:text-slate-100 truncate w-full">
-                      {sq.supermarketName}
-                    </span>
-                    <span className="text-[9px] font-mono text-emerald-600 dark:text-emerald-400 truncate w-full">
-                      Tap to Link QR
-                    </span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
         </div>
       </div>
     </div>

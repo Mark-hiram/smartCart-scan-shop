@@ -184,6 +184,7 @@ function AppContent() {
                   navigateTo('/');
                   setActivePortal('shopper');
                 }}
+                onOpenAdminLogin={() => navigateTo('/admin/login')}
               />
             ) : activePortal === 'shopper' ? (
               <ShopperView onOpenStoreModal={() => setIsStoreModalOpen(true)} />
@@ -202,6 +203,7 @@ function AppContent() {
                     navigateTo('/');
                     setActivePortal('shopper');
                   }}
+                  onOpenAdminLogin={() => navigateTo('/admin/login')}
                 />
               )
             ) : activePortal === 'management' ? (
@@ -221,6 +223,7 @@ function AppContent() {
                     navigateTo('/');
                     setActivePortal('shopper');
                   }}
+                  onOpenAdminLogin={() => navigateTo('/admin/login')}
                 />
               )
             ) : null}
@@ -239,6 +242,7 @@ function AppContent() {
         isOpen={isAuthModalOpen}
         portal={activePortal}
         onSwitchPortal={setActivePortal}
+        onOpenAdminLogin={() => navigateTo('/admin/login')}
         onClose={() => setIsAuthModalOpen(false)}
       />
 

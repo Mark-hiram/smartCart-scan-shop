@@ -314,7 +314,7 @@ export const BarcodeScanner: React.FC<BarcodeScannerProps> = ({
         <div className="w-full mt-4 p-3 rounded-xl bg-slate-100 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-800">
           <div className="flex items-center justify-between mb-2">
             <span className="text-[11px] font-bold text-slate-700 dark:text-slate-300">
-              Demo Supermarket Shelf (Tap to simulate physical scan):
+              Store Shelf Quick-Tap (Tap item to scan):
             </span>
           </div>
           <div className="grid grid-cols-2 gap-1.5 max-h-40 overflow-y-auto pr-1">

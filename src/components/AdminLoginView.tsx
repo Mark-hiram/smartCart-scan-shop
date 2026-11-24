@@ -32,6 +32,9 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({ onSuccess, initi
   const [email, setEmail] = useState('');
   const [name, setName] = useState('');
   const [setupKey, setSetupKey] = useState('');
+  const [setupPassword, setSetupPassword] = useState('');
+  const [setupConfirmPassword, setSetupConfirmPassword] = useState('');
+  const [showSetupPassword, setShowSetupPassword] = useState(false);
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
 
@@ -83,14 +86,32 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({ onSuccess, initi
     e.preventDefault();
     setErrorMsg(null);
     setSuccessMsg(null);
-    setIsSubmitting(true);
 
-    const res = await setupAdmin(email, name, undefined, setupKey);
+    if (setupPassword.length < 8) {
+      setErrorMsg('Administrator password must be at least 8 characters long.');
+      return;
+    }
+
+    if (setupPassword !== setupConfirmPassword) {
+      setErrorMsg('Passwords do not match.');
+      return;
+    }
+
+    setIsSubmitting(true);
+    const res = await setupAdmin(email, name, undefined, setupKey, setupPassword);
     setIsSubmitting(false);
 
-    if (res.success && res.tempPassword) {
-      setGeneratedTempPassword(res.tempPassword);
-      setSuccessMsg('System Administrator initialized successfully.');
+    if (res.success) {
+      if (res.tempPassword) {
+        setGeneratedTempPassword(res.tempPassword);
+        setSuccessMsg('System Administrator initialized successfully.');
+      } else {
+        setSetupPassword('');
+        setSetupConfirmPassword('');
+        setPassword('');
+        setMode('login');
+        setSuccessMsg('Single System Administrator account created. Sign in with your email and password below.');
+      }
     } else {
       setErrorMsg(res.error || 'Setup failed');
     }
@@ -171,9 +192,6 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({ onSuccess, initi
         setSuccessMsg(data.message || t.adminRecoveryLinkDispatched);
         if (data.resetLink) {
           setRecoveryLinkGenerated(data.resetLink);
-          if (data.demoCode) {
-            setResetToken(data.demoCode);
-          }
         }
       } else {
         setErrorMsg(data.error || 'Failed to request recovery link');
@@ -315,9 +333,52 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({ onSuccess, initi
                         type="email"
                         value={email}
                         onChange={(e) => setEmail(e.target.value)}
-                        placeholder="admin@smartcart.internal"
+                        placeholder="admin@yourcompany.com"
                         required
                         className="w-full h-11 pl-9 pr-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white text-xs font-mono focus:outline-emerald-500"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
+                      Admin Password (min 8 characters) *
+                    </label>
+                    <div className="relative">
+                      <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-3.5" />
+                      <input
+                        type={showSetupPassword ? 'text' : 'password'}
+                        value={setupPassword}
+                        onChange={(e) => setSetupPassword(e.target.value)}
+                        placeholder="Create a strong administrator password"
+                        required
+                        minLength={8}
+                        className="w-full h-11 pl-9 pr-10 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white text-xs focus:outline-emerald-500"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowSetupPassword(!showSetupPassword)}
+                        className="absolute right-3 top-3.5 text-slate-400 hover:text-slate-600"
+                      >
+                        {showSetupPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
+                      Confirm Admin Password *
+                    </label>
+                    <div className="relative">
+                      <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-3.5" />
+                      <input
+                        type={showSetupPassword ? 'text' : 'password'}
+                        value={setupConfirmPassword}
+                        onChange={(e) => setSetupConfirmPassword(e.target.value)}
+                        placeholder="Re-enter administrator password"
+                        required
+                        minLength={8}
+                        className="w-full h-11 pl-9 pr-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white text-xs focus:outline-emerald-500"
                       />
                     </div>
                   </div>
@@ -327,7 +388,7 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({ onSuccess, initi
                       Setup Key (ADMIN_SETUP_KEY){adminSetupKeyRequired ? ' *' : ' (Optional in dev until set)'}
                     </label>
                     <div className="relative">
-                      <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-3.5" />
+                      <KeyRound className="w-4 h-4 text-slate-400 absolute left-3 top-3.5" />
                       <input
                         type="password"
                         value={setupKey}
@@ -364,7 +425,7 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({ onSuccess, initi
                     disabled={isSubmitting}
                     className="w-full h-12 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs transition active:scale-98 shadow-md flex items-center justify-center gap-2"
                   >
-                    <KeyRound className="w-4 h-4 text-emerald-400" />
+                    <ShieldCheck className="w-4 h-4 text-emerald-400" />
                     <span>{isSubmitting ? 'Creating Administrator...' : t.generateTempPassword}</span>
                   </button>
                 </form>
@@ -477,7 +538,7 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({ onSuccess, initi
                     type={showPassword ? 'text' : 'password'}
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
-                    placeholder="Enter password or temporary setup password"
+                    placeholder="Enter administrator password"
                     required
                     className="w-full h-11 pl-9 pr-10 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white text-xs focus:outline-emerald-500"
                   />

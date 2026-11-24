@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { BatteryCharging, BatteryFull, BatteryMedium, BatteryLow, BatteryWarning } from 'lucide-react';
+import { BatteryCharging, BatteryFull, BatteryMedium, BatteryLow, BatteryWarning, Zap } from 'lucide-react';
 import { useTranslation } from '../utils/i18n';
 
 interface BatteryManager extends EventTarget {
@@ -9,26 +9,39 @@ interface BatteryManager extends EventTarget {
   level: number;
 }
 
+export interface BatteryStatusState {
+  supported: boolean;
+  loading: boolean;
+  level: number | null;
+  charging: boolean;
+  chargingTime: number;
+  dischargingTime: number;
+}
+
 function formatDuration(seconds: number): string | null {
   if (!Number.isFinite(seconds) || seconds <= 0) return null;
   const totalMinutes = Math.round(seconds / 60);
+  if (totalMinutes <= 0) return '<1m';
   const hours = Math.floor(totalMinutes / 60);
   const mins = totalMinutes % 60;
   if (hours > 0) return `${hours}h ${mins}m`;
   return `${mins}m`;
 }
 
-export const BatteryStatusIndicator: React.FC = () => {
-  const { t } = useTranslation();
-  const [supported, setSupported] = useState<boolean>(true);
-  const [level, setLevel] = useState<number | null>(null);
-  const [charging, setCharging] = useState<boolean>(false);
-  const [dischargingTime, setDischargingTime] = useState<number>(Infinity);
+export function useBatteryStatus(): BatteryStatusState {
+  const [state, setState] = useState<BatteryStatusState>({
+    supported: true,
+    loading: true,
+    level: null,
+    charging: false,
+    chargingTime: Infinity,
+    dischargingTime: Infinity,
+  });
 
   useEffect(() => {
     const nav = navigator as Navigator & { getBattery?: () => Promise<BatteryManager> };
     if (typeof nav.getBattery !== 'function') {
-      setSupported(false);
+      setState((prev) => ({ ...prev, supported: false, loading: false }));
       return;
     }
 
@@ -37,13 +50,24 @@ export const BatteryStatusIndicator: React.FC = () => {
 
     const syncState = (bm: BatteryManager) => {
       if (cancelled) return;
-      setLevel(bm.level);
-      setCharging(bm.charging);
-      setDischargingTime(bm.dischargingTime);
+      setState({
+        supported: true,
+        loading: false,
+        level: bm.level,
+        charging: bm.charging,
+        chargingTime: bm.chargingTime,
+        dischargingTime: bm.dischargingTime,
+      });
     };
 
     const handleUpdate = () => {
       if (batteryRef) syncState(batteryRef);
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && batteryRef) {
+        syncState(batteryRef);
+      }
     };
 
     nav
@@ -54,21 +78,34 @@ export const BatteryStatusIndicator: React.FC = () => {
         syncState(bm);
         bm.addEventListener('levelchange', handleUpdate);
         bm.addEventListener('chargingchange', handleUpdate);
+        bm.addEventListener('chargingtimechange', handleUpdate);
         bm.addEventListener('dischargingtimechange', handleUpdate);
+        document.addEventListener('visibilitychange', handleVisibilityChange);
       })
       .catch(() => {
-        if (!cancelled) setSupported(false);
+        if (!cancelled) {
+          setState((prev) => ({ ...prev, supported: false, loading: false }));
+        }
       });
 
     return () => {
       cancelled = true;
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
       if (batteryRef) {
         batteryRef.removeEventListener('levelchange', handleUpdate);
         batteryRef.removeEventListener('chargingchange', handleUpdate);
+        batteryRef.removeEventListener('chargingtimechange', handleUpdate);
         batteryRef.removeEventListener('dischargingtimechange', handleUpdate);
       }
     };
   }, []);
+
+  return state;
+}
+
+export const BatteryStatusIndicator: React.FC = () => {
+  const { t } = useTranslation();
+  const { supported, loading, level, charging, chargingTime, dischargingTime } = useBatteryStatus();
 
   if (!supported) {
     return (
@@ -79,14 +116,14 @@ export const BatteryStatusIndicator: React.FC = () => {
     );
   }
 
-  if (level === null) {
+  if (loading || level === null) {
     return null;
   }
 
-  const percent = Math.round(level * 100);
+  const percent = Math.min(100, Math.max(0, Math.round(level * 100)));
   const isCritical = !charging && percent <= 15;
   const isLow = !charging && percent <= 25;
-  const remainingStr = !charging ? formatDuration(dischargingTime) : null;
+  const timeStr = charging ? formatDuration(chargingTime) : formatDuration(dischargingTime);
 
   const barColor = charging
     ? 'bg-emerald-500'
@@ -128,18 +165,20 @@ export const BatteryStatusIndicator: React.FC = () => {
     >
       <div className="max-w-md mx-auto px-3 py-1 flex items-center justify-between gap-2 text-[10px]">
         <div className={`flex items-center gap-1.5 font-semibold ${textColor}`}>
-          <Icon className="w-3.5 h-3.5 shrink-0" />
+          <Icon className={`w-3.5 h-3.5 shrink-0 ${charging ? 'animate-pulse' : ''}`} />
           <span className="tabular-nums">
             {t.batteryRemaining}: {percent}%
           </span>
           {charging && (
-            <span className="text-[9px] font-bold text-emerald-600 dark:text-emerald-400">
-              · {t.batteryCharging}
+            <span className="inline-flex items-center gap-0.5 text-[9px] font-bold text-emerald-600 dark:text-emerald-400">
+              <span>·</span>
+              <Zap className="w-3 h-3 fill-emerald-500 text-emerald-500 animate-pulse" aria-hidden="true" />
+              <span>{t.batteryCharging}</span>
             </span>
           )}
-          {remainingStr && (
+          {timeStr && (
             <span className="text-slate-400 font-normal tabular-nums">
-              · ~{remainingStr}
+              · ~{timeStr}
             </span>
           )}
         </div>
@@ -151,11 +190,15 @@ export const BatteryStatusIndicator: React.FC = () => {
             </span>
           )}
           <div
+            role="progressbar"
+            aria-label={t.batteryStatusLabel}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={percent}
             className="w-12 h-1.5 rounded-full bg-slate-200 dark:bg-slate-700 overflow-hidden shrink-0"
-            aria-hidden="true"
           >
             <div
-              className={`h-full rounded-full transition-all duration-300 ${barColor}`}
+              className={`h-full rounded-full transition-all duration-300 ${barColor} ${charging ? 'animate-pulse' : ''}`}
               style={{ width: `${percent}%` }}
             />
           </div>

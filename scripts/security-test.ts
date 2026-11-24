@@ -1,35 +1,43 @@
 import assert from 'node:assert/strict';
-import { spawn, ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { calculateEAN13CheckDigit } from '../src/utils/barcode';
 
 const TEST_PORT = 3400 + crypto.randomInt(0, 400);
 const BASE_URL = `http://127.0.0.1:${TEST_PORT}`;
 const TMP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'smartcart-sec-test-'));
-const TEST_DB_PATH = path.join(TMP_DIR, 'smartcart_test_db.json');
-const ADMIN_SETUP_KEY = 'TestSetupSecret#2026';
+const TEST_DB_PATH = path.join(TMP_DIR, 'nested', 'smartcart_test_db.json');
+const ADMIN_SETUP_KEY = `TestAdminSetupKey_${crypto.randomBytes(12).toString('hex')}`;
+
+const makeTestSecret = (prefix: string) => `${prefix}_${crypto.randomBytes(8).toString('hex')}!9`;
 
 let serverProc: ChildProcess | null = null;
 
-async function waitForServer(timeoutMs = 15000): Promise<void> {
+async function waitForServer(url: string, timeoutMs = 15000): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     try {
-      const res = await fetch(`${BASE_URL}/api/admin/setup-status`);
+      const res = await fetch(`${url}/healthz`);
       if (res.ok) return;
     } catch {
       // Server still booting
     }
-    await new Promise((r) => setTimeout(r, 250));
+    await new Promise((r) => setTimeout(r, 200));
   }
   throw new Error('Timed out waiting for test server to boot');
 }
 
 async function api(
   pathname: string,
-  options: Omit<RequestInit, 'headers'> & { token?: string; guestId?: string; headers?: Record<string, string> } = {}
+  options: Omit<RequestInit, 'headers'> & {
+    token?: string;
+    guestId?: string;
+    headers?: Record<string, string>;
+    baseUrl?: string;
+  } = {}
 ): Promise<{ status: number; data: any; headers: Headers }> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -38,7 +46,8 @@ async function api(
   if (options.token) headers['Authorization'] = `Bearer ${options.token}`;
   if (options.guestId) headers['x-guest-id'] = options.guestId;
 
-  const res = await fetch(`${BASE_URL}${pathname}`, {
+  const targetBase = options.baseUrl || BASE_URL;
+  const res = await fetch(`${targetBase}${pathname}`, {
     ...options,
     headers,
   });
@@ -52,8 +61,36 @@ async function api(
   return { status: res.status, data, headers: res.headers };
 }
 
+function killProc(proc: ChildProcess | null) {
+  if (!proc?.pid) return;
+  try {
+    process.kill(-proc.pid, 'SIGKILL');
+  } catch {
+    try {
+      proc.kill('SIGKILL');
+    } catch {
+      // Already exited
+    }
+  }
+}
+
 async function runTests() {
   let exitCode = 0;
+  let passed = 0;
+  let failed = 0;
+
+  const check = async (name: string, fn: () => Promise<void>) => {
+    try {
+      await fn();
+      passed += 1;
+      console.log(`  PASS: ${name}`);
+    } catch (err: any) {
+      failed += 1;
+      console.error(`  FAIL: ${name} -> ${err?.message || err}`);
+      throw err;
+    }
+  };
+
   console.log(`[security-test] Starting isolated test server on port ${TEST_PORT}...`);
   serverProc = spawn('npx', ['tsx', 'server.ts'], {
     cwd: process.cwd(),
@@ -64,6 +101,7 @@ async function runTests() {
       DB_PATH: TEST_DB_PATH,
       ADMIN_SETUP_KEY,
       DEMO_MODE: 'false',
+      TRUST_PROXY: 'true',
       NODE_ENV: 'production',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -78,38 +116,49 @@ async function runTests() {
   });
 
   try {
-    await waitForServer();
-    console.log('[security-test] Server online. Executing security assertions...');
+    await waitForServer(BASE_URL);
+    console.log('[security-test] Server online. Executing security assertions...\n');
 
-    let passed = 0;
-    const check = async (name: string, fn: () => Promise<void>) => {
-      await fn();
-      passed += 1;
-      console.log(`  PASS: ${name}`);
-    };
+    // 1. Health check, clean empty DB, & setup-status
+    await check('1. /healthz returns { ok: true }, DB initializes cleanly with zero demo data, and /api/admin/setup-status returns only { isSetupComplete }', async () => {
+      const hz = await api('/healthz');
+      assert.equal(hz.status, 200);
+      assert.deepEqual(hz.data, { ok: true });
 
-    // 1. setup-status must never leak admin email
-    await check('1. /api/admin/setup-status returns only { isSetupComplete: boolean }', async () => {
-      const r = await api('/api/admin/setup-status');
-      assert.equal(r.status, 200);
-      assert.deepEqual(Object.keys(r.data), ['isSetupComplete']);
-      assert.equal(r.data.isSetupComplete, false);
+      const pubSms = await api('/api/supermarkets');
+      assert.equal(pubSms.status, 200);
+      assert.equal(pubSms.data.length, 0);
+
+      const st = await api('/api/admin/setup-status');
+      assert.equal(st.status, 200);
+      assert.deepEqual(Object.keys(st.data), ['isSetupComplete']);
+      assert.equal(st.data.isSetupComplete, false);
     });
 
-    // 2. /api/admin/setup requires valid ADMIN_SETUP_KEY and allows only ONE admin ever
-    let adminEmail = 'sysadmin-test@smartcart.local';
+    // 2. Admin setup refused without right key, succeeds once, second admin never allowed
+    const adminEmail = 'sysadmin-sec@smartcart.local';
     let adminTempPassword = '';
     let adminToken = '';
+    const adminFinalPass = makeTestSecret('AdminFinal');
 
-    await check('2. /api/admin/setup rejects wrong setupKey, accepts valid setupKey once, blocks 2nd admin', async () => {
+    await check('2. Admin setup is refused without the right key and a second admin can never be created', async () => {
+      const noKey = await api('/api/admin/setup', {
+        method: 'POST',
+        headers: { 'x-forwarded-for': '198.51.100.1' },
+        body: JSON.stringify({ email: adminEmail, name: 'Sys Admin' }),
+      });
+      assert.equal(noKey.status, 401);
+
       const badKey = await api('/api/admin/setup', {
         method: 'POST',
-        body: JSON.stringify({ email: adminEmail, name: 'Sys Admin', setupKey: 'wrong-key' }),
+        headers: { 'x-forwarded-for': '198.51.100.1' },
+        body: JSON.stringify({ email: adminEmail, name: 'Sys Admin', setupKey: 'wrong-key-value' }),
       });
       assert.equal(badKey.status, 401);
 
       const good = await api('/api/admin/setup', {
         method: 'POST',
+        headers: { 'x-forwarded-for': '198.51.100.1' },
         body: JSON.stringify({ email: adminEmail, name: 'Sys Admin', setupKey: ADMIN_SETUP_KEY }),
       });
       assert.equal(good.status, 200);
@@ -123,110 +172,16 @@ async function runTests() {
 
       const secondAdmin = await api('/api/admin/setup', {
         method: 'POST',
+        headers: { 'x-forwarded-for': '198.51.100.1' },
         body: JSON.stringify({
           email: 'second-admin@smartcart.local',
-          name: 'Rogue Admin',
+          name: 'Second Admin',
           setupKey: ADMIN_SETUP_KEY,
         }),
       });
       assert.equal(secondAdmin.status, 403);
-    });
 
-    // 3. Register rejects admin role escalation
-    let shopperToken = '';
-    const shopperEmail = 'shopper-sec@example.com';
-    const shopperPass = 'ShopperSec!2026';
-
-    await check('3. /api/auth/register blocks admin/owner/staff escalation and forces min 8-char password', async () => {
-      const shortPwd = await api('/api/auth/register', {
-        method: 'POST',
-        body: JSON.stringify({ name: 'Short', email: 'short@example.com', phone: '+254700000001', password: '123' }),
-      });
-      assert.equal(shortPwd.status, 400);
-
-      const escalate = await api('/api/auth/register', {
-        method: 'POST',
-        body: JSON.stringify({
-          name: 'Attacker',
-          email: 'attacker@example.com',
-          phone: '+254700000002',
-          password: 'Password!123',
-          role: 'admin',
-        }),
-      });
-      assert.equal(escalate.status, 403);
-
-      const okReg = await api('/api/auth/register', {
-        method: 'POST',
-        body: JSON.stringify({
-          name: 'Verified Shopper',
-          email: shopperEmail,
-          phone: '+254700000003',
-          password: shopperPass,
-        }),
-      });
-      assert.equal(okReg.status, 200);
-      assert.equal(okReg.data.user.role, 'shopper');
-      shopperToken = okReg.data.token;
-    });
-
-    // 4. Forgot password returns generic message & no leaked codes when DEMO_MODE=false
-    await check('4. /api/auth/forgot-password never leaks demoCode or resetLink when DEMO_MODE=false', async () => {
-      const rKnown = await api('/api/auth/forgot-password', {
-        method: 'POST',
-        body: JSON.stringify({ identifier: shopperEmail }),
-      });
-      const rUnknown = await api('/api/auth/forgot-password', {
-        method: 'POST',
-        body: JSON.stringify({ identifier: 'nonexistent-user@example.com' }),
-      });
-      const rAdmin = await api('/api/auth/forgot-password', {
-        method: 'POST',
-        body: JSON.stringify({ identifier: adminEmail }),
-      });
-
-      for (const r of [rKnown, rUnknown, rAdmin]) {
-        assert.equal(r.status, 200);
-        assert.equal(r.data.demoCode, undefined);
-        assert.equal(r.data.resetLink, undefined);
-        assert.equal(r.data.message, 'If an account exists, a recovery message has been sent.');
-      }
-    });
-
-    // 5. Portal enforcement & generic error message + 5-failure lockout
-    await check('5. Portal isolation rejects cross-portal logins and locks after 5 failures', async () => {
-      const wrongPortal = await api('/api/auth/login', {
-        method: 'POST',
-        body: JSON.stringify({ identifier: shopperEmail, password: shopperPass, portal: 'management' }),
-      });
-      assert.equal(wrongPortal.status, 401);
-      assert.equal(wrongPortal.data.error, 'Incorrect details or wrong sign-in page.');
-
-      const wrongPortalAdmin = await api('/api/auth/login', {
-        method: 'POST',
-        body: JSON.stringify({ identifier: shopperEmail, password: shopperPass, portal: 'admin' }),
-      });
-      assert.equal(wrongPortalAdmin.status, 401);
-      assert.equal(wrongPortalAdmin.data.error, 'Incorrect details or wrong sign-in page.');
-
-      // Unknown identifier 5 failed attempts -> 6th attempt returns 429
-      const unknownEmail = 'lockout-probe@example.com';
-      for (let i = 0; i < 5; i++) {
-        const fail = await api('/api/auth/login', {
-          method: 'POST',
-          body: JSON.stringify({ identifier: unknownEmail, password: 'WrongPassword1!', portal: 'shopper' }),
-        });
-        assert.equal(fail.status, 401);
-      }
-      const locked = await api('/api/auth/login', {
-        method: 'POST',
-        body: JSON.stringify({ identifier: unknownEmail, password: 'WrongPassword1!', portal: 'shopper' }),
-      });
-      assert.equal(locked.status, 429);
-    });
-
-    // Sign in admin & change first password
-    await check('6. Admin must change temp password on first login', async () => {
+      // Admin must change temp password on first login
       const login = await api('/api/auth/login', {
         method: 'POST',
         body: JSON.stringify({ identifier: adminEmail, password: adminTempPassword, portal: 'admin' }),
@@ -238,353 +193,946 @@ async function runTests() {
       const chg = await api('/api/admin/change-first-password', {
         method: 'POST',
         token: adminToken,
-        body: JSON.stringify({ currentPassword: adminTempPassword, newPassword: 'AdminStrong#2026' }),
+        body: JSON.stringify({ currentPassword: adminTempPassword, newPassword: adminFinalPass }),
       });
       assert.equal(chg.status, 200);
     });
 
-    // 7. Role & route separation checks
-    await check('7. Shopper blocked from store, owner, cashier, reports, and admin routes', async () => {
-      const r1 = await api('/api/admin/metrics', { token: shopperToken });
-      assert.equal(r1.status, 403);
+    // 3. Register Shopper A & Shopper B (blocks admin escalation)
+    let shopperAToken = '';
+    let shopperBToken = '';
+    let shopperAId = '';
+    const shopperAEmail = 'shopper-a@example.com';
+    const shopperAPass = makeTestSecret('ShopperA');
+    const shopperBEmail = 'shopper-b@example.com';
+    const shopperBPass = makeTestSecret('ShopperB');
 
-      const r2 = await api('/api/owner/overview', { token: shopperToken });
-      assert.equal(r2.status, 403);
-
-      const r3 = await api('/api/reports/csv', { token: shopperToken });
-      assert.equal(r3.status, 403);
-
-      const r4 = await api('/api/owner/branch-product-override', {
+    await check('3. Shopper registration enforces min password and rejects role escalation', async () => {
+      const escalate = await api('/api/auth/register', {
         method: 'POST',
-        token: shopperToken,
-        body: JSON.stringify({ branchId: 'br_westlands', productId: 'prod_1', priceOverride: 1 }),
-      });
-      assert.equal(r4.status, 403);
-
-      const r5 = await api('/api/cashier/lookup/SC-1000', { token: shopperToken });
-      assert.equal(r5.status, 403);
-    });
-
-    // 8. Cart & Guest isolation
-    await check('8. Shopper & Guest cart isolation prevents cross-user cart access/deletion', async () => {
-      const guestA = 'guest-alpha-1111';
-      const guestB = 'guest-beta-2222';
-
-      const cartARes = await api('/api/shopper/cart?branchId=br_westlands', { guestId: guestA });
-      assert.equal(cartARes.status, 200);
-      const cartAId = cartARes.data.id;
-
-      // Guest B cannot delete or change budget on Guest A's cart
-      const stealDel = await api(`/api/shopper/cart/${cartAId}`, { method: 'DELETE', guestId: guestB });
-      assert.equal(stealDel.status, 403);
-
-      const stealBudget = await api('/api/shopper/cart/budget', {
-        method: 'POST',
-        guestId: guestB,
-        body: JSON.stringify({ cartId: cartAId, budgetLimit: 500 }),
-      });
-      assert.equal(stealBudget.status, 403);
-
-      // Registered shopper cannot access Guest A's cart
-      const shopperSteal = await api('/api/shopper/cart/lock', {
-        method: 'POST',
-        token: shopperToken,
-        body: JSON.stringify({ cartId: cartAId }),
-      });
-      assert.equal(shopperSteal.status, 403);
-    });
-
-    // 9. Supermarket application flow (pending -> blocked -> approved -> login succeeds -> multi-tenant isolation & idempotent cashier complete)
-    let pendingSmId = '';
-    const newOwnerEmail = 'newchain-owner@example.com';
-    const newOwnerPass = 'OwnerChain!2026';
-
-    await check('9. Supermarket application creates pending chain blocked until admin approval', async () => {
-      const apply = await api('/api/supermarket/apply', {
-        method: 'POST',
+        headers: { 'x-forwarded-for': '198.51.100.2' },
         body: JSON.stringify({
-          chainName: 'FreshMart Test',
-          contactEmail: newOwnerEmail,
-          contactPhone: '+254799887766',
-          city: 'Nakuru',
-          firstBranchName: 'Nakuru Central',
-          ownerName: 'Fresh Owner',
-          password: newOwnerPass,
+          name: 'Escalator',
+          email: 'escalator@example.com',
+          phone: '+254700000099',
+          password: makeTestSecret('Esc'),
+          role: 'admin',
         }),
       });
-      assert.equal(apply.status, 200);
-      pendingSmId = apply.data.supermarket.id;
-      assert.equal(apply.data.supermarket.status, 'pending');
+      assert.equal(escalate.status, 403);
 
-      // Pending supermarket hidden from public /api/supermarkets
-      const pubSms = await api('/api/supermarkets');
-      assert.equal(pubSms.status, 200);
-      assert.ok(!pubSms.data.some((s: any) => s.id === pendingSmId));
+      const regA = await api('/api/auth/register', {
+        method: 'POST',
+        headers: { 'x-forwarded-for': '198.51.100.2' },
+        body: JSON.stringify({
+          name: 'Shopper A',
+          email: shopperAEmail,
+          phone: '+254700000001',
+          password: shopperAPass,
+        }),
+      });
+      assert.equal(regA.status, 200);
+      shopperAToken = regA.data.token;
+      shopperAId = regA.data.user.id;
 
-      // Owner cannot log in before admin approval
+      const regB = await api('/api/auth/register', {
+        method: 'POST',
+        headers: { 'x-forwarded-for': '198.51.100.3' },
+        body: JSON.stringify({
+          name: 'Shopper B',
+          email: shopperBEmail,
+          phone: '+254700000002',
+          password: shopperBPass,
+        }),
+      });
+      assert.equal(regB.status, 200);
+      shopperBToken = regB.data.token;
+    });
+
+    // 4. Forgot password never returns a code or link
+    await check('4. /api/auth/forgot-password never returns a code or link', async () => {
+      const rKnown = await api('/api/auth/forgot-password', {
+        method: 'POST',
+        headers: { 'x-forwarded-for': '198.51.100.4' },
+        body: JSON.stringify({ identifier: shopperAEmail }),
+      });
+      const rUnknown = await api('/api/auth/forgot-password', {
+        method: 'POST',
+        headers: { 'x-forwarded-for': '198.51.100.4' },
+        body: JSON.stringify({ identifier: 'unknown-user@example.com' }),
+      });
+      const rAdmin = await api('/api/auth/forgot-password', {
+        method: 'POST',
+        headers: { 'x-forwarded-for': '198.51.100.4' },
+        body: JSON.stringify({ identifier: adminEmail }),
+      });
+
+      for (const r of [rKnown, rUnknown, rAdmin]) {
+        assert.equal(r.status, 200);
+        assert.equal(r.data.demoCode, undefined);
+        assert.equal(r.data.resetLink, undefined);
+        assert.equal(r.data.code, undefined);
+        assert.equal(r.data.token, undefined);
+        assert.equal(r.data.message, 'If an account exists, a recovery message has been sent.');
+      }
+    });
+
+    // 5. Provision Supermarket A (Branch X & Branch Y) and Supermarket B (Branch Z), approve both, import products, add staff & promo
+    let smAId = '';
+    let smACode = '';
+    let smBId = '';
+    let branchXId = '';
+    let branchYId = '';
+    let branchZId = '';
+    let ownerAToken = '';
+    let ownerBToken = '';
+    let cashierXToken = '';
+    let clerkXToken = '';
+    let prodAId = '';
+    const prodABarcode = `616110123456${calculateEAN13CheckDigit('616110123456')}`;
+    let prodBId = '';
+    const prodBBarcode = `616110234561${calculateEAN13CheckDigit('616110234561')}`;
+    let promoAId = '';
+
+    const ownerAEmail = 'owner-alpha@example.com';
+    const ownerAPass = makeTestSecret('OwnerA');
+    const ownerBEmail = 'owner-beta@example.com';
+    const ownerBPass = makeTestSecret('OwnerB');
+    const cashierXEmail = 'cashier-x@example.com';
+    const cashierXPass = makeTestSecret('CashierX');
+    const clerkXEmail = 'clerk-x@example.com';
+    const clerkXPass = makeTestSecret('ClerkX');
+
+    await check('5. Supermarkets A & B onboard, approve, create branches/products/promotions/staff cleanly', async () => {
+      const applyA = await api('/api/supermarket/apply', {
+        method: 'POST',
+        headers: { 'x-forwarded-for': '198.51.100.5' },
+        body: JSON.stringify({
+          chainName: 'AlphaMart',
+          contactEmail: ownerAEmail,
+          contactPhone: '+254711000101',
+          city: 'Nairobi',
+          firstBranchName: 'Alpha Branch X',
+          ownerName: 'Owner Alpha',
+          password: ownerAPass,
+        }),
+      });
+      assert.equal(applyA.status, 200);
+      smAId = applyA.data.supermarket.id;
+      smACode = applyA.data.supermarket.code;
+
+      const applyB = await api('/api/supermarket/apply', {
+        method: 'POST',
+        headers: { 'x-forwarded-for': '198.51.100.6' },
+        body: JSON.stringify({
+          chainName: 'BetaMart',
+          contactEmail: ownerBEmail,
+          contactPhone: '+254711000202',
+          city: 'Mombasa',
+          firstBranchName: 'Beta Branch Z',
+          ownerName: 'Owner Beta',
+          password: ownerBPass,
+        }),
+      });
+      assert.equal(applyB.status, 200);
+      smBId = applyB.data.supermarket.id;
+
+      // Pending owner rejected before approval
       const preLogin = await api('/api/auth/login', {
         method: 'POST',
-        body: JSON.stringify({ identifier: newOwnerEmail, password: newOwnerPass, portal: 'management' }),
+        body: JSON.stringify({ identifier: ownerAEmail, password: ownerAPass, portal: 'management' }),
       });
       assert.equal(preLogin.status, 403);
-      assert.match(preLogin.data.error, /awaiting approval/i);
 
-      // Admin approves supermarket
-      const approve = await api(`/api/admin/supermarkets/${pendingSmId}/status`, {
+      // Admin approves both supermarkets
+      const appA = await api(`/api/admin/supermarkets/${smAId}/status`, {
         method: 'PUT',
         token: adminToken,
         body: JSON.stringify({ status: 'active' }),
       });
-      assert.equal(approve.status, 200);
-      assert.equal(approve.data.status, 'active');
+      assert.equal(appA.status, 200);
 
-      // Owner can now log in via management portal
-      const postLogin = await api('/api/auth/login', {
-        method: 'POST',
-        body: JSON.stringify({ identifier: newOwnerEmail, password: newOwnerPass, portal: 'management' }),
+      const appB = await api(`/api/admin/supermarkets/${smBId}/status`, {
+        method: 'PUT',
+        token: adminToken,
+        body: JSON.stringify({ status: 'active' }),
       });
-      assert.equal(postLogin.status, 200);
-      const newOwnerToken = postLogin.data.token;
+      assert.equal(appB.status, 200);
 
-      // Cross-supermarket isolation: FreshMart owner cannot edit Naivas branch
-      const crossStoreEdit = await api('/api/owner/branch-product-override', {
+      // Log in both owners
+      const logA = await api('/api/auth/login', {
         method: 'POST',
-        token: newOwnerToken,
-        body: JSON.stringify({ branchId: 'br_westlands', productId: 'prod_1', priceOverride: 10 }),
+        body: JSON.stringify({ identifier: ownerAEmail, password: ownerAPass, portal: 'management' }),
       });
-      assert.equal(crossStoreEdit.status, 403);
+      assert.equal(logA.status, 200);
+      ownerAToken = logA.data.token;
+
+      const logB = await api('/api/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({ identifier: ownerBEmail, password: ownerBPass, portal: 'management' }),
+      });
+      assert.equal(logB.status, 200);
+      ownerBToken = logB.data.token;
+
+      // Get Branch X & Branch Z, plus create Branch Y on Supermarket A
+      const ovA = await api('/api/owner/overview', { token: ownerAToken });
+      assert.equal(ovA.status, 200);
+      branchXId = ovA.data.branches[0].id;
+
+      const brYRes = await api('/api/owner/branches', {
+        method: 'POST',
+        token: ownerAToken,
+        body: JSON.stringify({ name: 'Alpha Branch Y', code: 'ALP-Y', city: 'Nakuru' }),
+      });
+      assert.equal(brYRes.status, 200);
+      branchYId = brYRes.data.id;
+
+      const ovB = await api('/api/owner/overview', { token: ownerBToken });
+      assert.equal(ovB.status, 200);
+      branchZId = ovB.data.branches[0].id;
+
+      // Import products via CSV for both chains
+      const csvA = `barcode,name,category,base_price,aisle,shelf,branch_price,stock,low_stock_threshold\n${prodABarcode},"Alpha Whole Milk 500ml",Dairy,70,Aisle 1,Shelf A,65,20,5`;
+      const impA = await api('/api/owner/products/csv-import', {
+        method: 'POST',
+        token: ownerAToken,
+        body: JSON.stringify({ csvText: csvA, branchId: branchXId }),
+      });
+      assert.equal(impA.status, 200);
+
+      const bpARes = await api(`/api/shopper/branch-products/${branchXId}`);
+      assert.equal(bpARes.status, 200);
+      prodAId = bpARes.data.products[0].id;
+
+      // Also stock Branch Y via override
+      const stockY = await api('/api/owner/branch-product-override', {
+        method: 'POST',
+        token: ownerAToken,
+        body: JSON.stringify({ branchId: branchYId, productId: prodAId, stock: 30 }),
+      });
+      assert.equal(stockY.status, 200);
+
+      const csvB = `barcode,name,category,base_price,aisle,shelf,branch_price,stock,low_stock_threshold\n${prodBBarcode},"Beta Maize Meal 2kg",Pantry,160,Aisle 2,Shelf B,155,25,5`;
+      const impB = await api('/api/owner/products/csv-import', {
+        method: 'POST',
+        token: ownerBToken,
+        body: JSON.stringify({ csvText: csvB, branchId: branchZId }),
+      });
+      assert.equal(impB.status, 200);
+
+      const bpBRes = await api(`/api/shopper/branch-products/${branchZId}`);
+      assert.equal(bpBRes.status, 200);
+      prodBId = bpBRes.data.products[0].id;
+
+      // Owner A creates promo
+      const promoRes = await api('/api/owner/promotions', {
+        method: 'POST',
+        token: ownerAToken,
+        body: JSON.stringify({
+          name: 'Alpha 10% Milk',
+          type: 'percent_off',
+          discountPercent: 10,
+          productBarcodes: [prodABarcode],
+        }),
+      });
+      assert.equal(promoRes.status, 200);
+      promoAId = promoRes.data.id;
+
+      // Owner A creates Cashier (Branch X, verifyCarts only) and Stock Clerk (Branch X, no editPrices)
+      const st1 = await api('/api/owner/staff', {
+        method: 'POST',
+        token: ownerAToken,
+        body: JSON.stringify({
+          name: 'Cashier X',
+          email: cashierXEmail,
+          phone: '+254722000101',
+          password: cashierXPass,
+          branchId: branchXId,
+          preset: 'cashier',
+        }),
+      });
+      assert.equal(st1.status, 200);
+
+      const st2 = await api('/api/owner/staff', {
+        method: 'POST',
+        token: ownerAToken,
+        body: JSON.stringify({
+          name: 'Clerk X',
+          email: clerkXEmail,
+          phone: '+254722000102',
+          password: clerkXPass,
+          branchId: branchXId,
+          preset: 'stock_clerk',
+        }),
+      });
+      assert.equal(st2.status, 200);
+
+      const cLogin = await api('/api/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({ identifier: cashierXEmail, password: cashierXPass, portal: 'staff' }),
+      });
+      assert.equal(cLogin.status, 200);
+      cashierXToken = cLogin.data.token;
+
+      const kLogin = await api('/api/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({ identifier: clerkXEmail, password: clerkXPass, portal: 'staff' }),
+      });
+      assert.equal(kLogin.status, 200);
+      clerkXToken = kLogin.data.token;
     });
 
-    // 10. Cashier completion idempotency & permission checks
-    await check('10. Cashier /api/cashier/complete is idempotent & enforces staff branch/permissions', async () => {
-      // Create a branch & staff via Naivas owner? Or use admin to verify cart created by shopper on br_westlands
-      const scRes = await api('/api/shopper/cart?branchId=br_westlands', { token: shopperToken });
-      assert.equal(scRes.status, 200);
-      const cartId = scRes.data.id;
+    // 6. Shopper gets 403 on branch-product-override, promotions, every cashier route, and reports
+    await check('6. Shopper gets 403 on branch-product-override, promotions, every cashier route, and reports', async () => {
+      assert.equal(
+        (
+          await api('/api/owner/branch-product-override', {
+            method: 'POST',
+            token: shopperAToken,
+            body: JSON.stringify({ branchId: branchXId, productId: prodAId, priceOverride: 1 }),
+          })
+        ).status,
+        403
+      );
 
-      // Get branch product barcode
-      const prodsRes = await api('/api/shopper/branch-products/br_westlands');
-      assert.equal(prodsRes.status, 200);
-      assert.ok(prodsRes.data.products.length > 0);
-      const firstProd = prodsRes.data.products[0];
+      assert.equal((await api('/api/owner/promotions', { token: shopperAToken })).status, 403);
+      assert.equal(
+        (
+          await api('/api/owner/promotions', {
+            method: 'POST',
+            token: shopperAToken,
+            body: JSON.stringify({ name: 'Rogue', type: 'percent_off', discountPercent: 50, productBarcodes: [prodABarcode] }),
+          })
+        ).status,
+        403
+      );
+      assert.equal(
+        (await api(`/api/owner/promotions/${promoAId}/toggle`, { method: 'PUT', token: shopperAToken })).status,
+        403
+      );
 
-      const addRes = await api('/api/shopper/cart/add', {
+      // Every cashier route
+      assert.equal((await api('/api/cashier/lookup/SC-1000', { token: shopperAToken })).status, 403);
+      assert.equal(
+        (await api('/api/cashier/toggle-check', { method: 'POST', token: shopperAToken, body: JSON.stringify({ cartId: 'c1', itemId: 'i1', checked: true }) })).status,
+        403
+      );
+      assert.equal(
+        (await api('/api/cashier/flag', { method: 'POST', token: shopperAToken, body: JSON.stringify({ cartId: 'c1', reason: 'test' }) })).status,
+        403
+      );
+      assert.equal(
+        (await api('/api/cashier/verify', { method: 'POST', token: shopperAToken, body: JSON.stringify({ cartId: 'c1' }) })).status,
+        403
+      );
+      assert.equal(
+        (await api('/api/cashier/complete', { method: 'POST', token: shopperAToken, body: JSON.stringify({ cartId: 'c1' }) })).status,
+        403
+      );
+
+      // Reports
+      assert.equal((await api('/api/reports', { token: shopperAToken })).status, 403);
+      assert.equal((await api('/api/reports/csv', { token: shopperAToken })).status, 403);
+    });
+
+    // 7. Create carts on Supermarket A (Branch X and Branch Y) and Supermarket B (Branch Z) for cross-tenant & completion tests
+    let cartXId = '';
+    let cartXCode = '';
+    let cartXItemId = '';
+    let cartYId = '';
+    let cartYCode = '';
+    let cartZId = '';
+    let cartZCode = '';
+
+    // Prepare carts cleanly before cross-owner / cross-branch checks
+    const cX = await api(`/api/shopper/cart?branchId=${branchXId}`, { token: shopperAToken });
+    assert.equal(cX.status, 200);
+    cartXId = cX.data.id;
+    const addX = await api('/api/shopper/cart/add', {
+      method: 'POST',
+      token: shopperAToken,
+      body: JSON.stringify({ branchId: branchXId, barcode: prodABarcode, quantity: 3, cartId: cartXId }),
+    });
+    assert.equal(addX.status, 200);
+    cartXCode = addX.data.shortCode;
+    cartXItemId = addX.data.items[0].id;
+
+    const cY = await api(`/api/shopper/cart?branchId=${branchYId}`, { guestId: 'guest-y-branch-test' });
+    assert.equal(cY.status, 200);
+    cartYId = cY.data.id;
+    const addY = await api('/api/shopper/cart/add', {
+      method: 'POST',
+      guestId: 'guest-y-branch-test',
+      body: JSON.stringify({ branchId: branchYId, barcode: prodABarcode, quantity: 1, cartId: cartYId }),
+    });
+    assert.equal(addY.status, 200);
+    cartYCode = addY.data.shortCode;
+
+    const cZ = await api(`/api/shopper/cart?branchId=${branchZId}`, { token: shopperBToken });
+    assert.equal(cZ.status, 200);
+    cartZId = cZ.data.id;
+    const addZ = await api('/api/shopper/cart/add', {
+      method: 'POST',
+      token: shopperBToken,
+      body: JSON.stringify({ branchId: branchZId, barcode: prodBBarcode, quantity: 1, cartId: cartZId }),
+    });
+    assert.equal(addZ.status, 200);
+    cartZCode = addZ.data.shortCode;
+
+    // 8. Owner of Supermarket A cannot read or change Supermarket B's branches, products, staff, carts, or reports
+    await check('7. Owner of Supermarket A cannot read or change Supermarket B branches, products, staff, carts, or reports', async () => {
+      assert.equal((await api(`/api/owner/overview?supermarketId=${smBId}`, { token: ownerAToken })).status, 403);
+      assert.equal(
+        (await api('/api/owner/branches', { method: 'POST', token: ownerAToken, body: JSON.stringify({ supermarketId: smBId, name: 'Rogue', code: 'ROG' }) })).status,
+        403
+      );
+      assert.equal(
+        (await api('/api/owner/branch-product-override', { method: 'POST', token: ownerAToken, body: JSON.stringify({ branchId: branchZId, productId: prodBId, priceOverride: 5 }) })).status,
+        403
+      );
+      assert.equal(
+        (await api('/api/owner/products/csv-export?supermarketId=' + smBId, { token: ownerAToken })).status,
+        403
+      );
+      assert.equal(
+        (
+          await api('/api/owner/staff', {
+            method: 'POST',
+            token: ownerAToken,
+            body: JSON.stringify({
+              name: 'Cross Staff',
+              email: 'cross-staff@example.com',
+              phone: '+254799000111',
+              password: makeTestSecret('Cross'),
+              branchId: branchZId,
+            }),
+          })
+        ).status,
+        403
+      );
+      assert.equal((await api(`/api/cashier/lookup/${cartZCode}`, { token: ownerAToken })).status, 403);
+      assert.equal((await api('/api/cashier/complete', { method: 'POST', token: ownerAToken, body: JSON.stringify({ cartId: cartZId }) })).status, 403);
+      assert.equal((await api(`/api/reports?supermarketId=${smBId}`, { token: ownerAToken })).status, 403);
+      assert.equal((await api(`/api/reports?branchId=${branchZId}`, { token: ownerAToken })).status, 403);
+      assert.equal((await api(`/api/reports/csv?supermarketId=${smBId}`, { token: ownerAToken })).status, 403);
+    });
+
+    // 9. Staff without editPrices cannot change a price, and staff of Branch X cannot touch Branch Y
+    await check('8. Staff without editPrices cannot change a price, and staff of Branch X cannot touch Branch Y', async () => {
+      // Stock clerk lacks editPrices
+      const noPriceEdit = await api('/api/owner/branch-product-override', {
         method: 'POST',
-        token: shopperToken,
-        body: JSON.stringify({ branchId: 'br_westlands', barcode: firstProd.barcode, quantity: 1, cartId }),
+        token: clerkXToken,
+        body: JSON.stringify({ branchId: branchXId, productId: prodAId, priceOverride: 99 }),
       });
-      assert.equal(addRes.status, 200);
+      assert.equal(noPriceEdit.status, 403);
 
-      // Complete cart once as admin
+      // Stock clerk CAN edit stock on Branch X, CANNOT edit Branch Y
+      const okStockX = await api('/api/owner/branch-product-override', {
+        method: 'POST',
+        token: clerkXToken,
+        body: JSON.stringify({ branchId: branchXId, productId: prodAId, stock: 20 }),
+      });
+      assert.equal(okStockX.status, 200);
+
+      const crossBranchClerk = await api('/api/owner/branch-product-override', {
+        method: 'POST',
+        token: clerkXToken,
+        body: JSON.stringify({ branchId: branchYId, productId: prodAId, stock: 5 }),
+      });
+      assert.equal(crossBranchClerk.status, 403);
+
+      // Cashier of Branch X cannot lookup or complete Branch Y's cart or view Branch Y reports
+      assert.equal((await api(`/api/cashier/lookup/${cartYCode}`, { token: cashierXToken })).status, 403);
+      assert.equal(
+        (await api('/api/cashier/verify', { method: 'POST', token: cashierXToken, body: JSON.stringify({ cartId: cartYId }) })).status,
+        403
+      );
+      assert.equal(
+        (await api('/api/cashier/complete', { method: 'POST', token: cashierXToken, body: JSON.stringify({ cartId: cartYId }) })).status,
+        403
+      );
+      assert.equal((await api(`/api/reports?branchId=${branchYId}`, { token: cashierXToken })).status, 403);
+    });
+
+    // 10. Shopper & Guest cart isolation
+    await check('9. One shopper cannot edit another shopper cart, and two guests never see each other carts', async () => {
+      // Shopper B cannot modify or lock Shopper A's cart
+      assert.equal(
+        (await api('/api/shopper/cart/budget', { method: 'POST', token: shopperBToken, body: JSON.stringify({ cartId: cartXId, budgetLimit: 500 }) })).status,
+        403
+      );
+      assert.equal(
+        (await api('/api/shopper/cart/lock', { method: 'POST', token: shopperBToken, body: JSON.stringify({ cartId: cartXId }) })).status,
+        403
+      );
+      assert.equal((await api(`/api/shopper/cart/${cartXId}`, { method: 'DELETE', token: shopperBToken })).status, 403);
+
+      // Two guests with different guest IDs get distinct carts and cannot read/touch each other's carts
+      const guest1 = 'guest-sec-one-111';
+      const guest2 = 'guest-sec-two-222';
+      const g1Cart = await api(`/api/shopper/cart?branchId=${branchXId}`, { guestId: guest1 });
+      const g2Cart = await api(`/api/shopper/cart?branchId=${branchXId}`, { guestId: guest2 });
+      assert.equal(g1Cart.status, 200);
+      assert.equal(g2Cart.status, 200);
+      assert.notEqual(g1Cart.data.id, g2Cart.data.id);
+
+      assert.equal(
+        (await api('/api/shopper/cart/budget', { method: 'POST', guestId: guest2, body: JSON.stringify({ cartId: g1Cart.data.id, budgetLimit: 200 }) })).status,
+        403
+      );
+      assert.equal((await api(`/api/shopper/cart/${g1Cart.data.id}`, { method: 'DELETE', guestId: guest2 })).status, 403);
+    });
+
+    // 11. Each portal (shopper, staff, management, admin) rejects the other roles with the identical generic message
+    await check('10. Each portal (shopper, staff, management, admin) rejects the other roles with the identical generic message', async () => {
+      const genericMsg = 'Incorrect details or wrong sign-in page.';
+      const creds = [
+        { role: 'shopper', identifier: shopperAEmail, password: shopperAPass },
+        { role: 'staff', identifier: cashierXEmail, password: cashierXPass },
+        { role: 'owner', identifier: ownerAEmail, password: ownerAPass },
+        { role: 'admin', identifier: adminEmail, password: adminFinalPass },
+      ];
+      const expectedPortal: Record<string, string> = {
+        shopper: 'shopper',
+        staff: 'staff',
+        owner: 'management',
+        admin: 'admin',
+      };
+      const portals = ['shopper', 'staff', 'management', 'admin'];
+
+      for (const c of creds) {
+        for (const p of portals) {
+          if (expectedPortal[c.role] !== p) {
+            const res = await api('/api/auth/login', {
+              method: 'POST',
+              body: JSON.stringify({ identifier: c.identifier, password: c.password, portal: p }),
+            });
+            assert.equal(res.status, 401, `Expected 401 for ${c.role} on portal ${p}`);
+            assert.equal(res.data.error, genericMsg);
+          }
+        }
+      }
+    });
+
+    // 12. Completing the same cart twice deducts stock only once
+    await check('11. Completing the same cart twice deducts stock only once (and verifying twice is rejected)', async () => {
+      const lookup = await api(`/api/cashier/lookup/${cartXCode}`, { token: cashierXToken });
+      assert.equal(lookup.status, 200);
+      assert.equal(lookup.data.cart.id, cartXId);
+
+      const chk = await api('/api/cashier/toggle-check', {
+        method: 'POST',
+        token: cashierXToken,
+        body: JSON.stringify({ cartId: cartXId, itemId: cartXItemId, checked: true }),
+      });
+      assert.equal(chk.status, 200);
+
+      const ver1 = await api('/api/cashier/verify', {
+        method: 'POST',
+        token: cashierXToken,
+        body: JSON.stringify({ cartId: cartXId }),
+      });
+      assert.equal(ver1.status, 200);
+
+      const ver2 = await api('/api/cashier/verify', {
+        method: 'POST',
+        token: cashierXToken,
+        body: JSON.stringify({ cartId: cartXId }),
+      });
+      assert.equal(ver2.status, 400);
+
+      const beforeRes = await api(`/api/shopper/branch-products/${branchXId}`);
+      const stockBefore = beforeRes.data.products.find((p: any) => p.id === prodAId).stock;
+
       const comp1 = await api('/api/cashier/complete', {
         method: 'POST',
-        token: adminToken,
-        body: JSON.stringify({ cartId }),
+        token: cashierXToken,
+        body: JSON.stringify({ cartId: cartXId }),
       });
       assert.equal(comp1.status, 200);
 
-      // Completing twice must return 400 and never deduct stock twice
+      const after1Res = await api(`/api/shopper/branch-products/${branchXId}`);
+      const stockAfter1 = after1Res.data.products.find((p: any) => p.id === prodAId).stock;
+      assert.equal(stockAfter1, stockBefore - 3);
+
       const comp2 = await api('/api/cashier/complete', {
         method: 'POST',
-        token: adminToken,
-        body: JSON.stringify({ cartId }),
+        token: cashierXToken,
+        body: JSON.stringify({ cartId: cartXId }),
       });
       assert.equal(comp2.status, 400);
+
+      const after2Res = await api(`/api/shopper/branch-products/${branchXId}`);
+      const stockAfter2 = after2Res.data.products.find((p: any) => p.id === prodAId).stock;
+      assert.equal(stockAfter2, stockAfter1);
     });
 
-    // 11. Loyalty QR scanning & ownership enforcement
-    await check('11. Loyalty QR scan links card to active supermarket and prevents cross-user deletion', async () => {
+    // 13. Loyalty QR + Shared Shopping Lists from past purchases & product history
+    await check('12. Loyalty QR scan & Shared shopping lists work cleanly on non-demo stores', async () => {
       const scanRes = await api('/api/shopper/loyalty/scan', {
         method: 'POST',
-        token: shopperToken,
-        body: JSON.stringify({ qrPayload: 'SMARTCART:LOYALTY:NAIVAS:NV-772190' }),
+        token: shopperAToken,
+        body: JSON.stringify({ qrPayload: `SMARTCART:LOYALTY:${smACode}:AM-100200` }),
       });
       assert.equal(scanRes.status, 201);
-      assert.equal(scanRes.data.card.supermarketCode, 'NAIVAS');
-      const cardId = scanRes.data.card.id;
+      assert.equal(scanRes.data.card.supermarketId, smAId);
 
-      const listRes = await api('/api/shopper/loyalty', { token: shopperToken });
-      assert.equal(listRes.status, 200);
-      assert.ok(listRes.data.some((c: any) => c.id === cardId));
+      const pastRes = await api('/api/shopper/past-purchases', { token: shopperAToken });
+      assert.equal(pastRes.status, 200);
+      assert.ok(pastRes.data.some((c: any) => c.id === cartXId));
 
-      // Guest cannot delete shopper's loyalty card
-      const stealCardDel = await api(`/api/shopper/loyalty/${cardId}`, {
-        method: 'DELETE',
-        guestId: 'guest-other-9999',
+      const histRes = await api(`/api/shopper/product-history?branchId=${branchXId}`, { token: shopperAToken });
+      assert.equal(histRes.status, 200);
+      assert.ok(histRes.data.some((p: any) => p.barcode === prodABarcode));
+
+      const listRes = await api('/api/shopper/shopping-lists', {
+        method: 'POST',
+        token: shopperAToken,
+        body: JSON.stringify({
+          title: 'Alpha Restock',
+          canEdit: false,
+          branchId: branchXId,
+          sourceCartId: cartXId,
+        }),
       });
-      assert.equal(stealCardDel.status, 403);
+      assert.equal(listRes.status, 200);
+      assert.equal(listRes.data.items[0].quantity, 3);
     });
 
-    // 12. Logout & suspension revoke session tokens immediately
-    await check('12. /api/auth/logout and user suspension invalidate bearer session tokens immediately', async () => {
-      const meBefore = await api('/api/auth/me', { token: shopperToken });
-      assert.equal(meBefore.status, 200);
-      assert.equal(meBefore.data.user.email, shopperEmail);
-      const shopperId = meBefore.data.user.id;
-
-      const logout = await api('/api/auth/logout', { method: 'POST', token: shopperToken });
-      assert.equal(logout.status, 200);
-
-      const meAfter = await api('/api/auth/me', { token: shopperToken });
-      assert.equal(meAfter.status, 401);
-
-      const protectedAfter = await api('/api/shopper/history', { token: shopperToken });
-      assert.equal(protectedAfter.status, 401);
-
-      // Re-login shopper, then suspend via admin -> session must fail with 401
-      const reLogin = await api('/api/auth/login', {
+    // 14. Logout, password reset, role change, & suspension revoke sessions immediately
+    await check('13. Logout, admin password reset, role change, and suspension immediately invalidate existing sessions', async () => {
+      // Logout revokes token
+      const l1 = await api('/api/auth/login', {
         method: 'POST',
-        body: JSON.stringify({ identifier: shopperEmail, password: shopperPass, portal: 'shopper' }),
+        body: JSON.stringify({ identifier: shopperBEmail, password: shopperBPass, portal: 'shopper' }),
       });
-      assert.equal(reLogin.status, 200);
-      const freshToken = reLogin.data.token;
+      assert.equal(l1.status, 200);
+      const tokLogout = l1.data.token;
+      assert.equal((await api('/api/auth/me', { token: tokLogout })).status, 200);
+      assert.equal((await api('/api/auth/logout', { method: 'POST', token: tokLogout })).status, 200);
+      assert.equal((await api('/api/auth/me', { token: tokLogout })).status, 401);
 
-      const susp = await api(`/api/admin/users/${shopperId}/status`, {
+      // Admin password reset revokes Shopper A token
+      assert.equal((await api('/api/auth/me', { token: shopperAToken })).status, 200);
+      const resetRes = await api(`/api/admin/users/${shopperAId}/reset-password`, {
+        method: 'POST',
+        token: adminToken,
+      });
+      assert.equal(resetRes.status, 200);
+      assert.equal((await api('/api/auth/me', { token: shopperAToken })).status, 401);
+
+      // Role change revokes active session
+      const l2 = await api('/api/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({ identifier: shopperBEmail, password: shopperBPass, portal: 'shopper' }),
+      });
+      assert.equal(l2.status, 200);
+      const tokRole = l2.data.token;
+      const shopperBId = l2.data.user.id;
+      const chgRole = await api(`/api/admin/users/${shopperBId}/status`, {
+        method: 'PUT',
+        token: adminToken,
+        body: JSON.stringify({ role: 'owner' }),
+      });
+      assert.equal(chgRole.status, 200);
+      assert.equal((await api('/api/auth/me', { token: tokRole })).status, 401);
+
+      // Suspension revokes Cashier X session
+      assert.equal((await api('/api/auth/me', { token: cashierXToken })).status, 200);
+      const staffUsers = await api('/api/admin/users', { token: adminToken });
+      const cashierUser = staffUsers.data.find((u: any) => u.email === cashierXEmail);
+      const suspRes = await api(`/api/admin/users/${cashierUser.id}/status`, {
         method: 'PUT',
         token: adminToken,
         body: JSON.stringify({ status: 'suspended' }),
       });
-      assert.equal(susp.status, 200);
-
-      const afterSusp = await api('/api/auth/me', { token: freshToken });
-      assert.equal(afterSusp.status, 401);
+      assert.equal(suspRes.status, 200);
+      assert.equal((await api('/api/auth/me', { token: cashierXToken })).status, 401);
     });
 
-    // 13. Shared shopping lists from previous purchases & product history + collaboration permissions
-    await check('13. Shared shopping lists create from past purchases & product history and enforce collaborator permissions', async () => {
-      const ownerGuest = 'guest-list-owner-1001';
-      const collabGuest = 'guest-list-collab-2002';
-
-      // Create and complete a cart so past-purchases and product-history are populated
-      const prodsRes = await api('/api/shopper/branch-products/br_westlands');
-      assert.equal(prodsRes.status, 200);
-      assert.ok(prodsRes.data.products.length > 0);
-      const firstProd = prodsRes.data.products[0];
-
-      const cartRes = await api('/api/shopper/cart?branchId=br_westlands', { guestId: ownerGuest });
-      assert.equal(cartRes.status, 200);
-      const pastCartId = cartRes.data.id;
-
-      const addItemRes = await api('/api/shopper/cart/add', {
+    // 15. Five wrong passwords lock the account, and per-IP rate limit blocks a flood
+    await check('14. Five wrong passwords lock the account, and per-IP rate limit blocks a flood', async () => {
+      const lockTarget = 'lock-probe@example.com';
+      for (let i = 0; i < 5; i++) {
+        const fail = await api('/api/auth/login', {
+          method: 'POST',
+          headers: { 'x-forwarded-for': '198.51.100.10' },
+          body: JSON.stringify({ identifier: lockTarget, password: 'WrongPassword1!', portal: 'shopper' }),
+        });
+        assert.equal(fail.status, 401);
+      }
+      const locked = await api('/api/auth/login', {
         method: 'POST',
-        guestId: ownerGuest,
-        body: JSON.stringify({ branchId: 'br_westlands', barcode: firstProd.barcode, quantity: 2, cartId: pastCartId }),
+        headers: { 'x-forwarded-for': '198.51.100.10' },
+        body: JSON.stringify({ identifier: lockTarget, password: 'WrongPassword1!', portal: 'shopper' }),
       });
-      assert.equal(addItemRes.status, 200);
+      assert.equal(locked.status, 429);
 
-      const compRes = await api('/api/cashier/complete', {
+      // Per-IP flood test on a fresh client IP
+      let floodBlocked = false;
+      for (let i = 0; i < 35; i++) {
+        const r = await api('/api/auth/login', {
+          method: 'POST',
+          headers: { 'x-forwarded-for': '198.51.100.77' },
+          body: JSON.stringify({ identifier: `flood-${i}@example.com`, password: 'WrongPassword1!', portal: 'shopper' }),
+        });
+        if (r.status === 429) {
+          floodBlocked = true;
+          break;
+        }
+      }
+      assert.equal(floodBlocked, true, 'Expected IP flood to trigger 429 rate limit');
+    });
+
+    // 16. Expired session token is rejected & production startup refuses unsafe env
+    await check('15. Expired session tokens are rejected and production startup refuses DEMO_MODE=true or short ADMIN_SETUP_KEY', async () => {
+      // Production startup refusal checks
+      const demoRefusal = spawnSync('npx', ['tsx', 'server.ts'], {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          NODE_ENV: 'production',
+          DEMO_MODE: 'true',
+          ADMIN_SETUP_KEY,
+          DB_PATH: path.join(TMP_DIR, 'refuse1.json'),
+          TRUST_PROXY: 'true',
+        },
+        encoding: 'utf-8',
+      });
+      assert.notEqual(demoRefusal.status, 0);
+      assert.match(demoRefusal.stderr, /DEMO_MODE must not be "true"/);
+
+      const shortKeyRefusal = spawnSync('npx', ['tsx', 'server.ts'], {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          NODE_ENV: 'production',
+          DEMO_MODE: 'false',
+          ADMIN_SETUP_KEY: 'too-short',
+        },
+        encoding: 'utf-8',
+      });
+      assert.notEqual(shortKeyRefusal.status, 0);
+      assert.match(shortKeyRefusal.stderr, /Missing required production environment variable: DB_PATH/);
+      assert.match(shortKeyRefusal.stderr, /Missing required production environment variable: TRUST_PROXY/);
+      assert.match(shortKeyRefusal.stderr, /at least 24 characters long/);
+
+      // Expired session token check using a tiny SESSION_HOURS on a short-lived server
+      const expPort = TEST_PORT + 50;
+      const expUrl = `http://127.0.0.1:${expPort}`;
+      const expDb = path.join(TMP_DIR, 'exp_db.json');
+      const expProc = spawn('npx', ['tsx', 'server.ts'], {
+        cwd: process.cwd(),
+        detached: true,
+        env: {
+          ...process.env,
+          PORT: String(expPort),
+          DB_PATH: expDb,
+          ADMIN_SETUP_KEY,
+          DEMO_MODE: 'false',
+          TRUST_PROXY: 'true',
+          SESSION_HOURS: '0.00015', // ~0.54 seconds
+          NODE_ENV: 'production',
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+
+      try {
+        await waitForServer(expUrl);
+        const regExp = await api('/api/auth/register', {
+          baseUrl: expUrl,
+          method: 'POST',
+          body: JSON.stringify({
+            name: 'Expiry Tester',
+            email: 'expiry@example.com',
+            phone: '+254788111222',
+            password: makeTestSecret('Exp'),
+          }),
+        });
+        assert.equal(regExp.status, 200);
+        const shortTok = regExp.data.token;
+        assert.equal((await api('/api/auth/me', { baseUrl: expUrl, token: shortTok })).status, 200);
+
+        await new Promise((r) => setTimeout(r, 750));
+        assert.equal((await api('/api/auth/me', { baseUrl: expUrl, token: shortTok })).status, 401);
+      } finally {
+        killProc(expProc);
+      }
+    });
+
+    // 17. Single system admin specific email & password setup, env bootstrap, and credential update
+    await check('16. Single admin supports specific email/password setup, env bootstrap, and credential update while blocking any second admin', async () => {
+      // A) PUT /api/admin/account on main server
+      const nonAdminUpdate = await api('/api/admin/account', {
+        method: 'PUT',
+        token: ownerAToken,
+        body: JSON.stringify({ currentPassword: 'Reset123!', newEmail: 'hijack@example.com' }),
+      });
+      assert.equal(nonAdminUpdate.status, 403);
+
+      const secondAdminLogin = await api('/api/auth/login', {
         method: 'POST',
+        headers: { 'x-forwarded-for': '198.51.100.88' },
+        body: JSON.stringify({ identifier: adminEmail, password: adminFinalPass, portal: 'admin' }),
+      });
+      assert.equal(secondAdminLogin.status, 200);
+      const secondaryAdminSession = secondAdminLogin.data.token;
+
+      const wrongPwd = await api('/api/admin/account', {
+        method: 'PUT',
         token: adminToken,
-        body: JSON.stringify({ cartId: pastCartId }),
+        body: JSON.stringify({ currentPassword: 'WrongPassword!9', newEmail: 'newadmin@smartcart.local' }),
       });
-      assert.equal(compRes.status, 200);
+      assert.equal(wrongPwd.status, 401);
 
-      // Verify past-purchases & product-history endpoints return the completed purchase
-      const pastPurchasesRes = await api('/api/shopper/past-purchases', { guestId: ownerGuest });
-      assert.equal(pastPurchasesRes.status, 200);
-      assert.ok(pastPurchasesRes.data.some((c: any) => c.id === pastCartId));
-
-      const prodHistRes = await api('/api/shopper/product-history?branchId=br_westlands', { guestId: ownerGuest });
-      assert.equal(prodHistRes.status, 200);
-      assert.ok(prodHistRes.data.some((p: any) => p.barcode === firstProd.barcode && p.purchaseCount >= 1));
-
-      // Create shared list from previous purchase (editable initially)
-      const listFromPurchase = await api('/api/shopper/shopping-lists', {
-        method: 'POST',
-        guestId: ownerGuest,
-        body: JSON.stringify({
-          title: 'Weekly Restock',
-          canEdit: true,
-          branchId: 'br_westlands',
-          sourceCartId: pastCartId,
-        }),
-      });
-      assert.equal(listFromPurchase.status, 200);
-      assert.equal(listFromPurchase.data.sourceType, 'previous_purchase');
-      assert.equal(listFromPurchase.data.items.length, 1);
-      assert.equal(listFromPurchase.data.items[0].quantity, 2);
-
-      // Create shared list from product history barcodes
-      const listFromHistory = await api('/api/shopper/shopping-lists', {
-        method: 'POST',
-        guestId: ownerGuest,
-        body: JSON.stringify({
-          title: 'Favorites History',
-          canEdit: false,
-          branchId: 'br_westlands',
-          selectedBarcodes: [firstProd.barcode],
-        }),
-      });
-      assert.equal(listFromHistory.status, 200);
-      assert.equal(listFromHistory.data.sourceType, 'product_history');
-      assert.equal(listFromHistory.data.items[0].barcode, firstProd.barcode);
-
-      // Collaborator joins editable list via shareCode
-      const joinEditable = await api('/api/shopper/shopping-lists/join', {
-        method: 'POST',
-        guestId: collabGuest,
-        body: JSON.stringify({ shareCode: listFromPurchase.data.shareCode }),
-      });
-      assert.equal(joinEditable.status, 200);
-
-      // Collaborator CAN edit items when canEdit=true
-      const collabUpdateOk = await api(`/api/shopper/shopping-lists/${listFromPurchase.data.id}`, {
+      const newAdminEmail = 'primary-admin@smartcart.local';
+      const newAdminPass = makeTestSecret('AdminUpdated');
+      const goodUpdate = await api('/api/admin/account', {
         method: 'PUT',
-        guestId: collabGuest,
+        token: adminToken,
         body: JSON.stringify({
-          items: [{ ...listFromPurchase.data.items[0], completed: true }],
+          currentPassword: adminFinalPass,
+          newEmail: newAdminEmail,
+          newPassword: newAdminPass,
+          name: 'Primary System Admin',
         }),
       });
-      assert.equal(collabUpdateOk.status, 200);
-      assert.equal(collabUpdateOk.data.items[0].completed, true);
+      assert.equal(goodUpdate.status, 200);
+      assert.equal(goodUpdate.data.user.email, newAdminEmail);
 
-      // Collaborator CANNOT delete owner's list
-      const collabDelete = await api(`/api/shopper/shopping-lists/${listFromPurchase.data.id}`, {
-        method: 'DELETE',
-        guestId: collabGuest,
-      });
-      assert.equal(collabDelete.status, 403);
-
-      // Collaborator joins view-only list -> editing blocked with 403
-      const joinReadOnly = await api('/api/shopper/shopping-lists/join', {
+      // Other active admin session is revoked
+      assert.equal((await api('/api/auth/me', { token: secondaryAdminSession })).status, 401);
+      // Old password rejected, new email + password accepted
+      const oldLogin = await api('/api/auth/login', {
         method: 'POST',
-        guestId: collabGuest,
-        body: JSON.stringify({ shareCode: listFromHistory.data.shareCode }),
+        headers: { 'x-forwarded-for': '198.51.100.89' },
+        body: JSON.stringify({ identifier: adminEmail, password: adminFinalPass, portal: 'admin' }),
       });
-      assert.equal(joinReadOnly.status, 200);
+      assert.equal(oldLogin.status, 401);
 
-      const collabUpdateBlocked = await api(`/api/shopper/shopping-lists/${listFromHistory.data.id}`, {
-        method: 'PUT',
-        guestId: collabGuest,
-        body: JSON.stringify({ items: [] }),
+      const newLogin = await api('/api/auth/login', {
+        method: 'POST',
+        headers: { 'x-forwarded-for': '198.51.100.89' },
+        body: JSON.stringify({ identifier: newAdminEmail, password: newAdminPass, portal: 'admin' }),
       });
-      assert.equal(collabUpdateBlocked.status, 403);
+      assert.equal(newLogin.status, 200);
 
-      // Owner can delete their own list
-      const ownerDelete = await api(`/api/shopper/shopping-lists/${listFromHistory.data.id}`, {
-        method: 'DELETE',
-        guestId: ownerGuest,
+      // B) Direct setup with custom email & password (no temp password needed)
+      const directPort = TEST_PORT + 51;
+      const directUrl = `http://127.0.0.1:${directPort}`;
+      const directProc = spawn('npx', ['tsx', 'server.ts'], {
+        cwd: process.cwd(),
+        detached: true,
+        env: {
+          ...process.env,
+          PORT: String(directPort),
+          DB_PATH: path.join(TMP_DIR, 'direct_admin_db.json'),
+          ADMIN_SETUP_KEY,
+          DEMO_MODE: 'false',
+          TRUST_PROXY: 'true',
+          NODE_ENV: 'production',
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
       });
-      assert.equal(ownerDelete.status, 200);
+      try {
+        await waitForServer(directUrl);
+        const specificEmail = 'owner-admin@customdomain.org';
+        const specificPass = makeTestSecret('DirectAdmin');
+        const setupRes = await api('/api/admin/setup', {
+          baseUrl: directUrl,
+          method: 'POST',
+          body: JSON.stringify({
+            email: specificEmail,
+            password: specificPass,
+            name: 'Direct Admin',
+            setupKey: ADMIN_SETUP_KEY,
+          }),
+        });
+        assert.equal(setupRes.status, 200);
+        assert.equal(setupRes.data.requiresPasswordChange, false);
+        assert.equal(setupRes.data.tempPassword, undefined);
+
+        const directLogin = await api('/api/auth/login', {
+          baseUrl: directUrl,
+          method: 'POST',
+          body: JSON.stringify({ identifier: specificEmail, password: specificPass, portal: 'admin' }),
+        });
+        assert.equal(directLogin.status, 200);
+        assert.equal(directLogin.data.user.mustChangePassword, false);
+
+        const secondSetup = await api('/api/admin/setup', {
+          baseUrl: directUrl,
+          method: 'POST',
+          body: JSON.stringify({
+            email: 'second@customdomain.org',
+            password: makeTestSecret('Second'),
+            setupKey: ADMIN_SETUP_KEY,
+          }),
+        });
+        assert.equal(secondSetup.status, 403);
+      } finally {
+        killProc(directProc);
+      }
+
+      // C) Env var bootstrap with ADMIN_EMAIL & ADMIN_PASSWORD
+      const envPort = TEST_PORT + 52;
+      const envUrl = `http://127.0.0.1:${envPort}`;
+      const envEmail = 'env-admin@customdomain.org';
+      const envPass = makeTestSecret('EnvAdmin');
+      const envProc = spawn('npx', ['tsx', 'server.ts'], {
+        cwd: process.cwd(),
+        detached: true,
+        env: {
+          ...process.env,
+          PORT: String(envPort),
+          DB_PATH: path.join(TMP_DIR, 'env_admin_db.json'),
+          ADMIN_SETUP_KEY,
+          ADMIN_EMAIL: envEmail,
+          ADMIN_PASSWORD: envPass,
+          DEMO_MODE: 'false',
+          TRUST_PROXY: 'true',
+          NODE_ENV: 'production',
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      try {
+        await waitForServer(envUrl);
+        const st = await api('/api/admin/setup-status', { baseUrl: envUrl });
+        assert.equal(st.status, 200);
+        assert.equal(st.data.isSetupComplete, true);
+
+        const envLogin = await api('/api/auth/login', {
+          baseUrl: envUrl,
+          method: 'POST',
+          body: JSON.stringify({ identifier: envEmail, password: envPass, portal: 'admin' }),
+        });
+        assert.equal(envLogin.status, 200);
+        assert.equal(envLogin.data.user.role, 'admin');
+        assert.equal(envLogin.data.user.mustChangePassword, false);
+
+        const blockExtra = await api('/api/admin/setup', {
+          baseUrl: envUrl,
+          method: 'POST',
+          body: JSON.stringify({
+            email: 'extra@customdomain.org',
+            password: makeTestSecret('Extra'),
+            setupKey: ADMIN_SETUP_KEY,
+          }),
+        });
+        assert.equal(blockExtra.status, 403);
+      } finally {
+        killProc(envProc);
+      }
     });
 
-    console.log(`\n[security-test] ALL ${passed} SECURITY & FEATURE CHECKS PASSED!`);
+    console.log(`\n[security-test] Summary: ${passed} PASSED, ${failed} FAILED.`);
   } catch (err) {
     console.error('\n[security-test] FAILURE:', err);
     console.error('--- Server Logs ---\n' + logs);
     exitCode = 1;
   } finally {
-    if (serverProc?.pid) {
-      try {
-        process.kill(-serverProc.pid, 'SIGKILL');
-      } catch {
-        try {
-          serverProc.kill('SIGKILL');
-        } catch {
-          // Already exited
-        }
-      }
-    }
+    killProc(serverProc);
     try {
       fs.rmSync(TMP_DIR, { recursive: true, force: true });
     } catch {

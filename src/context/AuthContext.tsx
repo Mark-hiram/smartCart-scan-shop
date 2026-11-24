@@ -11,18 +11,16 @@ interface AuthContextType {
   branch: Branch | null;
   token: string | null;
   isLoading: boolean;
-  demoMode: boolean;
   adminSetupKeyRequired: boolean;
   setupStatus: SetupStatus | null;
   checkSetupStatus: () => Promise<SetupStatus | null>;
   login: (identifier: string, pass: string, portal?: string) => Promise<{ success: boolean; error?: string; remainingAttempts?: number; lockedUntil?: number; mustChangePassword?: boolean }>;
   register: (name: string, email: string, phone: string, pass: string) => Promise<{ success: boolean; error?: string }>;
-  setupAdmin: (email: string, name?: string, phone?: string, setupKey?: string) => Promise<{ success: boolean; tempPassword?: string; error?: string }>;
+  setupAdmin: (email: string, name?: string, phone?: string, setupKey?: string, password?: string) => Promise<{ success: boolean; tempPassword?: string; requiresPasswordChange?: boolean; error?: string }>;
   changeFirstPassword: (currentPassword: string, newPassword: string) => Promise<{ success: boolean; error?: string; message?: string }>;
   logout: () => void;
   setBranch: (branch: Branch | null) => void;
   setSupermarket: (sm: Supermarket | null) => void;
-  quickLogin: (role: 'owner' | 'staff' | 'shopper') => Promise<void>;
   reloadUser: () => Promise<void>;
 }
 
@@ -34,7 +32,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [branch, setBranch] = useState<Branch | null>(null);
   const [token, setToken] = useState<string | null>(() => localStorage.getItem('smartcart_token'));
   const [isLoading, setIsLoading] = useState(true);
-  const [demoMode, setDemoMode] = useState(false);
   const [adminSetupKeyRequired, setAdminSetupKeyRequired] = useState(true);
   const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null);
 
@@ -48,14 +45,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, []);
 
-  // Fetch client config (demoMode & adminSetupKeyRequired status)
+  // Fetch client config (adminSetupKeyRequired status)
   useEffect(() => {
     fetch('/api/auth/config')
       .then((res) => res.json())
       .then((data) => {
-        if (data && typeof data.demoMode === 'boolean') {
-          setDemoMode(data.demoMode);
-        }
         if (data && typeof data.adminSetupKeyRequired === 'boolean') {
           setAdminSetupKeyRequired(data.adminSetupKeyRequired);
         }
@@ -168,12 +162,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  const setupAdmin = async (email: string, name?: string, phone?: string, setupKey?: string) => {
+  const setupAdmin = async (email: string, name?: string, phone?: string, setupKey?: string, password?: string) => {
     try {
       const res = await fetch('/api/admin/setup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, name, phone, setupKey }),
+        body: JSON.stringify({ email, name, phone, setupKey, password }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -183,6 +177,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       return {
         success: true,
         tempPassword: data.tempPassword,
+        requiresPasswordChange: data.requiresPasswordChange,
       };
     } catch (e: any) {
       return { success: false, error: e.message || 'Failed to initialize administrator' };
@@ -227,20 +222,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     localStorage.removeItem('smartcart_token');
   };
 
-  // Demo accounts: ONLY functional when demoMode is active
-  const quickLogin = async (role: 'owner' | 'staff' | 'shopper') => {
-    if (!demoMode) return;
-    const creds: Record<string, { id: string; pass: string; portal: string }> = {
-      owner: { id: 'owner@naivas.com', pass: 'Owner123!', portal: 'management' },
-      staff: { id: 'staff.westlands@naivas.com', pass: 'Staff123!', portal: 'staff' },
-      shopper: { id: 'shopper@gmail.com', pass: 'Shopper123!', portal: 'shopper' },
-    };
-    const c = creds[role];
-    if (c) {
-      await login(c.id, c.pass, c.portal);
-    }
-  };
-
   return (
     <AuthContext.Provider
       value={{
@@ -249,7 +230,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         branch,
         token,
         isLoading,
-        demoMode,
         adminSetupKeyRequired,
         setupStatus,
         checkSetupStatus,
@@ -260,7 +240,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         logout,
         setBranch: handleSetBranch,
         setSupermarket,
-        quickLogin,
         reloadUser,
       }}
     >

@@ -28,14 +28,49 @@ Configure these variables in your deployment environment (never commit `.env` or
 
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
-| `ADMIN_SETUP_KEY` | **Yes (Production)** | _None_ | Secret setup key required on `POST /api/admin/setup` to initialize the single system admin account. Setup is refused in production if unset. |
-| `GEMINI_API_KEY` | For AI Chat & Maps | _None_ | Server-side API key for `@google/genai` (chat assistant and Google Maps Grounding). |
-| `DEMO_MODE` | Recommended `false` | `false` | Enables demo seed users and exposes OTP reset codes in responses only when set to `"true"`. Always `"false"` in production. |
-| `PORT` | No | `3000` | Port bound by the Express server (`0.0.0.0:$PORT`). |
-| `DB_PATH` | Recommended | `./smartcart_db.json` | Persistent disk path for the JSON database file (point to a persistent volume in production). |
-| `TRUST_PROXY` | Behind Proxy | `false` | Set `"true"` behind Cloud Run / Render / Nginx so IP rate limiting reads `X-Forwarded-For`. |
+| `ADMIN_SETUP_KEY` | **Yes (Production)** | _None_ | Secret setup key (minimum 24 characters in production) required on `POST /api/admin/setup` to initialize the single system admin account. Production startup is refused if missing or shorter than 24 characters. |
+| `ADMIN_EMAIL` / `ADMIN_PASSWORD` | Optional | _None_ | Optional startup credentials to automatically initialize the single system administrator account (min 8-char password) without using the browser setup form. |
+| `DB_PATH` | **Yes (Production)** | `./smartcart_db.json` | Persistent disk path for the JSON database file (e.g. `/var/data/smartcart_db.json` on Render). |
+| `TRUST_PROXY` | **Yes (Production)** | `false` | Set `"true"` behind Render / reverse proxies so IP rate limiting reads `X-Forwarded-For`. |
+| `DEMO_MODE` | **Must be `false` in Prod** | `false` | Safety guard only (all demo data has been removed). Production startup is refused if set to `"true"`. |
+| `NODE_ENV` | **Yes (`production`)** | `development` | Set automatically to `"production"` by `npm start`. |
 | `SESSION_HOURS` | No | `12` | Sliding session lifetime in hours for shoppers, staff, and owners (admin sessions are fixed at 2 hours). |
+| `PORT` | No | `3000` | Port bound by the Express server (`0.0.0.0:$PORT`). |
+| `GEMINI_API_KEY` | Optional | _None_ | Server-side API key for `@google/genai` (AI chat assistant and Google Maps Grounding). |
 | `APP_URL` | Optional | _None_ | Public URL of the deployed app. |
+
+---
+
+## Deploying to Render
+
+1. **Create a Web Service** on Render pointing to this repository (Node runtime).
+2. **Build Command:**
+   ```bash
+   npm install && npm run build
+   ```
+3. **Start Command:**
+   ```bash
+   npm start
+   ```
+   (`npm start` runs `NODE_ENV=production tsx server.ts`, serves the built `dist/` bundle, and exposes `GET /healthz` returning `{ ok: true }`.)
+4. **Add a Persistent Disk:**
+   - Mount Path: `/var/data`
+   - Set `DB_PATH=/var/data/smartcart_db.json`
+   The server automatically creates `/var/data` (if needed) and seeds the initial database on first boot.
+5. **Set Environment Variables on Render:**
+   - `NODE_ENV=production`
+   - `ADMIN_SETUP_KEY` (random secret string, **at least 24 characters**)
+   - `ADMIN_EMAIL` & `ADMIN_PASSWORD` (optional: pre-initialize the single system admin account with your specific email and password; otherwise set them on `/admin/login`)
+   - `DEMO_MODE=false`
+   - `DB_PATH=/var/data/smartcart_db.json`
+   - `TRUST_PROXY=true`
+   - `SESSION_HOURS=12`
+   - `GEMINI_API_KEY` (optional, for AI assistant & Maps store finder)
+6. **Health Check Path:** `/healthz`
+7. **First-Time System Admin Setup:**
+   - Visit `https://<your-render-url>/admin/login`.
+   - If you did not set `ADMIN_EMAIL` and `ADMIN_PASSWORD`, enter your specific administrator email, chosen password (min 8 characters), full name, and `ADMIN_SETUP_KEY`.
+   - Sign in at `/admin/login` with that specific email and password to open `/admin/dashboard`.
 
 ---
 
@@ -43,16 +78,13 @@ Configure these variables in your deployment environment (never commit `.env` or
 
 Smart Cart enforces a hard invariant across backend routes and database loading: **exactly ONE system administrator account can ever exist**.
 
-1. Set `ADMIN_SETUP_KEY` in your server environment (and `DEMO_MODE=false` in production).
-2. Start the server (`npm run build && npm start` or `npm run dev` in development).
-3. Navigate directly to **`/admin/login`** (there are no links to `/admin/login` in public menus).
-4. Complete the **First-Time System Administrator Setup** form with:
-   - Your administrator email address
-   - Full name
-   - The `ADMIN_SETUP_KEY` configured on the server
-5. Copy the generated **temporary password** (displayed **only once**).
-6. Sign in at `/admin/login` with that email and temporary password — you will be prompted immediately to replace it with a permanent password (minimum 8 characters).
-7. Any future attempts to call `/api/admin/setup`, register with `role: "admin"`, or create a second admin are rejected with `403` and recorded in the audit log.
+1. Set `ADMIN_SETUP_KEY` (24+ chars in production) in your server environment and `DEMO_MODE=false`.
+2. Optionally set `ADMIN_EMAIL` and `ADMIN_PASSWORD` (min 8 chars) to pre-provision the single admin at startup, **or** leave them unset to configure via the browser form.
+3. Start the server (`npm run build && npm start`, or `npm run dev` in development).
+4. Navigate to **`/admin/login`** (or click the small shield icon next to "Select Sign-In Portal").
+5. Complete the **First-Time System Administrator Setup** form with your specific email address, chosen password (minimum 8 characters), and `ADMIN_SETUP_KEY`.
+6. Sign in at `/admin/login` with that email and password to access `/admin/dashboard`.
+7. Any future attempts to call `/api/admin/setup`, register with `role: "admin"`, promote another user, or create a second admin are rejected with `403` and recorded in the audit log.
 
 ---
 
@@ -74,3 +106,4 @@ npm start
 # Run automated security test suite
 npm run test:security
 ```
+

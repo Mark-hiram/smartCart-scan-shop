@@ -29,10 +29,11 @@ import {
   TrendingUp,
   DollarSign,
   ShoppingCart,
+  KeyRound,
 } from 'lucide-react';
 
 export const AdminView: React.FC = () => {
-  const { token } = useAuth();
+  const { token, user, reloadUser } = useAuth();
   const { t } = useTranslation();
 
   const [activeTab, setActiveTab] = useState<
@@ -63,6 +64,16 @@ export const AdminView: React.FC = () => {
   });
   const [replyTicketId, setReplyTicketId] = useState<string | null>(null);
   const [replyText, setReplyText] = useState('');
+
+  // Admin account credentials modal state
+  const [showAccountModal, setShowAccountModal] = useState(false);
+  const [acctEmail, setAcctEmail] = useState(user?.email || '');
+  const [acctName, setAcctName] = useState(user?.name || '');
+  const [acctCurrentPassword, setAcctCurrentPassword] = useState('');
+  const [acctNewPassword, setAcctNewPassword] = useState('');
+  const [acctConfirmPassword, setAcctConfirmPassword] = useState('');
+  const [acctStatus, setAcctStatus] = useState<{ type: 'error' | 'success'; text: string } | null>(null);
+  const [isUpdatingAcct, setIsUpdatingAcct] = useState(false);
 
   const loadAdminData = async () => {
     try {
@@ -207,6 +218,23 @@ export const AdminView: React.FC = () => {
             Platform governance, cross-chain supervision, user account management, and system broadcasts.
           </p>
         </div>
+
+        <button
+          type="button"
+          onClick={() => {
+            setAcctEmail(user?.email || '');
+            setAcctName(user?.name || '');
+            setAcctCurrentPassword('');
+            setAcctNewPassword('');
+            setAcctConfirmPassword('');
+            setAcctStatus(null);
+            setShowAccountModal(true);
+          }}
+          className="self-start sm:self-auto px-3.5 py-2 rounded-xl bg-white/10 hover:bg-white/15 border border-white/15 text-xs font-semibold text-white flex items-center gap-2 transition"
+        >
+          <KeyRound className="w-4 h-4 text-emerald-400" />
+          <span>Admin Credentials</span>
+        </button>
       </div>
 
       {/* Admin Navigation Tabs */}
@@ -808,6 +836,160 @@ export const AdminView: React.FC = () => {
                   className="flex-1 py-2.5 rounded-xl bg-emerald-600 text-white text-xs font-semibold"
                 >
                   Broadcast
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+      {/* Modal: Update Single System Admin Email & Password */}
+      {showAccountModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in">
+          <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl p-5 shadow-2xl border border-slate-200 dark:border-slate-800 space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <ShieldCheck className="w-5 h-5 text-emerald-600" />
+                <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                  Single System Admin Credentials
+                </h3>
+              </div>
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300">
+                1 Account Only
+              </span>
+            </div>
+
+            {acctStatus && (
+              <div
+                className={`p-3 rounded-xl border text-xs flex items-start gap-2 ${
+                  acctStatus.type === 'error'
+                    ? 'bg-rose-50 dark:bg-rose-950/40 border-rose-200 dark:border-rose-800 text-rose-700 dark:text-rose-300'
+                    : 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300'
+                }`}
+              >
+                {acctStatus.type === 'error' ? (
+                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                ) : (
+                  <CheckCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                )}
+                <span>{acctStatus.text}</span>
+              </div>
+            )}
+
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                setAcctStatus(null);
+                if (acctNewPassword && acctNewPassword.length < 8) {
+                  setAcctStatus({ type: 'error', text: 'New password must be at least 8 characters long.' });
+                  return;
+                }
+                if (acctNewPassword && acctNewPassword !== acctConfirmPassword) {
+                  setAcctStatus({ type: 'error', text: 'New passwords do not match.' });
+                  return;
+                }
+                setIsUpdatingAcct(true);
+                try {
+                  const res = await fetch('/api/admin/account', {
+                    method: 'PUT',
+                    headers: {
+                      'Content-Type': 'application/json',
+                      Authorization: `Bearer ${token}`,
+                    },
+                    body: JSON.stringify({
+                      currentPassword: acctCurrentPassword,
+                      newEmail: acctEmail,
+                      name: acctName,
+                      ...(acctNewPassword ? { newPassword: acctNewPassword } : {}),
+                    }),
+                  });
+                  const data = await res.json();
+                  if (!res.ok) {
+                    setAcctStatus({ type: 'error', text: data.error || 'Failed to update credentials.' });
+                  } else {
+                    await reloadUser();
+                    await loadAdminData();
+                    setAcctCurrentPassword('');
+                    setAcctNewPassword('');
+                    setAcctConfirmPassword('');
+                    setAcctStatus({ type: 'success', text: data.message || 'Credentials updated successfully.' });
+                  }
+                } catch (err: any) {
+                  setAcctStatus({ type: 'error', text: err?.message || 'Network error.' });
+                } finally {
+                  setIsUpdatingAcct(false);
+                }
+              }}
+              className="space-y-3"
+            >
+              <div>
+                <label className="text-xs font-semibold block mb-1">Admin Sign-In Email</label>
+                <input
+                  type="email"
+                  required
+                  value={acctEmail}
+                  onChange={(e) => setAcctEmail(e.target.value)}
+                  className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-mono"
+                />
+              </div>
+              <div>
+                <label className="text-xs font-semibold block mb-1">Display Name</label>
+                <input
+                  type="text"
+                  required
+                  value={acctName}
+                  onChange={(e) => setAcctName(e.target.value)}
+                  className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
+                />
+              </div>
+              <div>
+                <label className="text-xs font-semibold block mb-1">Current Password *</label>
+                <input
+                  type="password"
+                  required
+                  value={acctCurrentPassword}
+                  onChange={(e) => setAcctCurrentPassword(e.target.value)}
+                  placeholder="Enter current password to confirm changes"
+                  className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
+                />
+              </div>
+              <div>
+                <label className="text-xs font-semibold block mb-1">New Password (optional, min 8 chars)</label>
+                <input
+                  type="password"
+                  value={acctNewPassword}
+                  onChange={(e) => setAcctNewPassword(e.target.value)}
+                  placeholder="Leave blank to keep current password"
+                  className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
+                />
+              </div>
+              {acctNewPassword && (
+                <div>
+                  <label className="text-xs font-semibold block mb-1">Confirm New Password *</label>
+                  <input
+                    type="password"
+                    required
+                    value={acctConfirmPassword}
+                    onChange={(e) => setAcctConfirmPassword(e.target.value)}
+                    placeholder="Re-enter new password"
+                    className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
+                  />
+                </div>
+              )}
+
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowAccountModal(false)}
+                  className="flex-1 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 text-xs font-semibold"
+                >
+                  {t.cancel}
+                </button>
+                <button
+                  type="submit"
+                  disabled={isUpdatingAcct}
+                  className="flex-1 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold disabled:opacity-60"
+                >
+                  {isUpdatingAcct ? 'Saving...' : 'Save Credentials'}
                 </button>
               </div>
             </form>

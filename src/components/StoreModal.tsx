@@ -163,6 +163,11 @@ export const StoreModal: React.FC<StoreModalProps> = ({ isOpen, onClose }) => {
               1. {t.selectSupermarket}
             </label>
             <div className="grid grid-cols-2 gap-2">
+              {supermarkets.length === 0 && (
+                <div className="col-span-2 p-3 rounded-2xl border border-dashed border-slate-200 dark:border-slate-700 text-xs text-slate-500 text-center">
+                  No active supermarkets registered yet. Store owners can apply from the Management Portal.
+                </div>
+              )}
               {supermarkets.map((sm) => {
                 const isSelected = selectedSupermarketId === sm.id;
                 return (

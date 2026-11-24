@@ -47,6 +47,11 @@ const app = express();
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
+// Health check endpoint for Render / load balancers (unauthenticated, exposes no data)
+app.get('/healthz', (_req, res) => {
+  res.json({ ok: true });
+});
+
 // Session record interface with sliding inactivity timeout
 export interface SessionRecord {
   token: string;
@@ -401,24 +406,40 @@ function canAccessCart(user: User | null, cart: Cart, guestId?: string): boolean
   return false;
 }
 
-// Generate collision-resistant 4-digit short codes using crypto.randomInt
-function generateShortCode(): string {
+// Generate collision-resistant short codes using crypto.randomInt (unique among open carts in branch & globally)
+function generateShortCode(branchId?: string): string {
   const data = db.getRaw();
   const openShortCodes = new Set(
     data.carts
-      .filter((c) => c.status === 'active' || c.status === 'locked')
-      .map((c) => c.shortCode)
+      .filter(
+        (c) =>
+          c.status !== 'completed' &&
+          c.status !== 'cancelled' &&
+          (!branchId || c.branchId === branchId)
+      )
+      .map((c) => c.shortCode.toUpperCase())
   );
+  // Also include all open carts across platform to avoid lookup ambiguity
+  for (const c of data.carts) {
+    if (c.status !== 'completed' && c.status !== 'cancelled') {
+      openShortCodes.add(c.shortCode.toUpperCase());
+    }
+  }
 
-  let code = '';
-  let attempts = 0;
-  do {
+  for (let attempts = 0; attempts < 200; attempts++) {
     const digits = crypto.randomInt(1000, 10000);
-    code = `SC-${digits}`;
-    attempts++;
-  } while (openShortCodes.has(code) && attempts < 200);
+    const code = `SC-${digits}`;
+    if (!openShortCodes.has(code)) return code;
+  }
 
-  return code;
+  // Fallback to 5 digits if 4-digit space is saturated
+  for (let attempts = 0; attempts < 200; attempts++) {
+    const digits = crypto.randomInt(10000, 100000);
+    const code = `SC-${digits}`;
+    if (!openShortCodes.has(code)) return code;
+  }
+
+  return `SC-${crypto.randomInt(100000, 1000000)}`;
 }
 
 // ==========================================
@@ -447,7 +468,7 @@ app.post('/api/admin/setup', sensitiveOpsRateLimiter, (req, res) => {
     });
   }
 
-  const { email, name, phone, setupKey } = req.body;
+  const { email, name, phone, setupKey, password } = req.body;
 
   // Validate setup key if expectedKey is configured
   if (expectedKey) {
@@ -492,10 +513,24 @@ app.post('/api/admin/setup', sensitiveOpsRateLimiter, (req, res) => {
     return res.status(400).json({ error: 'This email is already in use by another user account.' });
   }
 
-  // Generate a cryptographically strong, high-entropy temporary password using crypto.randomInt
-  const randomPart = crypto.randomBytes(4).toString('hex').toUpperCase();
-  const randomSuffix = crypto.randomInt(100, 1000);
-  const rawTempPassword = `Sc!${randomPart}${randomSuffix}`;
+  let rawTempPassword: string | undefined;
+  let initialPassword: string;
+  let mustChangePassword = false;
+
+  if (password !== undefined && password !== null && String(password).length > 0) {
+    if (typeof password !== 'string' || password.length < 8) {
+      return res.status(400).json({ error: 'Administrator password must be at least 8 characters long.' });
+    }
+    initialPassword = password;
+    mustChangePassword = false;
+  } else {
+    // Fallback for automated callers omitting password: generate high-entropy temporary password
+    const randomPart = crypto.randomBytes(4).toString('hex').toUpperCase();
+    const randomSuffix = crypto.randomInt(100, 1000);
+    rawTempPassword = `Sc!${randomPart}${randomSuffix}`;
+    initialPassword = rawTempPassword;
+    mustChangePassword = true;
+  }
 
   const adminId = `usr_sys_admin_${Date.now()}`;
   const now = new Date().toISOString();
@@ -510,12 +545,12 @@ app.post('/api/admin/setup', sensitiveOpsRateLimiter, (req, res) => {
     status: 'active',
     failedAttempts: 0,
     lockedUntil: null,
-    mustChangePassword: true,
+    mustChangePassword,
     isPermanentAdmin: true,
     createdAt: now,
   };
 
-  const { hash, salt } = hashPassword(rawTempPassword);
+  const { hash, salt } = hashPassword(initialPassword);
   data.users.push(newAdmin);
   data.passwords[adminId] = { hash, salt };
 
@@ -524,15 +559,15 @@ app.post('/api/admin/setup', sensitiveOpsRateLimiter, (req, res) => {
     'SYSTEM_ADMIN_INITIALIZED',
     'user',
     adminId,
-    `System Administrator account created with email ${cleanEmail}. Exactly ONE admin account permitted. Temporary password generated.`
+    `System Administrator account created with email ${cleanEmail}. Exactly ONE admin account permitted.`
   );
   db.save();
 
-  // Return the temporary password ONCE to the setup view
   res.json({
     success: true,
     message: 'System Administrator account created successfully.',
-    tempPassword: rawTempPassword,
+    requiresPasswordChange: mustChangePassword,
+    ...(rawTempPassword ? { tempPassword: rawTempPassword } : {}),
   });
 });
 
@@ -567,6 +602,14 @@ app.post('/api/admin/change-first-password', requireAuth, requireRole(['admin'])
     dbUser.mustChangePassword = false;
     dbUser.failedAttempts = 0;
     dbUser.lockedUntil = null;
+  }
+
+  // Revoke any other existing admin sessions when password changes
+  const currentSession = (req as any).session as SessionRecord | undefined;
+  for (const [tok, sess] of sessions.entries()) {
+    if (sess.userId === user.id && (!currentSession || tok !== currentSession.token)) {
+      sessions.delete(tok);
+    }
   }
 
   logAudit(
@@ -664,11 +707,15 @@ app.post('/api/auth/login', loginRateLimiter, async (req, res) => {
   const cleanPhone = identifier.replace(/[\s\-()]/g, '');
   const data = db.getRaw();
 
-  const user = data.users.find(
-    (u) =>
+  const user = data.users.find((u) => {
+    if (selectedPortal === 'admin') {
+      return u.email.toLowerCase() === cleanIdentifier;
+    }
+    return (
       u.email.toLowerCase() === cleanIdentifier ||
       (cleanPhone && u.phone.replace(/[\s\-()]/g, '') === cleanPhone)
-  );
+    );
+  });
 
   const memRecord = memoryFailedAttempts.get(cleanIdentifier);
   const isUserLocked = user?.lockedUntil && user.lockedUntil > Date.now();
@@ -916,14 +963,13 @@ function sendResetMessage(target: string, type: 'email' | 'sms' | 'admin_link', 
 // Client configuration endpoint
 app.get('/api/auth/config', (req, res) => {
   const isProd = process.env.NODE_ENV === 'production';
-  const demoMode = !isProd && process.env.DEMO_MODE === 'true';
   const adminSetupKeyRequired = isProd || Boolean(process.env.ADMIN_SETUP_KEY?.trim());
-  res.json({ demoMode, adminSetupKeyRequired });
+  res.json({ adminSetupKeyRequired });
 });
 
 // Password recovery endpoint
 // STRICT SECURITY RULES:
-// 1. Never return code, token or link in response unless DEMO_MODE=true in non-production.
+// 1. Write code/link to server console only when no email provider is configured; NEVER return code, token, or link in HTTP response.
 // 2. Uniform response message and identical response timing (anti-enumeration).
 // 3. Admin recovery is strictly email-only with a time-limited link. Do not reveal admin status.
 // 4. Crypto.randomInt codes, 15-min expiry, single-use, 5 failed attempts invalidation.
@@ -938,13 +984,10 @@ app.post('/api/auth/forgot-password', sensitiveOpsRateLimiter, async (req, res) 
   const clean = identifier.trim().toLowerCase();
   const cleanPhone = identifier.replace(/[\s\-()]/g, '');
   const data = db.getRaw();
-  const isDemo = process.env.DEMO_MODE === 'true' && process.env.NODE_ENV !== 'production';
 
   const user = data.users.find(
     (u) => u.email.toLowerCase() === clean || u.phone.replace(/[\s\-()]/g, '') === cleanPhone
   );
-
-  let demoPayload: any = null;
 
   if (user) {
     // Admin password recovery: strictly email-only time-limited link
@@ -972,10 +1015,6 @@ app.post('/api/auth/forgot-password', sensitiveOpsRateLimiter, async (req, res) 
           user.id,
           'Time-limited password recovery link generated for admin email (expires in 15 minutes).'
         );
-
-        if (isDemo) {
-          demoPayload = { resetLink, demoCode: resetToken };
-        }
       }
     } else {
       // Standard user recovery (shopper, staff, owner) via 6-digit code using crypto.randomInt
@@ -995,10 +1034,6 @@ app.post('/api/auth/forgot-password', sensitiveOpsRateLimiter, async (req, res) 
       const deliveryType = user.email && clean === user.email.toLowerCase() ? 'email' : 'sms';
       sendResetMessage(deliveryTarget, deliveryType as any, code);
       logAudit(user, 'PASSWORD_RESET_REQUESTED', 'user', user.id, 'Password reset verification code generated.');
-
-      if (isDemo) {
-        demoPayload = { demoCode: code };
-      }
     }
   }
 
@@ -1009,17 +1044,11 @@ app.post('/api/auth/forgot-password', sensitiveOpsRateLimiter, async (req, res) 
     await new Promise((resolve) => setTimeout(resolve, minDuration - elapsed));
   }
 
-  // Always return the exact same generic message
-  const response: any = {
+  // Always return the exact same generic message without leaking code or link
+  res.json({
     success: true,
     message: 'If an account exists, a recovery message has been sent.',
-  };
-
-  if (demoPayload) {
-    Object.assign(response, demoPayload);
-  }
-
-  res.json(response);
+  });
 });
 
 // Reset password using verification code
@@ -1393,7 +1422,7 @@ app.get('/api/shopper/cart', (req, res) => {
     if (branch) {
       cart = {
         id: `cart_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
-        shortCode: generateShortCode(),
+        shortCode: generateShortCode(branch.id),
         shopperId: callerId,
         shopperName: user?.name || 'Guest Shopper',
         shopperPhone: user?.phone || '',
@@ -1460,7 +1489,7 @@ app.post('/api/shopper/cart/add', (req, res) => {
   if (!cart) {
     cart = {
       id: `cart_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
-      shortCode: generateShortCode(),
+      shortCode: generateShortCode(branchId),
       shopperId: callerId,
       shopperName: user?.name || 'Guest Shopper',
       shopperPhone: user?.phone || '',
@@ -1579,56 +1608,73 @@ app.post('/api/shopper/cart/lock', (req, res) => {
   }
 
   cart.status = 'locked';
-  if (!cart.shortCode) cart.shortCode = generateShortCode();
+  if (!cart.shortCode) cart.shortCode = generateShortCode(cart.branchId);
   cart.updatedAt = new Date().toISOString();
   db.save();
 
   res.json(cart);
 });
 
-// Offline Sync Endpoint: seamlessly merges an offline created/scanned cart
+// Offline Sync Endpoint: seamlessly merges an offline created/scanned cart with ownership check
 app.post('/api/shopper/cart/sync', (req, res) => {
   const user = getAuthUser(req);
-  const { offlineCart } = req.body;
-  if (!offlineCart || !offlineCart.branchId) {
+  const callerId = getShopperOrGuestId(req, user);
+  const payload = req.body?.offlineCart || req.body;
+  const branchId = payload?.branchId;
+  if (!payload || !branchId) {
     return res.status(400).json({ error: 'Invalid offline cart data' });
   }
 
   const data = db.getRaw();
-  const branch = data.branches.find((b) => b.id === offlineCart.branchId);
+  const branch = data.branches.find((b) => b.id === branchId);
   if (!branch) return res.status(404).json({ error: 'Branch not found' });
 
-  let serverCart = data.carts.find(
-    (c) =>
-      c.shortCode === offlineCart.shortCode ||
-      (c.shopperId === (user?.id || 'guest') && c.branchId === offlineCart.branchId && (c.status === 'active' || c.status === 'locked'))
-  );
+  const requestedCartId = payload.cartId || payload.id;
+  let serverCart = requestedCartId
+    ? data.carts.find((c) => c.id === requestedCartId)
+    : undefined;
+
+  if (serverCart && !canAccessCart(user, serverCart, callerId)) {
+    return res.status(403).json({ error: 'Forbidden: You cannot sync into another shopper\'s cart.' });
+  }
+
+  if (!serverCart) {
+    serverCart = data.carts.find(
+      (c) =>
+        c.shopperId === callerId &&
+        c.branchId === branchId &&
+        (c.status === 'active' || c.status === 'locked')
+    );
+  }
 
   if (!serverCart) {
     serverCart = {
-      id: offlineCart.id || `cart_${Date.now()}`,
-      shortCode: offlineCart.shortCode || generateShortCode(),
-      shopperId: user?.id || 'guest',
-      shopperName: user?.name || offlineCart.shopperName || 'Shopper',
-      shopperPhone: user?.phone || offlineCart.shopperPhone || '',
+      id: requestedCartId && !String(requestedCartId).startsWith('offline-cart-')
+        ? requestedCartId
+        : `cart_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
+      shortCode: generateShortCode(branch.id),
+      shopperId: callerId,
+      shopperName: user?.name || payload.shopperName || 'Guest Shopper',
+      shopperPhone: user?.phone || payload.shopperPhone || '',
       supermarketId: branch.supermarketId,
       branchId: branch.id,
-      status: offlineCart.status || 'locked',
-      items: offlineCart.items || [],
-      subtotal: offlineCart.subtotal || 0,
-      totalDiscount: offlineCart.totalDiscount || 0,
-      finalTotal: offlineCart.finalTotal || 0,
-      budgetLimit: offlineCart.budgetLimit || null,
+      status: payload.status || 'active',
+      items: Array.isArray(payload.items) ? payload.items : [],
+      subtotal: payload.subtotal || 0,
+      totalDiscount: payload.totalDiscount || 0,
+      finalTotal: payload.finalTotal || 0,
+      budgetLimit: payload.budgetLimit ?? null,
       isOfflineCreated: true,
       syncedAt: new Date().toISOString(),
-      createdAt: offlineCart.createdAt || new Date().toISOString(),
+      createdAt: payload.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
     data.carts.push(serverCart);
   } else {
     // Preserve the locked price the shopper saw when scanning offline!
-    serverCart.items = offlineCart.items;
-    serverCart.status = offlineCart.status || serverCart.status;
+    if (Array.isArray(payload.items)) serverCart.items = payload.items;
+    if (payload.budgetLimit !== undefined) serverCart.budgetLimit = payload.budgetLimit;
+    if (payload.status) serverCart.status = payload.status;
     serverCart.isOfflineCreated = true;
     serverCart.syncedAt = new Date().toISOString();
   }
@@ -1636,7 +1682,7 @@ app.post('/api/shopper/cart/sync', (req, res) => {
   recalculateCart(serverCart, serverCart.branchId, data.promotions);
   db.save();
 
-  res.json({ success: true, cart: serverCart });
+  res.json(req.body?.offlineCart ? { success: true, cart: serverCart } : serverCart);
 });
 
 app.delete('/api/shopper/cart/:id', (req, res) => {
@@ -1764,7 +1810,7 @@ app.post('/api/shopper/cart/re-add', (req, res) => {
   if (!activeCart) {
     activeCart = {
       id: `cart_${Date.now()}`,
-      shortCode: generateShortCode(),
+      shortCode: generateShortCode(branchId),
       shopperId: callerId,
       shopperName: user?.name || 'Guest Shopper',
       shopperPhone: user?.phone || '',
@@ -2172,7 +2218,7 @@ app.post('/api/shopper/shopping-lists/convert-to-cart', (req, res) => {
   if (!activeCart) {
     activeCart = {
       id: `cart_${Date.now()}`,
-      shortCode: generateShortCode(),
+      shortCode: generateShortCode(branchId),
       shopperId: callerId,
       shopperName: user?.name || 'Guest Shopper',
       shopperPhone: user?.phone || '',
@@ -2264,19 +2310,32 @@ app.get('/api/cashier/lookup/:shortCode', requireAuth, (req, res) => {
   const rawCode = req.params.shortCode.trim().toUpperCase();
   const data = db.getRaw();
 
-  const cart = data.carts.find(
-    (c) => c.shortCode.toUpperCase() === rawCode || c.id === rawCode
+  const matches = data.carts.filter(
+    (c) => c.shortCode.toUpperCase() === rawCode || c.id.toUpperCase() === rawCode
   );
-
-  if (!cart) {
+  if (matches.length === 0) {
     return res.status(404).json({ error: `No active cart found with code "${rawCode}".` });
   }
 
-  if (user.role === 'staff' && cart.branchId !== user.branchId) {
-    return res.status(403).json({ error: 'Forbidden: This cart belongs to a different branch.' });
-  }
-  if (user.role === 'owner' && cart.supermarketId !== user.supermarketId) {
-    return res.status(403).json({ error: 'Forbidden: This cart belongs to a different supermarket chain.' });
+  const sortOpenFirst = (a: Cart, b: Cart) => {
+    const aOpen = a.status !== 'completed' && a.status !== 'cancelled' ? 0 : 1;
+    const bOpen = b.status !== 'completed' && b.status !== 'cancelled' ? 0 : 1;
+    return aOpen - bOpen;
+  };
+
+  let cart: Cart | undefined;
+  if (user.role === 'staff') {
+    cart = matches.filter((c) => c.branchId === user.branchId).sort(sortOpenFirst)[0];
+    if (!cart) {
+      return res.status(403).json({ error: 'Forbidden: This cart belongs to a different branch.' });
+    }
+  } else if (user.role === 'owner') {
+    cart = matches.filter((c) => c.supermarketId === user.supermarketId).sort(sortOpenFirst)[0];
+    if (!cart) {
+      return res.status(403).json({ error: 'Forbidden: This cart belongs to a different supermarket chain.' });
+    }
+  } else {
+    cart = matches.sort(sortOpenFirst)[0];
   }
 
   const branch = data.branches.find((b) => b.id === cart.branchId);
@@ -2388,8 +2447,8 @@ app.post('/api/cashier/verify', requireAuth, (req, res) => {
     return res.status(403).json({ error: 'Forbidden: Cart belongs to another supermarket.' });
   }
 
-  if (cart.status === 'completed') {
-    return res.status(400).json({ error: 'Cart is already completed' });
+  if (cart.status === 'completed' || cart.status === 'verified' || cart.status === 'cancelled') {
+    return res.status(400).json({ error: `Cart is already ${cart.status}` });
   }
 
   cart.status = 'verified';
@@ -2471,6 +2530,9 @@ app.post('/api/cashier/complete', requireAuth, (req, res) => {
 
 app.get('/api/owner/overview', requireAuth, requireRole(['owner', 'admin']), (req, res) => {
   const user = (req as any).user as User;
+  if (user.role === 'owner' && req.query.supermarketId && req.query.supermarketId !== user.supermarketId) {
+    return res.status(403).json({ error: 'Forbidden: Cannot access overview for another supermarket.' });
+  }
   const supermarketId = user.role === 'admin' ? (req.query.supermarketId as string) : user.supermarketId;
   const data = db.getRaw();
 
@@ -2507,7 +2569,13 @@ app.get('/api/owner/overview', requireAuth, requireRole(['owner', 'admin']), (re
 app.post('/api/owner/branches', requireAuth, requireRole(['owner', 'admin']), (req, res) => {
   const user = (req as any).user as User;
   const { supermarketId, name, code, address, city, latitude, longitude, phone } = req.body;
+  if (user.role === 'owner' && supermarketId && supermarketId !== user.supermarketId) {
+    return res.status(403).json({ error: 'Forbidden: Cannot create branches for another supermarket.' });
+  }
   const targetSmId = user.role === 'admin' ? supermarketId : user.supermarketId;
+  if (!targetSmId || !canAccessSupermarket(user, targetSmId)) {
+    return res.status(403).json({ error: 'Forbidden: Cannot create branch for this supermarket.' });
+  }
 
   if (!name || !code) return res.status(400).json({ error: 'Name and branch code are required' });
 
@@ -2552,6 +2620,9 @@ app.post('/api/owner/branches', requireAuth, requireRole(['owner', 'admin']), (r
 app.post('/api/owner/staff', requireAuth, requireRole(['owner', 'admin']), (req, res) => {
   const user = (req as any).user as User;
   const { name, email, phone, password, branchId, permissions, preset } = req.body;
+  if (user.role === 'owner' && req.body.supermarketId && req.body.supermarketId !== user.supermarketId) {
+    return res.status(403).json({ error: 'Forbidden: Cannot create staff for another supermarket.' });
+  }
   const targetSmId = user.role === 'admin' ? req.body.supermarketId : user.supermarketId;
 
   if (!targetSmId || !canAccessSupermarket(user, targetSmId)) {
@@ -2574,7 +2645,7 @@ app.post('/api/owner/staff', requireAuth, requireRole(['owner', 'admin']), (req,
   // Verify that branchId belongs to the owner's supermarket
   const branch = data.branches.find((b) => b.id === branchId);
   if (!branch || branch.supermarketId !== targetSmId) {
-    return res.status(400).json({ error: 'Cannot assign staff to a branch of another supermarket.' });
+    return res.status(403).json({ error: 'Cannot assign staff to a branch of another supermarket.' });
   }
 
   if (data.users.some((u) => u.email.toLowerCase() === cleanEmail)) {
@@ -2642,14 +2713,14 @@ app.put('/api/owner/staff/:id', requireAuth, requireRole(['owner', 'admin']), (r
   const staff = data.users.find((u) => u.id === req.params.id);
   if (!staff) return res.status(404).json({ error: 'Staff not found' });
 
-  if (staff.supermarketId && !canAccessSupermarket(user, staff.supermarketId)) {
+  if (staff.role !== 'staff' || !staff.supermarketId || !canAccessSupermarket(user, staff.supermarketId)) {
     return res.status(403).json({ error: 'Forbidden: Cannot edit staff belonging to another supermarket.' });
   }
 
   if (branchId) {
     const branch = data.branches.find((b) => b.id === branchId);
     if (!branch || branch.supermarketId !== staff.supermarketId) {
-      return res.status(400).json({ error: 'Cannot assign staff to a branch of another supermarket.' });
+      return res.status(403).json({ error: 'Cannot assign staff to a branch of another supermarket.' });
     }
     staff.branchId = branchId;
   }
@@ -2700,8 +2771,7 @@ app.put('/api/owner/staff/:id', requireAuth, requireRole(['owner', 'admin']), (r
   res.json(staff);
 });
 
-// Adjust Branch Product: Enforces backend permissions
-// Adjust Branch Product: Enforces backend branch access, role permissions, and input validation
+// Adjust Branch Product: Enforces backend branch access, supermarket product ownership, role permissions, and input validation
 app.post('/api/owner/branch-product-override', requireAuth, (req, res) => {
   const user = (req as any).user as User;
   const { branchId, productId, priceOverride, stock, lowStockThresholdOverride, aisleOverride, shelfOverride } = req.body;
@@ -2715,6 +2785,19 @@ app.post('/api/owner/branch-product-override', requireAuth, (req, res) => {
   // Caller must be able to access the branch (admin, owner of this chain, or staff of this branch)
   if (!canAccessBranch(user, branchId)) {
     return res.status(403).json({ error: 'Security violation: You do not have access to manage this branch.' });
+  }
+
+  const branch = data.branches.find((b) => b.id === branchId);
+  if (!branch) {
+    return res.status(404).json({ error: 'Branch not found.' });
+  }
+
+  const product = data.products.find((p) => p.id === productId);
+  if (!product) {
+    return res.status(404).json({ error: 'Product not found.' });
+  }
+  if (product.supermarketId !== branch.supermarketId) {
+    return res.status(403).json({ error: 'Forbidden: Product does not belong to this supermarket chain.' });
   }
 
   // Staff permission checks
@@ -2787,14 +2870,13 @@ app.post('/api/owner/branch-product-override', requireAuth, (req, res) => {
     bp.shelfOverride = shelfOverride || null;
   }
 
-  const product = data.products.find((p) => p.id === productId);
   logAudit(
     user,
     'BRANCH_PRODUCT_UPDATED',
     'price',
     productId,
-    `Updated branch stock/price/location for "${product?.name}": Price: ${bp.priceOverride ?? 'default'}, Stock: ${bp.stock}, Aisle: ${bp.aisleOverride || product?.aisle}, Shelf: ${bp.shelfOverride || product?.shelf}`,
-    product?.supermarketId,
+    `Updated branch stock/price/location for "${product.name}": Price: ${bp.priceOverride ?? 'default'}, Stock: ${bp.stock}, Aisle: ${bp.aisleOverride || product.aisle}, Shelf: ${bp.shelfOverride || product.shelf}`,
+    product.supermarketId,
     branchId
   );
   db.save();
@@ -2805,8 +2887,14 @@ app.post('/api/owner/branch-product-override', requireAuth, (req, res) => {
 // CSV Export Catalogue with distinct Aisle and Shelf columns
 app.get('/api/owner/products/csv-export', requireAuth, requireRole(['owner', 'admin']), (req, res) => {
   const user = (req as any).user as User;
+  if (user.role === 'owner' && req.query.supermarketId && req.query.supermarketId !== user.supermarketId) {
+    return res.status(403).json({ error: 'Forbidden: Cannot export catalogue for another supermarket.' });
+  }
   const supermarketId = user.role === 'admin' ? (req.query.supermarketId as string) : user.supermarketId;
   const branchId = (req.query.branchId as string) || null;
+  if (branchId && !canAccessBranch(user, branchId)) {
+    return res.status(403).json({ error: 'Forbidden: Branch does not belong to your supermarket.' });
+  }
   const data = db.getRaw();
 
   const products = data.products.filter((p) => p.supermarketId === supermarketId);
@@ -2847,7 +2935,21 @@ app.get('/api/owner/products/csv-export', requireAuth, requireRole(['owner', 'ad
 app.post('/api/owner/products/csv-import', requireAuth, requireRole(['owner', 'admin']), (req, res) => {
   const user = (req as any).user as User;
   const { csvText, branchId } = req.body;
+  if (user.role === 'owner' && req.body.supermarketId && req.body.supermarketId !== user.supermarketId) {
+    return res.status(403).json({ error: 'Forbidden: Cannot import catalogue for another supermarket.' });
+  }
   const targetSmId = user.role === 'admin' ? req.body.supermarketId : user.supermarketId;
+  if (!targetSmId || !canAccessSupermarket(user, targetSmId)) {
+    return res.status(403).json({ error: 'Forbidden: Cannot import catalogue for this supermarket.' });
+  }
+
+  const data = db.getRaw();
+  if (branchId) {
+    const branch = data.branches.find((b) => b.id === branchId);
+    if (!branch || branch.supermarketId !== targetSmId) {
+      return res.status(403).json({ error: 'Forbidden: Branch does not belong to your supermarket.' });
+    }
+  }
 
   if (!csvText) {
     return res.status(400).json({ error: 'csvText content is required' });
@@ -2858,7 +2960,6 @@ app.post('/api/owner/products/csv-import', requireAuth, requireRole(['owner', 'a
     return res.status(400).json({ error: 'CSV must contain a header line and at least one data row' });
   }
 
-  const data = db.getRaw();
   const errors: { row: number; barcode?: string; field?: string; message: string }[] = [];
   const validRows: any[] = [];
   const seenBarcodes = new Set<string>();
@@ -3073,17 +3174,24 @@ app.get('/api/owner/promotions', requireAuth, (req, res) => {
     return res.status(403).json({ error: 'Forbidden' });
   }
 
+  if (user.role !== 'admin' && req.query.supermarketId && req.query.supermarketId !== user.supermarketId) {
+    return res.status(403).json({ error: 'Forbidden: Cannot access promotions for another supermarket.' });
+  }
+
   const supermarketId = user.role === 'admin' ? (req.query.supermarketId as string) : user.supermarketId;
   if (!supermarketId) {
     return res.status(400).json({ error: 'Supermarket ID is required' });
   }
 
-  if (!canAccessSupermarket(user, supermarketId)) {
+  if (user.role !== 'admin' && user.supermarketId !== supermarketId) {
     return res.status(403).json({ error: 'Forbidden: Cannot access promotions for another supermarket' });
   }
 
   const data = db.getRaw();
-  const promos = data.promotions.filter((p) => p.supermarketId === supermarketId);
+  let promos = data.promotions.filter((p) => p.supermarketId === supermarketId);
+  if (user.role === 'staff' && user.branchId) {
+    promos = promos.filter((p) => !p.branchId || p.branchId === user.branchId);
+  }
   res.json(promos);
 });
 
@@ -3093,8 +3201,12 @@ app.post('/api/owner/promotions', requireAuth, (req, res) => {
     return res.status(403).json({ error: 'Forbidden: Shoppers cannot create promotions.' });
   }
 
+  if (user.role !== 'admin' && req.body.supermarketId && req.body.supermarketId !== user.supermarketId) {
+    return res.status(403).json({ error: 'Forbidden: You cannot manage promotions for another supermarket.' });
+  }
+
   const targetSmId = user.role === 'admin' ? req.body.supermarketId : user.supermarketId;
-  if (!targetSmId || !canAccessSupermarket(user, targetSmId)) {
+  if (!targetSmId || (user.role !== 'admin' && user.supermarketId !== targetSmId)) {
     return res.status(403).json({ error: 'Forbidden: You do not have permission to manage promotions for this supermarket.' });
   }
 
@@ -3122,7 +3234,7 @@ app.post('/api/owner/promotions', requireAuth, (req, res) => {
   if (branchId) {
     const branch = data.branches.find((b) => b.id === branchId);
     if (!branch || branch.supermarketId !== targetSmId) {
-      return res.status(400).json({ error: 'Branch does not belong to this supermarket.' });
+      return res.status(403).json({ error: 'Branch does not belong to this supermarket.' });
     }
     if (user.role === 'staff' && user.branchId && user.branchId !== branchId) {
       return res.status(403).json({ error: 'Staff can only create promotions for their own branch.' });
@@ -3204,12 +3316,17 @@ app.put('/api/owner/promotions/:id/toggle', requireAuth, (req, res) => {
   const promo = data.promotions.find((p) => p.id === req.params.id);
   if (!promo) return res.status(404).json({ error: 'Promotion not found' });
 
-  if (!canAccessSupermarket(user, promo.supermarketId)) {
+  if (user.role !== 'admin' && user.supermarketId !== promo.supermarketId) {
     return res.status(403).json({ error: 'Forbidden: You cannot modify promotions for this supermarket.' });
   }
 
-  if (user.role === 'staff' && !user.permissions?.managePromotions) {
-    return res.status(403).json({ error: 'Permission denied: Staff cannot toggle promotions.' });
+  if (user.role === 'staff') {
+    if (!user.permissions?.managePromotions) {
+      return res.status(403).json({ error: 'Permission denied: Staff cannot toggle promotions.' });
+    }
+    if (promo.branchId && promo.branchId !== user.branchId) {
+      return res.status(403).json({ error: 'Forbidden: Staff can only toggle promotions for their own branch.' });
+    }
   }
 
   promo.isActive = !promo.isActive;
@@ -3491,11 +3608,35 @@ app.put('/api/admin/users/:id/status', requireAuth, requireRole(['admin']), (req
     });
   }
 
-  targetUser.status = status;
-  if (status === 'suspended' || (role && role !== targetUser.role)) {
+  if (status !== undefined && status !== 'active' && status !== 'suspended') {
+    return res.status(400).json({ error: 'Invalid status. Allowed values are "active" and "suspended".' });
+  }
+
+  if (role !== undefined && !['shopper', 'staff', 'owner'].includes(role)) {
+    return res.status(400).json({ error: 'Invalid role. Allowed values are "shopper", "staff", and "owner".' });
+  }
+
+  const roleChanged = Boolean(role && role !== targetUser.role);
+  const suspended = status === 'suspended';
+
+  if (status !== undefined) {
+    targetUser.status = status;
+  }
+  if (roleChanged) {
+    targetUser.role = role;
+  }
+
+  if (suspended || roleChanged) {
     revokeUserSessions(targetUser.id);
   }
-  logAudit(adminUser, `USER_${status.toUpperCase()}`, 'staff', targetUser.id, `User ${targetUser.name} status set to ${status}`);
+
+  logAudit(
+    adminUser,
+    `USER_${targetUser.status.toUpperCase()}`,
+    'staff',
+    targetUser.id,
+    `User ${targetUser.name} updated (status=${targetUser.status}, role=${targetUser.role})`
+  );
   db.save();
   res.json(targetUser);
 });
@@ -3532,6 +3673,90 @@ app.post('/api/admin/users/:id/reset-password', requireAuth, requireRole(['admin
   logAudit(adminUser, 'USER_PASSWORD_RESET', 'staff', targetUser.id, `Admin reset password for ${targetUser.name}`);
   db.save();
   res.json({ success: true, message: `Password reset for ${targetUser.name}` });
+});
+
+// Update the single System Administrator's credentials (email, name, and/or password)
+app.put('/api/admin/account', requireAuth, requireRole(['admin']), (req, res) => {
+  const adminUser = (req as any).user as User;
+  const { currentPassword, newEmail, newPassword, name } = req.body;
+
+  if (!currentPassword || typeof currentPassword !== 'string') {
+    return res.status(400).json({ error: 'Current password is required to update administrator credentials.' });
+  }
+
+  const data = db.getRaw();
+  const dbAdmin = data.users.find((u) => u.id === adminUser.id && u.role === 'admin');
+  if (!dbAdmin) {
+    return res.status(404).json({ error: 'System administrator account not found.' });
+  }
+
+  const userPwd = data.passwords[dbAdmin.id];
+  if (!userPwd || !verifyPassword(currentPassword, userPwd.hash, userPwd.salt)) {
+    return res.status(401).json({ error: 'Current password is incorrect.' });
+  }
+
+  let emailChanged = false;
+  let passwordChanged = false;
+
+  if (newEmail !== undefined && typeof newEmail === 'string' && newEmail.trim()) {
+    const cleanEmail = newEmail.trim().toLowerCase();
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(cleanEmail)) {
+      return res.status(400).json({ error: 'Please enter a valid email address format.' });
+    }
+    if (data.users.some((u) => u.id !== dbAdmin.id && u.email.toLowerCase() === cleanEmail)) {
+      return res.status(400).json({ error: 'This email is already in use by another account.' });
+    }
+    if (dbAdmin.email.toLowerCase() !== cleanEmail) {
+      dbAdmin.email = cleanEmail;
+      emailChanged = true;
+    }
+  }
+
+  if (newPassword !== undefined && typeof newPassword === 'string' && newPassword.length > 0) {
+    if (newPassword.length < 8) {
+      return res.status(400).json({ error: 'New password must be at least 8 characters long.' });
+    }
+    const { hash, salt } = hashPassword(newPassword);
+    data.passwords[dbAdmin.id] = { hash, salt };
+    dbAdmin.mustChangePassword = false;
+    dbAdmin.failedAttempts = 0;
+    dbAdmin.lockedUntil = null;
+    passwordChanged = true;
+  }
+
+  if (name !== undefined && typeof name === 'string' && name.trim()) {
+    dbAdmin.name = name.trim();
+  }
+
+  if (emailChanged || passwordChanged) {
+    // Revoke any other active admin sessions on credential change
+    const currentSession = (req as any).session as SessionRecord | undefined;
+    for (const [tok, sess] of sessions.entries()) {
+      if (sess.userId === dbAdmin.id && (!currentSession || tok !== currentSession.token)) {
+        sessions.delete(tok);
+      }
+    }
+  }
+
+  logAudit(
+    dbAdmin,
+    'ADMIN_ACCOUNT_UPDATED',
+    'user',
+    dbAdmin.id,
+    `System Administrator updated account credentials${emailChanged ? ` (email changed to ${dbAdmin.email})` : ''}${passwordChanged ? ' (password updated)' : ''}.`
+  );
+  db.save();
+
+  res.json({
+    success: true,
+    message: 'System Administrator credentials updated successfully.',
+    user: {
+      ...dbAdmin,
+      mustChangePassword: dbAdmin.mustChangePassword ?? false,
+      isPermanentAdmin: dbAdmin.isPermanentAdmin ?? true,
+    },
+  });
 });
 
 // Announcements: Filters out expired announcements
@@ -3582,6 +3807,10 @@ app.post('/api/announcements/:id/read', requireAuth, (req, res) => {
   const data = db.getRaw();
   const anc = (data.announcements || []).find((a) => a.id === req.params.id);
   if (!anc) return res.status(404).json({ error: 'Announcement not found' });
+
+  if (anc.targetSupermarketId && user.role !== 'admin' && anc.targetSupermarketId !== user.supermarketId) {
+    return res.status(403).json({ error: 'Forbidden: Announcement is for another supermarket.' });
+  }
 
   if (!anc.readByUserIds) anc.readByUserIds = [];
   if (!anc.readByUserIds.includes(user.id)) {
@@ -3793,7 +4022,7 @@ app.post('/api/shopper/loyalty/scan', (req, res) => {
   if (!parsed) {
     return res.status(400).json({
       error:
-        'Unrecognized store loyalty QR code. Expected store code (e.g. SMARTCART:LOYALTY:NAIVAS:NV-88421901) or active branch loyalty card number.',
+        'Unrecognized store loyalty QR code. Expected store code (e.g. SMARTCART:LOYALTY:STORE:CARD-001) or active branch loyalty card number.',
     });
   }
 
@@ -4067,8 +4296,109 @@ app.post('/api/ai/chat', async (req, res) => {
 // VITE DEV SERVER OR PRODUCTION SERVE
 // ==========================================
 
+function validateProductionStartup() {
+  if (process.env.NODE_ENV !== 'production') return;
+
+  const requiredVars = ['ADMIN_SETUP_KEY', 'DB_PATH', 'TRUST_PROXY'] as const;
+  for (const name of requiredVars) {
+    const val = process.env[name];
+    if (!val || !val.trim()) {
+      console.error(`[Startup Config] Missing required production environment variable: ${name}`);
+    }
+  }
+
+  let fatal = false;
+  const adminSetupKey = process.env.ADMIN_SETUP_KEY?.trim() || '';
+  if (!adminSetupKey || adminSetupKey.length < 24) {
+    console.error(
+      '[Startup Config] Refusing to start in production: ADMIN_SETUP_KEY must be set and at least 24 characters long.'
+    );
+    fatal = true;
+  }
+
+  if (process.env.DEMO_MODE === 'true') {
+    console.error(
+      '[Startup Config] Refusing to start in production: DEMO_MODE must not be "true" in production.'
+    );
+    fatal = true;
+  }
+
+  if (fatal) {
+    process.exit(1);
+  }
+}
+
+function bootstrapEnvAdmin() {
+  const envEmail = process.env.ADMIN_EMAIL?.trim();
+  const envPassword = process.env.ADMIN_PASSWORD;
+  if (!envEmail && !envPassword) return;
+
+  if (!envEmail || !envPassword) {
+    console.warn(
+      '[Startup Config] Ignoring partial admin environment bootstrap: both ADMIN_EMAIL and ADMIN_PASSWORD must be set together.'
+    );
+    return;
+  }
+
+  const cleanEmail = envEmail.toLowerCase();
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(cleanEmail)) {
+    console.error('[Startup Config] Invalid ADMIN_EMAIL format.');
+    if (process.env.NODE_ENV === 'production') process.exit(1);
+    return;
+  }
+
+  if (envPassword.length < 8) {
+    console.error('[Startup Config] ADMIN_PASSWORD must be at least 8 characters long.');
+    if (process.env.NODE_ENV === 'production') process.exit(1);
+    return;
+  }
+
+  if (db.hasAdmin()) {
+    // Strictly preserve single-admin invariant: never create a second admin account
+    return;
+  }
+
+  const data = db.getRaw();
+  if (data.users.some((u) => u.email.toLowerCase() === cleanEmail)) {
+    console.error('[Startup Config] Cannot bootstrap ADMIN_EMAIL because a non-admin account already uses that email.');
+    return;
+  }
+
+  const adminId = `usr_sys_admin_${Date.now()}`;
+  const newAdmin: User = {
+    id: adminId,
+    name: process.env.ADMIN_NAME?.trim() || 'System Administrator',
+    email: cleanEmail,
+    phone: '',
+    role: 'admin',
+    status: 'active',
+    failedAttempts: 0,
+    lockedUntil: null,
+    mustChangePassword: false,
+    isPermanentAdmin: true,
+    createdAt: new Date().toISOString(),
+  };
+
+  const { hash, salt } = hashPassword(envPassword);
+  data.users.push(newAdmin);
+  data.passwords[adminId] = { hash, salt };
+
+  logAudit(
+    newAdmin,
+    'SYSTEM_ADMIN_ENV_INITIALIZED',
+    'user',
+    adminId,
+    `Single System Administrator account bootstrapped from environment configuration (${cleanEmail}).`
+  );
+  db.save();
+  console.log(`[Startup Config] Single System Administrator account initialized for ${cleanEmail}.`);
+}
+
 async function startServer() {
   const isProd = process.env.NODE_ENV === 'production';
+  validateProductionStartup();
+  bootstrapEnvAdmin();
 
   // Explicitly serve /public assets (sw.js, offline.html, manifest.json, icons)
   app.use(
@@ -4083,10 +4413,18 @@ async function startServer() {
   );
 
   if (isProd) {
-    app.use(express.static(path.resolve(process.cwd(), 'dist')));
-    app.get('*', (req, res) => {
-      res.sendFile(path.resolve(process.cwd(), 'dist', 'index.html'));
-    });
+    const distDir = path.resolve(process.cwd(), 'dist');
+    const indexFile = path.resolve(distDir, 'index.html');
+    app.use(express.static(distDir));
+    app.get(
+      ['/login', '/store/login', '/staff/login', '/admin/login', '/admin/dashboard', '*'],
+      (req, res, next) => {
+        if (req.path.startsWith('/api/')) {
+          return next();
+        }
+        res.sendFile(indexFile);
+      }
+    );
   } else {
     const vite = await createViteServer({
       server: { middlewareMode: true },
