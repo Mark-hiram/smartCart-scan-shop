@@ -343,6 +343,22 @@ export const translations = {
     batteryLowWarning: 'Low battery — save your till code soon',
     batteryUnavailable: 'Battery status unavailable on this browser',
 
+    // Voice Cart Commands (Web Speech API)
+    voiceCartTitle: 'Voice Cart',
+    voiceCartHint: 'Say e.g. "Add milk to cart" or "Add 2 bread"',
+    voiceListening: 'Listening...',
+    voiceStartBtn: 'Speak',
+    voiceStopBtn: 'Stop',
+    voiceUnsupported: 'Voice commands are not supported in this browser.',
+    voiceMicDenied: 'Microphone access was denied. Enable mic permission to use voice commands.',
+    voiceNoSpeech: 'No speech detected. Please tap Speak and try again.',
+    voiceNotFoundPrefix: 'Could not find a branch product matching',
+    voiceAddedPrefix: 'Added',
+    voiceRemovedPrefix: 'Removed',
+    voiceToCartSuffix: 'to cart',
+    voiceFromCartSuffix: 'from cart',
+    voiceNotInCart: 'is not currently in your cart.',
+
     // Shared Shopping Lists & History Builder
     joinSharedList: 'Join Shared List',
     enterShareCode: 'Enter code (e.g. LIST-4821)',
@@ -702,6 +718,22 @@ export const translations = {
     batteryCharging: 'Inachaji',
     batteryLowWarning: 'Betri iko chini — hifadhi msimbo wako wa keshia mapema',
     batteryUnavailable: 'Taarifa ya betri haipatikani kwenye kivinjari hiki',
+
+    // Voice Cart Commands (Swahili)
+    voiceCartTitle: 'Toroli la Sauti',
+    voiceCartHint: 'Sema mfano "Add milk to cart" au "Ongeza maziwa"',
+    voiceListening: 'Inasikiliza...',
+    voiceStartBtn: 'Sema',
+    voiceStopBtn: 'Acha',
+    voiceUnsupported: 'Amri za sauti hazitumiki kwenye kivinjari hiki.',
+    voiceMicDenied: 'Ruhusa ya kipaza sauti imekataliwa. Washa ruhusa ili kutumia amri za sauti.',
+    voiceNoSpeech: 'Hakuna sauti iliyosikika. Bonyeza Sema na ujaribu tena.',
+    voiceNotFoundPrefix: 'Hakuna bidhaa iliyopatikana inayolingana na',
+    voiceAddedPrefix: 'Imeongeza',
+    voiceRemovedPrefix: 'Imeondoa',
+    voiceToCartSuffix: 'kwenye toroli',
+    voiceFromCartSuffix: 'kutoka toroli',
+    voiceNotInCart: 'haipo kwenye toroli lako kwa sasa.',
 
     // Shared Shopping Lists & History Builder (Swahili)
     joinSharedList: 'Fungua Orodha Iliyoshirikiwa',

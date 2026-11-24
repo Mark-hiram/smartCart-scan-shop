@@ -9,6 +9,8 @@ import { BudgetAlert } from '../components/BudgetAlert';
 import { LoyaltyQRScannerModal } from '../components/LoyaltyQRScannerModal';
 import { BatteryStatus } from '../components/BatteryStatus';
 import { ShopperTab, BottomNav } from '../components/BottomNav';
+import { VoiceCartControl, VoiceCommandExecutionResult } from '../components/VoiceCartControl';
+import { ParsedVoiceCommand } from '../utils/voiceCommands';
 import { triggerPriceCheckHaptic, triggerScanSuccessHaptic } from '../utils/haptics';
 import {
   EnrichedProduct,
@@ -57,7 +59,7 @@ interface ShopperViewProps {
 
 export const ShopperView: React.FC<ShopperViewProps> = ({ onOpenStoreModal }) => {
   const { branch, user, token } = useAuth();
-  const { t } = useTranslation();
+  const { t, language } = useTranslation();
 
   const [activeTab, setActiveTab] = useState<ShopperTab>('scan');
   const [products, setProducts] = useState<EnrichedProduct[]>([]);
@@ -513,6 +515,153 @@ export const ShopperView: React.FC<ShopperViewProps> = ({ onOpenStoreModal }) =>
       }
     } catch (e: any) {
       alert(e.message || 'Error processing barcode');
+    }
+  };
+
+  // Handle Web Speech API voice commands (e.g. "Add milk to cart", "Add 2 bread")
+  const handleVoiceCommand = async (
+    command: ParsedVoiceCommand,
+    matchedProduct: EnrichedProduct | null
+  ): Promise<VoiceCommandExecutionResult> => {
+    if (!branch) {
+      onOpenStoreModal();
+      return { ok: false, message: t.selectBranch };
+    }
+
+    if (!matchedProduct) {
+      return {
+        ok: false,
+        message: `${t.voiceNotFoundPrefix} "${command.itemQuery}"`,
+      };
+    }
+
+    if (command.action === 'price_check') {
+      setPriceCheckData({
+        product: matchedProduct,
+        effectivePrice: matchedProduct.effectivePrice,
+        stock: matchedProduct.stock,
+        isLowStock: matchedProduct.isLowStock,
+        promotion: matchedProduct.activePromotion || null,
+      });
+      setIsPriceCheckModalOpen(true);
+      triggerPriceCheckHaptic();
+      return {
+        ok: true,
+        message: `${matchedProduct.name} — KES ${matchedProduct.effectivePrice.toLocaleString()}`,
+      };
+    }
+
+    if (command.action === 'remove') {
+      const existingItem = cart?.items.find(
+        (i) => i.barcode === matchedProduct.barcode || i.productId === matchedProduct.id
+      );
+      if (!existingItem) {
+        return {
+          ok: false,
+          message: `${matchedProduct.name} ${t.voiceNotInCart}`,
+        };
+      }
+      const nextQty = Math.max(0, existingItem.quantity - command.quantity);
+      const removedQty = Math.min(command.quantity, existingItem.quantity);
+      await handleUpdateQuantity(existingItem.id, nextQty);
+      triggerScanSuccessHaptic();
+      return {
+        ok: true,
+        message: `${t.voiceRemovedPrefix} ${removedQty} × ${matchedProduct.name} ${t.voiceFromCartSuffix}`,
+      };
+    }
+
+    // Add item(s) to cart (works both offline & online)
+    if (isOffline || !navigator.onLine) {
+      const existingCart: Cart = cart
+        ? { ...cart, items: cart.items.map((it) => ({ ...it })) }
+        : {
+            id: `offline-cart-${Date.now()}`,
+            shortCode: `OFF-${Math.floor(1000 + Math.random() * 9000)}`,
+            shopperId: user?.id || 'guest',
+            shopperName: user?.name || 'Shopper',
+            shopperPhone: user?.phone || '',
+            supermarketId: branch.supermarketId,
+            branchId: branch.id,
+            status: 'active',
+            items: [],
+            subtotal: 0,
+            totalDiscount: 0,
+            finalTotal: 0,
+            budgetLimit: budgetInput ? parseFloat(budgetInput) : null,
+            isOfflineCreated: true,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          };
+
+      const existingItem = existingCart.items.find((i) => i.barcode === matchedProduct.barcode);
+      if (existingItem) {
+        existingItem.quantity += command.quantity;
+        existingItem.effectiveTotal = existingItem.quantity * existingItem.lockedPrice;
+      } else {
+        existingCart.items.push({
+          id: `item-${Date.now()}`,
+          productId: matchedProduct.id,
+          barcode: matchedProduct.barcode,
+          name: matchedProduct.name,
+          category: matchedProduct.category,
+          aisle: matchedProduct.aisle || '',
+          shelf: matchedProduct.shelf || '',
+          aisleShelf: matchedProduct.aisleShelf,
+          quantity: command.quantity,
+          lockedPrice: matchedProduct.effectivePrice,
+          originalBasePrice: matchedProduct.basePrice,
+          discount: Math.max(0, matchedProduct.basePrice - matchedProduct.effectivePrice),
+          effectiveTotal: matchedProduct.effectivePrice * command.quantity,
+          promoName: matchedProduct.activePromotion?.name,
+          scannedAt: new Date().toISOString(),
+        });
+      }
+
+      let subtotal = 0;
+      let finalTotal = 0;
+      for (const it of existingCart.items) {
+        subtotal += it.originalBasePrice * it.quantity;
+        finalTotal += it.effectiveTotal;
+      }
+      existingCart.subtotal = subtotal;
+      existingCart.finalTotal = finalTotal;
+      existingCart.totalDiscount = Math.max(0, subtotal - finalTotal);
+      existingCart.isOfflineCreated = true;
+
+      setCart({ ...existingCart });
+      localStorage.setItem(`offline_cart_${branch.id}`, JSON.stringify(existingCart));
+      triggerScanSuccessHaptic();
+      return {
+        ok: true,
+        message: `${t.voiceAddedPrefix} ${command.quantity} × ${matchedProduct.name} ${t.voiceToCartSuffix}`,
+      };
+    }
+
+    try {
+      const res = await fetch('/api/shopper/cart/add', {
+        method: 'POST',
+        headers: getGuestHeaders(),
+        body: JSON.stringify({
+          branchId: branch.id,
+          barcode: matchedProduct.barcode,
+          quantity: command.quantity,
+          cartId: cart?.id,
+        }),
+      });
+      const updatedCart = await res.json();
+      if (res.ok) {
+        setCart(updatedCart);
+        localStorage.setItem(`offline_cart_${branch.id}`, JSON.stringify(updatedCart));
+        triggerScanSuccessHaptic();
+        return {
+          ok: true,
+          message: `${t.voiceAddedPrefix} ${command.quantity} × ${matchedProduct.name} ${t.voiceToCartSuffix}`,
+        };
+      }
+      return { ok: false, message: updatedCart.error || t.noProductFound };
+    } catch (e: any) {
+      return { ok: false, message: e?.message || 'Error adding item to cart' };
     }
   };
 
@@ -1102,6 +1251,12 @@ export const ShopperView: React.FC<ShopperViewProps> = ({ onOpenStoreModal }) =>
             }))}
           />
 
+          <VoiceCartControl
+            products={products}
+            language={language}
+            onExecuteCommand={handleVoiceCommand}
+          />
+
           {/* Quick Mini Running Total Bar */}
           {cart && cart.items.length > 0 && (
             <div
@@ -1161,6 +1316,12 @@ export const ShopperView: React.FC<ShopperViewProps> = ({ onOpenStoreModal }) =>
               )}
             </div>
           </div>
+
+          <VoiceCartControl
+            products={products}
+            language={language}
+            onExecuteCommand={handleVoiceCommand}
+          />
 
           {/* Cart Item List with discrete Aisle and Shelf Badges */}
           {cart && cart.items.length > 0 ? (
