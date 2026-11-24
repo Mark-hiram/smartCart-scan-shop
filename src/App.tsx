@@ -15,21 +15,38 @@ import { OwnerView } from './views/OwnerView';
 import { AdminView } from './views/AdminView';
 import { AdminLoginView } from './components/AdminLoginView';
 import { PortalLoginView } from './components/PortalLoginView';
+import { SmartCartChat } from './components/SmartCartChat';
 import { PortalType } from './types';
 
 function AppContent() {
   const { user, isLoading } = useAuth();
-  const [activePortal, setActivePortal] = useState<PortalType>('shopper');
+  const [currentPath, setCurrentPath] = useState<string>(() => window.location.pathname);
+  const [activePortal, setActivePortal] = useState<PortalType>(() => {
+    const p = window.location.pathname;
+    if (p.startsWith('/staff')) return 'staff';
+    if (p.startsWith('/store')) return 'management';
+    return 'shopper';
+  });
   const [isStoreModalOpen, setIsStoreModalOpen] = useState(false);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
-  const [currentPath, setCurrentPath] = useState<string>(() => window.location.pathname);
 
   const [isOnline, setIsOnline] = useState<boolean>(() => (typeof navigator !== 'undefined' ? navigator.onLine : true));
+
+  const navigateTo = (path: string) => {
+    if (window.location.pathname !== path) {
+      window.history.pushState({}, '', path);
+    }
+    setCurrentPath(path);
+  };
 
   // Sync route path on popstate
   useEffect(() => {
     const handleLocationChange = () => {
-      setCurrentPath(window.location.pathname);
+      const p = window.location.pathname;
+      setCurrentPath(p);
+      if (p.startsWith('/staff')) setActivePortal('staff');
+      else if (p.startsWith('/store')) setActivePortal('management');
+      else if (p.startsWith('/login')) setActivePortal('shopper');
     };
     window.addEventListener('popstate', handleLocationChange);
     return () => window.removeEventListener('popstate', handleLocationChange);
@@ -59,23 +76,45 @@ function AppContent() {
     }
   }, []);
 
-  // Automatically align portal when user logs in or role changes
+  // Automatically align portal & URL when user logs in or logs out
   useEffect(() => {
     if (user) {
       if (user.role === 'staff') {
         setActivePortal('staff');
-      } else if (user.role === 'owner' || user.role === 'admin') {
+      } else if (user.role === 'owner') {
         setActivePortal('management');
+      } else if (user.role === 'admin') {
+        setActivePortal('management');
+        if (!user.mustChangePassword && currentPath === '/admin/login') {
+          navigateTo('/admin/dashboard');
+        }
       } else if (user.role === 'shopper') {
         setActivePortal('shopper');
       }
+    } else if (currentPath.startsWith('/admin') && currentPath !== '/admin/login') {
+      navigateTo('/admin/login');
     }
   }, [user]);
 
-  const navigateTo = (path: string) => {
-    window.history.pushState({}, '', path);
-    setCurrentPath(path);
-  };
+  const isAdminRoute = currentPath.startsWith('/admin');
+  const isShopperLoginRoute = currentPath === '/login';
+
+  // Portal-specific page titles
+  useEffect(() => {
+    if (isAdminRoute) {
+      document.title = user?.role === 'admin' && !user.mustChangePassword
+        ? 'Smart Cart — System Admin Dashboard'
+        : 'Smart Cart — System Administration Sign-In';
+    } else if (activePortal === 'staff' || currentPath.startsWith('/staff')) {
+      document.title = 'Smart Cart — Staff & Till Portal';
+    } else if (activePortal === 'management' || currentPath.startsWith('/store')) {
+      document.title = 'Smart Cart — Store Management Portal';
+    } else if (isShopperLoginRoute) {
+      document.title = 'Smart Cart — Shopper Sign-In';
+    } else {
+      document.title = 'Smart Cart';
+    }
+  }, [isAdminRoute, isShopperLoginRoute, activePortal, currentPath, user]);
 
   if (isLoading) {
     return (
@@ -88,33 +127,37 @@ function AppContent() {
     );
   }
 
-  const isAdminRoute = currentPath.startsWith('/admin');
-
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col antialiased">
       {/* Top Bar Header with 3-portal switcher and store info */}
       <Header
         activePortal={isAdminRoute ? 'management' : activePortal}
         onSwitchPortal={(portal) => {
-          if (isAdminRoute) {
-            navigateTo('/');
-          }
+          if (portal === 'shopper') navigateTo('/');
+          else if (portal === 'staff') navigateTo('/staff/login');
+          else if (portal === 'management') navigateTo('/store/login');
           setActivePortal(portal);
         }}
         onOpenStoreModal={() => setIsStoreModalOpen(true)}
-        onOpenAuthModal={() => setIsAuthModalOpen(true)}
+        onOpenAuthModal={() => {
+          if (activePortal === 'shopper') {
+            navigateTo('/login');
+          } else {
+            setIsAuthModalOpen(true);
+          }
+        }}
       />
 
       {/* Main Content Area */}
       <main className="flex-1">
-        {/* Case 1: Admin route /admin/login or /admin/setup */}
+        {/* Case 1: Dedicated Admin route (/admin, /admin/login, /admin/dashboard, /admin/setup) */}
         {isAdminRoute ? (
           user?.role === 'admin' && !user.mustChangePassword ? (
             <AdminView />
           ) : (
             <AdminLoginView
               onSuccess={() => {
-                navigateTo('/admin/login');
+                navigateTo('/admin/dashboard');
               }}
             />
           )
@@ -123,7 +166,25 @@ function AppContent() {
           <>
             {/* If admin is signed in but must change temporary password, enforce it immediately */}
             {user?.role === 'admin' && user.mustChangePassword ? (
-              <AdminLoginView />
+              <AdminLoginView
+                onSuccess={() => {
+                  navigateTo('/admin/dashboard');
+                }}
+              />
+            ) : isShopperLoginRoute && user?.role !== 'shopper' ? (
+              <PortalLoginView
+                portal="shopper"
+                onSwitchPortal={(portal) => {
+                  if (portal === 'staff') navigateTo('/staff/login');
+                  else if (portal === 'management') navigateTo('/store/login');
+                  else navigateTo('/');
+                  setActivePortal(portal);
+                }}
+                onContinueAsGuest={() => {
+                  navigateTo('/');
+                  setActivePortal('shopper');
+                }}
+              />
             ) : activePortal === 'shopper' ? (
               <ShopperView onOpenStoreModal={() => setIsStoreModalOpen(true)} />
             ) : activePortal === 'staff' ? (
@@ -132,8 +193,15 @@ function AppContent() {
               ) : (
                 <PortalLoginView
                   portal="staff"
-                  onSwitchPortal={setActivePortal}
-                  onContinueAsGuest={() => setActivePortal('shopper')}
+                  onSwitchPortal={(portal) => {
+                    if (portal === 'shopper') navigateTo('/login');
+                    else if (portal === 'management') navigateTo('/store/login');
+                    setActivePortal(portal);
+                  }}
+                  onContinueAsGuest={() => {
+                    navigateTo('/');
+                    setActivePortal('shopper');
+                  }}
                 />
               )
             ) : activePortal === 'management' ? (
@@ -144,8 +212,15 @@ function AppContent() {
               ) : (
                 <PortalLoginView
                   portal="management"
-                  onSwitchPortal={setActivePortal}
-                  onContinueAsGuest={() => setActivePortal('shopper')}
+                  onSwitchPortal={(portal) => {
+                    if (portal === 'shopper') navigateTo('/login');
+                    else if (portal === 'staff') navigateTo('/staff/login');
+                    setActivePortal(portal);
+                  }}
+                  onContinueAsGuest={() => {
+                    navigateTo('/');
+                    setActivePortal('shopper');
+                  }}
                 />
               )
             ) : null}
@@ -174,6 +249,9 @@ function AppContent() {
           <span>Offline Mode — Working from local branch cache</span>
         </div>
       )}
+
+      {/* Multi-turn Gemini AI Assistant */}
+      <SmartCartChat />
     </div>
   );
 }

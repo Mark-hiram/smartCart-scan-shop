@@ -25,7 +25,7 @@ interface AdminLoginViewProps {
 }
 
 export const AdminLoginView: React.FC<AdminLoginViewProps> = ({ onSuccess, initialMode }) => {
-  const { user, login, setupAdmin, changeFirstPassword, setupStatus, checkSetupStatus } = useAuth();
+  const { user, login, setupAdmin, changeFirstPassword, setupStatus, checkSetupStatus, adminSetupKeyRequired } = useAuth();
   const { t } = useTranslation();
 
   const [mode, setMode] = useState<'setup' | 'login' | 'forgot' | 'reset-token'>('login');
@@ -324,7 +324,7 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({ onSuccess, initi
 
                   <div>
                     <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
-                      Setup Key (ADMIN_SETUP_KEY) *
+                      Setup Key (ADMIN_SETUP_KEY){adminSetupKeyRequired ? ' *' : ' (Optional in dev until set)'}
                     </label>
                     <div className="relative">
                       <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-3.5" />
@@ -332,8 +332,12 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({ onSuccess, initi
                         type="password"
                         value={setupKey}
                         onChange={(e) => setSetupKey(e.target.value)}
-                        placeholder="Enter server ADMIN_SETUP_KEY secret"
-                        required
+                        placeholder={
+                          adminSetupKeyRequired
+                            ? 'Enter server ADMIN_SETUP_KEY secret'
+                            : 'Leave blank in dev or enter ADMIN_SETUP_KEY'
+                        }
+                        required={adminSetupKeyRequired}
                         className="w-full h-11 pl-9 pr-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white text-xs font-mono focus:outline-emerald-500"
                       />
                     </div>

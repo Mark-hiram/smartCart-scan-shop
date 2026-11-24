@@ -439,6 +439,7 @@ export const PortalLoginView: React.FC<PortalLoginViewProps> = ({
                     </button>
                   )}
                 </div>
+              ) : (
                 <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/40 text-[11px] text-slate-500 text-center space-y-2">
                   <p>
                     {portal === 'staff'

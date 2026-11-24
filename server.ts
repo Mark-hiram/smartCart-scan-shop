@@ -4,8 +4,10 @@ import path from 'path';
 import crypto from 'crypto';
 import { db, hashPassword, verifyPassword } from './src/server/db';
 import { validateBarcode } from './src/utils/barcode';
+import { GoogleGenAI, Content } from '@google/genai';
 import {
   User,
+  Supermarket,
   Cart,
   CartItem,
   Product,
@@ -16,9 +18,30 @@ import {
   Announcement,
   SupportTicket,
   ShoppingList,
+  LoyaltyCard,
   StaffPermissions,
   STAFF_PRESETS,
 } from './src/types';
+
+function getGeminiClient(): GoogleGenAI | null {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) return null;
+  return new GoogleGenAI({
+    apiKey,
+    httpOptions: {
+      headers: {
+        'User-Agent': 'aistudio-build',
+      },
+    },
+  });
+}
+
+const PORTAL_BY_ROLE: Record<string, string> = {
+  shopper: 'shopper',
+  staff: 'staff',
+  owner: 'management',
+  admin: 'admin',
+};
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -123,7 +146,7 @@ function cleanupExpiredSessions() {
     }
   }
 }
-setInterval(cleanupExpiredSessions, 15 * 60 * 1000);
+setInterval(cleanupExpiredSessions, 15 * 60 * 1000).unref();
 
 if (process.env.TRUST_PROXY === 'true') {
   app.set('trust proxy', 1);
@@ -145,6 +168,12 @@ function getAuthUser(req: Request): User | null {
   const data = db.getRaw();
   const user = data.users.find((u) => u.id === session.userId);
   if (!user || user.status === 'suspended') {
+    sessions.delete(token);
+    return null;
+  }
+
+  // Enforce strict portal binding: a session created for one portal cannot impersonate another
+  if (session.portal !== PORTAL_BY_ROLE[user.role]) {
     sessions.delete(token);
     return null;
   }
@@ -176,12 +205,17 @@ function requireAuth(req: Request, res: Response, next: NextFunction) {
   next();
 }
 
-// Role authorization middleware
+// Role & portal authorization middleware
 function requireRole(allowedRoles: string[]) {
   return (req: Request, res: Response, next: NextFunction) => {
     const user = (req as any).user as User;
+    const session = (req as any).session as SessionRecord | undefined;
     if (!user || !allowedRoles.includes(user.role)) {
       return res.status(403).json({ error: 'Forbidden: Insufficient role privileges.' });
+    }
+    const allowedPortals = allowedRoles.map((r) => PORTAL_BY_ROLE[r]).filter(Boolean);
+    if (session && !allowedPortals.includes(session.portal)) {
+      return res.status(403).json({ error: 'Forbidden: Session portal not authorized for this route.' });
     }
     next();
   };
@@ -593,6 +627,9 @@ app.post('/api/admin/reset-password-with-token', (req, res) => {
   record.used = true;
   delete (data.resetCodes as any)[tokenKey];
 
+  // Revoke any active admin sessions on password reset
+  revokeUserSessions(admin.id);
+
   logAudit(
     admin,
     'ADMIN_PASSWORD_RESET_COMPLETED',
@@ -786,6 +823,10 @@ app.post('/api/auth/register', sensitiveOpsRateLimiter, (req, res) => {
     return res.status(400).json({ error: 'Name, email, phone, and password are required' });
   }
 
+  if (typeof password !== 'string' || password.length < 8) {
+    return res.status(400).json({ error: 'Password must be at least 8 characters long.' });
+  }
+
   const cleanEmail = email.trim().toLowerCase();
   const cleanPhone = phone.replace(/[\s\-()]/g, '');
   const data = db.getRaw();
@@ -876,7 +917,8 @@ function sendResetMessage(target: string, type: 'email' | 'sms' | 'admin_link', 
 app.get('/api/auth/config', (req, res) => {
   const isProd = process.env.NODE_ENV === 'production';
   const demoMode = !isProd && process.env.DEMO_MODE === 'true';
-  res.json({ demoMode });
+  const adminSetupKeyRequired = isProd || Boolean(process.env.ADMIN_SETUP_KEY?.trim());
+  res.json({ demoMode, adminSetupKeyRequired });
 });
 
 // Password recovery endpoint
@@ -1213,6 +1255,9 @@ app.get('/api/shopper/branch-products/:branchId', (req, res) => {
   if (!branch) return res.status(404).json({ error: 'Branch not found' });
 
   const supermarket = data.supermarkets.find((s) => s.id === branch.supermarketId);
+  if (!supermarket || (supermarket.status !== 'active' && user?.role !== 'admin')) {
+    return res.status(404).json({ error: 'Store branch is currently unavailable' });
+  }
   const now = new Date().toISOString();
 
   const activePromos = data.promotions.filter(
@@ -1277,8 +1322,14 @@ app.post('/api/shopper/scan-lookup', (req, res) => {
   }
 
   const data = db.getRaw();
+  const caller = getAuthUser(req);
   const branch = data.branches.find((b) => b.id === branchId);
   if (!branch) return res.status(404).json({ error: 'Branch not found' });
+
+  const supermarket = data.supermarkets.find((s) => s.id === branch.supermarketId);
+  if (!supermarket || (supermarket.status !== 'active' && caller?.role !== 'admin')) {
+    return res.status(404).json({ error: 'Store branch is currently unavailable' });
+  }
 
   const product = data.products.find(
     (p) => p.supermarketId === branch.supermarketId && p.barcode === cleanBarcode
@@ -1610,7 +1661,7 @@ app.delete('/api/shopper/cart/:id', (req, res) => {
 // 5. SHOPPER PHASE 2: HISTORY & RE-ADD, FAVOURITES, LISTS
 // ==========================================
 
-// Shopper past cart history
+// Shopper past cart history (authenticated)
 app.get('/api/shopper/history', requireAuth, (req, res) => {
   const user = (req as any).user as User;
   const data = db.getRaw();
@@ -1620,30 +1671,103 @@ app.get('/api/shopper/history', requireAuth, (req, res) => {
   res.json(history);
 });
 
-// Re-add items from a past cart into active cart
-app.post('/api/shopper/cart/re-add', requireAuth, (req, res) => {
-  const user = (req as any).user as User;
-  const { pastCartId, targetBranchId } = req.body;
+// Past purchases for signed-in shoppers or browser-keyed guests (used by list builder)
+app.get('/api/shopper/past-purchases', (req, res) => {
+  const user = getAuthUser(req);
+  const callerId = getShopperOrGuestId(req, user);
+  const data = db.getRaw();
+  const history = data.carts
+    .filter((c) => c.shopperId === callerId && (c.status === 'completed' || c.status === 'verified'))
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  res.json(history);
+});
+
+// Aggregated unique product purchase history across previous completed/verified carts
+app.get('/api/shopper/product-history', (req, res) => {
+  const user = getAuthUser(req);
+  const callerId = getShopperOrGuestId(req, user);
+  const branchId = (req.query.branchId as string) || '';
   const data = db.getRaw();
 
-  const pastCart = data.carts.find((c) => c.id === pastCartId && c.shopperId === user.id);
+  const pastCarts = data.carts
+    .filter((c) => c.shopperId === callerId && (c.status === 'completed' || c.status === 'verified'))
+    .sort((a, b) => new Date(b.updatedAt || b.createdAt).getTime() - new Date(a.updatedAt || a.createdAt).getTime());
+
+  const branch = branchId ? data.branches.find((b) => b.id === branchId) : undefined;
+  const productMap = new Map<string, any>();
+
+  for (const cart of pastCarts) {
+    const cartDate = cart.updatedAt || cart.createdAt;
+    for (const item of cart.items) {
+      const existing = productMap.get(item.barcode);
+      const liveProd = branch
+        ? data.products.find((p) => p.supermarketId === branch.supermarketId && p.barcode === item.barcode)
+        : data.products.find((p) => p.barcode === item.barcode);
+      const bp = branch && liveProd
+        ? data.branchProducts.find((b) => b.branchId === branch.id && b.productId === liveProd.id)
+        : undefined;
+
+      const currentBranchPrice = bp?.priceOverride ?? liveProd?.basePrice ?? item.lockedPrice;
+      const aisle = bp?.aisleOverride || liveProd?.aisle || item.aisle || 'Aisle 1';
+      const shelf = bp?.shelfOverride || liveProd?.shelf || item.shelf || 'Shelf A';
+
+      if (!existing) {
+        productMap.set(item.barcode, {
+          barcode: item.barcode,
+          productId: liveProd?.id || item.productId,
+          name: liveProd?.name || item.name,
+          category: liveProd?.category || item.category || 'General',
+          aisle,
+          shelf,
+          lastPurchasedAt: cartDate,
+          purchaseCount: 1,
+          totalQuantityPurchased: item.quantity,
+          lastPrice: item.lockedPrice,
+          currentBranchPrice,
+        });
+      } else {
+        existing.purchaseCount += 1;
+        existing.totalQuantityPurchased += item.quantity;
+        if (new Date(cartDate).getTime() > new Date(existing.lastPurchasedAt).getTime()) {
+          existing.lastPurchasedAt = cartDate;
+          existing.lastPrice = item.lockedPrice;
+        }
+      }
+    }
+  }
+
+  const results = Array.from(productMap.values()).sort(
+    (a, b) => new Date(b.lastPurchasedAt).getTime() - new Date(a.lastPurchasedAt).getTime()
+  );
+  res.json(results);
+});
+
+// Re-add items from a past cart into active cart (works for signed-in or guest shopper)
+app.post('/api/shopper/cart/re-add', (req, res) => {
+  const user = getAuthUser(req);
+  const callerId = getShopperOrGuestId(req, user);
+  const { pastCartId, targetBranchId, cartId, branchId: reqBranchId } = req.body;
+  const resolvedPastCartId = pastCartId || cartId;
+  const data = db.getRaw();
+
+  const pastCart = data.carts.find((c) => c.id === resolvedPastCartId && c.shopperId === callerId);
   if (!pastCart) return res.status(404).json({ error: 'Past cart not found' });
 
-  const branchId = targetBranchId || pastCart.branchId;
+  const branchId = targetBranchId || reqBranchId || pastCart.branchId;
   const branch = data.branches.find((b) => b.id === branchId);
   if (!branch) return res.status(404).json({ error: 'Branch not found' });
 
   let activeCart = data.carts.find(
-    (c) => c.shopperId === user.id && c.branchId === branchId && c.status === 'active'
+    (c) => c.shopperId === callerId && c.branchId === branchId && c.status === 'active'
   );
 
   if (!activeCart) {
     activeCart = {
       id: `cart_${Date.now()}`,
       shortCode: generateShortCode(),
-      shopperId: user.id,
-      shopperName: user.name,
-      shopperPhone: user.phone,
+      shopperId: callerId,
+      shopperName: user?.name || 'Guest Shopper',
+      shopperPhone: user?.phone || '',
       supermarketId: branch.supermarketId,
       branchId: branch.id,
       status: 'active',
@@ -1660,7 +1784,8 @@ app.post('/api/shopper/cart/re-add', requireAuth, (req, res) => {
 
   // Add items from past cart, locking current branch prices
   pastCart.items.forEach((item) => {
-    const prod = data.products.find((p) => p.barcode === item.barcode);
+    const prod = data.products.find((p) => p.supermarketId === branch.supermarketId && p.barcode === item.barcode)
+      || data.products.find((p) => p.barcode === item.barcode);
     if (!prod) return;
 
     const bp = data.branchProducts.find((b) => b.branchId === branchId && b.productId === prod.id);
@@ -1753,65 +1878,264 @@ app.post('/api/shopper/favourites/toggle', requireAuth, (req, res) => {
   res.json({ success: true, isFavourite, favourites: data.favourites[user.id] });
 });
 
-// Shareable Shopping Lists
-app.get('/api/shopper/shopping-lists', requireAuth, (req, res) => {
-  const user = (req as any).user as User;
+function generateListShareCode(existingLists: ShoppingList[]): string {
+  const used = new Set(existingLists.map((l) => l.shareCode.toUpperCase()));
+  for (let i = 0; i < 30; i++) {
+    const code = `LIST-${crypto.randomInt(1000, 10000)}`;
+    if (!used.has(code)) return code;
+  }
+  return `LIST-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+}
+
+function enrichListItemFromBranch(
+  rawItem: { barcode?: string; productName: string; quantity?: number; aisle?: string; shelf?: string; estimatedPrice?: number },
+  branchId: string | undefined,
+  data: ReturnType<typeof db.getRaw>
+) {
+  const branch = branchId ? data.branches.find((b) => b.id === branchId) : undefined;
+  let product: Product | undefined;
+  if (rawItem.barcode) {
+    product = branch
+      ? data.products.find((p) => p.supermarketId === branch.supermarketId && p.barcode === rawItem.barcode)
+      : data.products.find((p) => p.barcode === rawItem.barcode);
+  }
+  const bp = branch && product
+    ? data.branchProducts.find((b) => b.branchId === branch.id && b.productId === product!.id)
+    : undefined;
+
+  return {
+    id: `li_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
+    barcode: rawItem.barcode || product?.barcode,
+    productName: product?.name || rawItem.productName,
+    quantity: Math.max(1, Math.round(Number(rawItem.quantity) || 1)),
+    completed: false,
+    aisle: bp?.aisleOverride || product?.aisle || rawItem.aisle || 'Aisle 1',
+    shelf: bp?.shelfOverride || product?.shelf || rawItem.shelf || 'Shelf A',
+    estimatedPrice: bp?.priceOverride ?? product?.basePrice ?? rawItem.estimatedPrice ?? 0,
+  };
+}
+
+// Shareable Shopping Lists (Owned or Joined Collaborator Lists)
+app.get('/api/shopper/shopping-lists', (req, res) => {
+  const user = getAuthUser(req);
+  const callerId = getShopperOrGuestId(req, user);
   const data = db.getRaw();
-  const lists = (data.shoppingLists || []).filter((l) => l.userId === user.id);
+  const lists = (data.shoppingLists || [])
+    .filter((l) => l.userId === callerId || (Array.isArray(l.collaboratorIds) && l.collaboratorIds.includes(callerId)))
+    .sort((a, b) => new Date(b.updatedAt || b.createdAt).getTime() - new Date(a.updatedAt || a.createdAt).getTime());
   res.json(lists);
 });
 
-app.post('/api/shopper/shopping-lists', requireAuth, (req, res) => {
-  const user = (req as any).user as User;
-  const { title, canEdit = true, items = [] } = req.body;
+// Create a Shared Shopping List (blank, from previous purchase, or from product history)
+app.post('/api/shopper/shopping-lists', (req, res) => {
+  const user = getAuthUser(req);
+  const callerId = getShopperOrGuestId(req, user);
+  const {
+    title,
+    canEdit = true,
+    items = [],
+    sourceCartId,
+    selectedBarcodes,
+    branchId,
+    sourceType,
+  } = req.body;
   const data = db.getRaw();
+  if (!data.shoppingLists) data.shoppingLists = [];
 
-  const shareCode = `LIST-${Math.floor(1000 + Math.random() * 9000)}`;
+  let resolvedItems: any[] = [];
+  let resolvedTitle = typeof title === 'string' && title.trim() ? title.trim() : '';
+  let resolvedSourceType: ShoppingList['sourceType'] = sourceType || 'blank';
+
+  if (sourceCartId) {
+    const pastCart = data.carts.find(
+      (c) => c.id === sourceCartId && (c.shopperId === callerId || user?.role === 'admin')
+    );
+    if (!pastCart) {
+      return res.status(404).json({ error: 'Previous purchase not found.' });
+    }
+    resolvedSourceType = 'previous_purchase';
+    if (!resolvedTitle) {
+      resolvedTitle = `Restock (${pastCart.shortCode})`;
+    }
+    resolvedItems = pastCart.items.map((it) =>
+      enrichListItemFromBranch(
+        {
+          barcode: it.barcode,
+          productName: it.name,
+          quantity: it.quantity,
+          aisle: it.aisle,
+          shelf: it.shelf,
+          estimatedPrice: it.lockedPrice,
+        },
+        branchId || pastCart.branchId,
+        data
+      )
+    );
+  } else if (Array.isArray(selectedBarcodes) && selectedBarcodes.length > 0) {
+    resolvedSourceType = 'product_history';
+    if (!resolvedTitle) {
+      resolvedTitle = `History List (${new Date().toLocaleDateString()})`;
+    }
+    const barcodeSet = new Set(selectedBarcodes.map((b: any) => String(b).trim()).filter(Boolean));
+    const pastCarts = data.carts.filter((c) => c.shopperId === callerId && (c.status === 'completed' || c.status === 'verified'));
+
+    const matchedByBarcode = new Map<string, any>();
+    for (const c of pastCarts) {
+      for (const it of c.items) {
+        if (barcodeSet.has(it.barcode) && !matchedByBarcode.has(it.barcode)) {
+          matchedByBarcode.set(it.barcode, it);
+        }
+      }
+    }
+
+    for (const bc of barcodeSet) {
+      const fromHistory = matchedByBarcode.get(bc);
+      const fromCatalog = data.products.find((p) => p.barcode === bc);
+      if (fromHistory) {
+        resolvedItems.push(
+          enrichListItemFromBranch(
+            {
+              barcode: bc,
+              productName: fromHistory.name,
+              quantity: 1,
+              aisle: fromHistory.aisle,
+              shelf: fromHistory.shelf,
+              estimatedPrice: fromHistory.lockedPrice,
+            },
+            branchId,
+            data
+          )
+        );
+      } else if (fromCatalog) {
+        resolvedItems.push(
+          enrichListItemFromBranch(
+            {
+              barcode: bc,
+              productName: fromCatalog.name,
+              quantity: 1,
+              aisle: fromCatalog.aisle,
+              shelf: fromCatalog.shelf,
+              estimatedPrice: fromCatalog.basePrice,
+            },
+            branchId,
+            data
+          )
+        );
+      }
+    }
+  } else {
+    resolvedItems = (Array.isArray(items) ? items : []).map((it: any) =>
+      enrichListItemFromBranch(
+        {
+          barcode: it.barcode,
+          productName: it.productName || 'Item',
+          quantity: it.quantity || 1,
+          aisle: it.aisle,
+          shelf: it.shelf,
+          estimatedPrice: it.estimatedPrice,
+        },
+        branchId,
+        data
+      )
+    );
+  }
+
+  const shareCode = generateListShareCode(data.shoppingLists);
   const newList: ShoppingList = {
-    id: `list_${Date.now()}`,
-    userId: user.id,
-    title: title || 'My Shopping List',
+    id: `list_${Date.now()}_${crypto.randomBytes(2).toString('hex')}`,
+    userId: callerId,
+    ownerName: user?.name || 'Guest Shopper',
+    collaboratorIds: [],
+    sourceType: resolvedSourceType,
+    sourceCartId: sourceCartId || undefined,
+    title: resolvedTitle || 'My Shopping List',
     shareCode,
     canEdit: Boolean(canEdit),
-    items: items.map((it: any) => ({
-      id: it.id || `li_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
-      barcode: it.barcode,
-      productName: it.productName,
-      quantity: it.quantity || 1,
-      completed: false,
-      aisle: it.aisle || 'Aisle 1',
-      shelf: it.shelf || 'Shelf A',
-      estimatedPrice: it.estimatedPrice || 0,
-    })),
+    items: resolvedItems,
     createdAt: new Date().toISOString(),
   };
 
-  if (!data.shoppingLists) data.shoppingLists = [];
-  data.shoppingLists.push(newList);
+  data.shoppingLists.unshift(newList);
   db.save();
 
   res.json(newList);
 });
 
-app.put('/api/shopper/shopping-lists/:id', requireAuth, (req, res) => {
-  const user = (req as any).user as User;
+// Join a shared shopping list via shareCode
+app.post('/api/shopper/shopping-lists/join', (req, res) => {
+  const user = getAuthUser(req);
+  const callerId = getShopperOrGuestId(req, user);
+  const { shareCode } = req.body;
+
+  if (!shareCode || typeof shareCode !== 'string' || !shareCode.trim()) {
+    return res.status(400).json({ error: 'Share code is required.' });
+  }
+
+  const cleanCode = shareCode.trim().toUpperCase();
+  const data = db.getRaw();
+  const list = (data.shoppingLists || []).find((l) => l.shareCode.toUpperCase() === cleanCode);
+  if (!list) {
+    return res.status(404).json({ error: 'Shared shopping list not found for that code.' });
+  }
+
+  if (list.userId !== callerId) {
+    if (!Array.isArray(list.collaboratorIds)) list.collaboratorIds = [];
+    if (!list.collaboratorIds.includes(callerId)) {
+      list.collaboratorIds.push(callerId);
+      db.save();
+    }
+  }
+
+  res.json(list);
+});
+
+app.put('/api/shopper/shopping-lists/:id', (req, res) => {
+  const user = getAuthUser(req);
+  const callerId = getShopperOrGuestId(req, user);
   const { title, items, canEdit } = req.body;
   const data = db.getRaw();
-  const list = data.shoppingLists.find((l) => l.id === req.params.id);
+  const list = (data.shoppingLists || []).find((l) => l.id === req.params.id);
   if (!list) return res.status(404).json({ error: 'List not found' });
 
-  // Only owner or authorized editors can update
-  if (list.userId !== user.id && !list.canEdit) {
+  const isOwner = list.userId === callerId;
+  const isCollaborator = Array.isArray(list.collaboratorIds) && list.collaboratorIds.includes(callerId);
+
+  if (!isOwner && !(list.canEdit && isCollaborator)) {
     return res.status(403).json({ error: 'You do not have permission to edit this list.' });
   }
 
-  if (title !== undefined) list.title = title;
-  if (items !== undefined) list.items = items;
-  if (canEdit !== undefined && list.userId === user.id) list.canEdit = canEdit;
+  if (title !== undefined && isOwner && typeof title === 'string' && title.trim()) {
+    list.title = title.trim();
+  }
+  if (items !== undefined && Array.isArray(items)) {
+    list.items = items;
+  }
+  if (canEdit !== undefined && isOwner) {
+    list.canEdit = Boolean(canEdit);
+  }
   list.updatedAt = new Date().toISOString();
   db.save();
 
   res.json(list);
+});
+
+app.delete('/api/shopper/shopping-lists/:id', (req, res) => {
+  const user = getAuthUser(req);
+  const callerId = getShopperOrGuestId(req, user);
+  const data = db.getRaw();
+  if (!data.shoppingLists) data.shoppingLists = [];
+
+  const idx = data.shoppingLists.findIndex((l) => l.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'List not found' });
+
+  const list = data.shoppingLists[idx];
+  if (list.userId !== callerId && user?.role !== 'admin') {
+    return res.status(403).json({ error: 'Only the list creator can delete this shared list.' });
+  }
+
+  data.shoppingLists.splice(idx, 1);
+  db.save();
+  res.json({ success: true });
 });
 
 app.get('/api/shopper/shopping-lists/share/:shareCode', (req, res) => {
@@ -1822,8 +2146,9 @@ app.get('/api/shopper/shopping-lists/share/:shareCode', (req, res) => {
 });
 
 // Convert Shopping List into Active Cart
-app.post('/api/shopper/shopping-lists/convert-to-cart', requireAuth, (req, res) => {
-  const user = (req as any).user as User;
+app.post('/api/shopper/shopping-lists/convert-to-cart', (req, res) => {
+  const user = getAuthUser(req);
+  const callerId = getShopperOrGuestId(req, user);
   const { listId, branchId } = req.body;
   if (!listId || !branchId) return res.status(400).json({ error: 'listId and branchId are required' });
 
@@ -1831,20 +2156,26 @@ app.post('/api/shopper/shopping-lists/convert-to-cart', requireAuth, (req, res) 
   const list = (data.shoppingLists || []).find((l) => l.id === listId);
   if (!list) return res.status(404).json({ error: 'List not found' });
 
+  const canUseList =
+    list.userId === callerId || (Array.isArray(list.collaboratorIds) && list.collaboratorIds.includes(callerId));
+  if (!canUseList && user?.role !== 'admin') {
+    return res.status(403).json({ error: 'Forbidden: You do not have access to this list.' });
+  }
+
   const branch = data.branches.find((b) => b.id === branchId);
   if (!branch) return res.status(404).json({ error: 'Branch not found' });
 
   let activeCart = data.carts.find(
-    (c) => c.shopperId === user.id && c.branchId === branchId && (c.status === 'active' || c.status === 'locked')
+    (c) => c.shopperId === callerId && c.branchId === branchId && (c.status === 'active' || c.status === 'locked')
   );
 
   if (!activeCart) {
     activeCart = {
       id: `cart_${Date.now()}`,
       shortCode: generateShortCode(),
-      shopperId: user.id,
-      shopperName: user.name,
-      shopperPhone: user.phone,
+      shopperId: callerId,
+      shopperName: user?.name || 'Guest Shopper',
+      shopperPhone: user?.phone || '',
       supermarketId: branch.supermarketId,
       branchId: branch.id,
       status: 'active',
@@ -2361,6 +2692,7 @@ app.put('/api/owner/staff/:id', requireAuth, requireRole(['owner', 'admin']), (r
       staff.supermarketId,
       staff.branchId
     );
+  }
   // Revoke active sessions for this staff member when permissions or status change
   revokeUserSessions(staff.id);
 
@@ -2390,7 +2722,13 @@ app.post('/api/owner/branch-product-override', requireAuth, (req, res) => {
     if (priceOverride !== undefined && !user.permissions?.editPrices) {
       return res.status(403).json({ error: 'Security violation: Staff account lacks "editPrices" permission.' });
     }
-    if (stock !== undefined && !user.permissions?.editStock) {
+    if (
+      (stock !== undefined ||
+        lowStockThresholdOverride !== undefined ||
+        aisleOverride !== undefined ||
+        shelfOverride !== undefined) &&
+      !user.permissions?.editStock
+    ) {
       return res.status(403).json({ error: 'Security violation: Staff account lacks "editStock" permission.' });
     }
   }
@@ -3176,7 +3514,15 @@ app.post('/api/admin/users/:id/reset-password', requireAuth, requireRole(['admin
     });
   }
 
-  const { hash, salt } = hashPassword(newPassword || 'Reset123!');
+  let finalPassword = typeof newPassword === 'string' && newPassword.trim() ? newPassword.trim() : '';
+  if (finalPassword && finalPassword.length < 8) {
+    return res.status(400).json({ error: 'New password must be at least 8 characters long.' });
+  }
+  if (!finalPassword) {
+    finalPassword = `Sc!${crypto.randomBytes(4).toString('hex')}${crypto.randomInt(100, 1000)}`;
+  }
+
+  const { hash, salt } = hashPassword(finalPassword);
   data.passwords[targetUser.id] = { hash, salt };
   targetUser.failedAttempts = 0;
   targetUser.lockedUntil = null;
@@ -3185,7 +3531,7 @@ app.post('/api/admin/users/:id/reset-password', requireAuth, requireRole(['admin
 
   logAudit(adminUser, 'USER_PASSWORD_RESET', 'staff', targetUser.id, `Admin reset password for ${targetUser.name}`);
   db.save();
-  res.json({ success: true, message: `Password reset to default for ${targetUser.name}` });
+  res.json({ success: true, message: `Password reset for ${targetUser.name}` });
 });
 
 // Announcements: Filters out expired announcements
@@ -3334,6 +3680,390 @@ app.get('/api/audit-logs', requireAuth, (req, res) => {
 });
 
 // ==========================================
+// 11. STORE LOYALTY QR SCANNING APIS
+// ==========================================
+
+function parseLoyaltyQrPayload(
+  rawPayload: string,
+  activeSupermarkets: Supermarket[],
+  branchSupermarketId?: string
+): { supermarket: Supermarket; cardNumber: string; memberName?: string; tier?: string; points?: number } | null {
+  const raw = (rawPayload || '').trim();
+  if (!raw || raw.length > 500) return null;
+
+  let codeHint = '';
+  let cardNumber = '';
+  let memberName: string | undefined;
+  let tier: string | undefined;
+  let points: number | undefined;
+
+  // Format 1: SMARTCART:LOYALTY:<CHAIN_CODE>:<CARD_NUMBER>[:<MEMBER_NAME>]
+  if (raw.toUpperCase().startsWith('SMARTCART:LOYALTY:')) {
+    const parts = raw.split(':');
+    codeHint = (parts[2] || '').trim().toUpperCase();
+    cardNumber = (parts[3] || '').trim();
+    if (parts[4]) memberName = parts.slice(4).join(':').trim();
+  } else if (raw.startsWith('{') && raw.endsWith('}')) {
+    // Format 2: JSON payload { supermarketCode | chain, cardNumber | loyaltyId, memberName, tier, points }
+    try {
+      const parsed = JSON.parse(raw);
+      codeHint = String(parsed.supermarketCode || parsed.chain || parsed.storeCode || '').trim().toUpperCase();
+      cardNumber = String(parsed.cardNumber || parsed.loyaltyId || parsed.code || '').trim();
+      if (parsed.memberName) memberName = String(parsed.memberName).trim();
+      if (parsed.tier) tier = String(parsed.tier).trim();
+      if (parsed.points !== undefined && !isNaN(Number(parsed.points))) points = Math.max(0, Math.round(Number(parsed.points)));
+    } catch {
+      return null;
+    }
+  } else if (/^https?:\/\//i.test(raw)) {
+    // Format 3: URL query params ?chain=NAIVAS&card=NV-12345
+    try {
+      const url = new URL(raw);
+      codeHint = (url.searchParams.get('chain') || url.searchParams.get('store') || '').trim().toUpperCase();
+      cardNumber = (url.searchParams.get('card') || url.searchParams.get('loyaltyId') || url.searchParams.get('code') || '').trim();
+      const mName = url.searchParams.get('name');
+      if (mName) memberName = mName.trim();
+    } catch {
+      return null;
+    }
+  } else if (raw.includes(':')) {
+    // Format 4: <CHAIN_CODE>:<CARD_NUMBER>
+    const [prefix, ...rest] = raw.split(':');
+    codeHint = prefix.trim().toUpperCase();
+    cardNumber = rest.join(':').trim();
+  } else {
+    // Format 5: Direct card number matching chain prefix or active branch's chain
+    cardNumber = raw;
+    const matchedByPrefix = activeSupermarkets.find((s) =>
+      raw.toUpperCase().startsWith(s.code.substring(0, 2).toUpperCase())
+    );
+    if (matchedByPrefix) {
+      codeHint = matchedByPrefix.code.toUpperCase();
+    }
+  }
+
+  if (!cardNumber || cardNumber.length < 3 || cardNumber.length > 64) {
+    return null;
+  }
+
+  let supermarket = codeHint
+    ? activeSupermarkets.find(
+        (s) =>
+          s.code.toUpperCase() === codeHint ||
+          s.name.toUpperCase().includes(codeHint) ||
+          s.id.toUpperCase() === codeHint
+      )
+    : undefined;
+
+  if (!supermarket && branchSupermarketId) {
+    supermarket = activeSupermarkets.find((s) => s.id === branchSupermarketId);
+  }
+
+  if (!supermarket) return null;
+
+  return { supermarket, cardNumber, memberName, tier, points };
+}
+
+app.get('/api/shopper/loyalty', (req, res) => {
+  const user = getAuthUser(req);
+  const ownerKey = getShopperOrGuestId(req, user);
+  const data = db.getRaw();
+  if (!data.loyaltyCards) data.loyaltyCards = [];
+
+  const cards = data.loyaltyCards.filter((c) => c.ownerKey === ownerKey || (user && c.userId === user.id));
+  res.json(cards);
+});
+
+app.post('/api/shopper/loyalty/scan', (req, res) => {
+  const user = getAuthUser(req);
+  const ownerKey = getShopperOrGuestId(req, user);
+  const { qrPayload, branchId } = req.body;
+
+  if (!qrPayload || typeof qrPayload !== 'string') {
+    return res.status(400).json({ error: 'qrPayload is required.' });
+  }
+
+  const data = db.getRaw();
+  if (!data.loyaltyCards) data.loyaltyCards = [];
+
+  const activeSupermarkets = data.supermarkets.filter((s) => s.status === 'active');
+  const activeBranch = branchId ? data.branches.find((b) => b.id === branchId) : undefined;
+
+  const parsed = parseLoyaltyQrPayload(qrPayload, activeSupermarkets, activeBranch?.supermarketId);
+  if (!parsed) {
+    return res.status(400).json({
+      error:
+        'Unrecognized store loyalty QR code. Expected store code (e.g. SMARTCART:LOYALTY:NAIVAS:NV-88421901) or active branch loyalty card number.',
+    });
+  }
+
+  const existing = data.loyaltyCards.find(
+    (c) =>
+      (c.ownerKey === ownerKey || (user && c.userId === user.id)) &&
+      c.supermarketId === parsed.supermarket.id
+  );
+
+  const stableSeed = crypto.createHash('sha256').update(parsed.cardNumber).digest();
+  const derivedPoints = parsed.points ?? 120 + (stableSeed.readUInt16BE(0) % 1800);
+  const derivedTier = parsed.tier || (derivedPoints >= 1000 ? 'Gold Member' : derivedPoints >= 500 ? 'Silver Member' : 'Member');
+
+  if (existing) {
+    existing.cardNumber = parsed.cardNumber;
+    existing.memberName = parsed.memberName || user?.name || existing.memberName;
+    existing.tier = derivedTier;
+    existing.points = derivedPoints;
+    existing.rawPayload = qrPayload.trim();
+    existing.linkedAt = new Date().toISOString();
+    db.save();
+    return res.json({ success: true, updated: true, card: existing });
+  }
+
+  const newCard: LoyaltyCard = {
+    id: `loy_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
+    ownerKey,
+    userId: user?.id || null,
+    supermarketId: parsed.supermarket.id,
+    supermarketName: parsed.supermarket.name,
+    supermarketCode: parsed.supermarket.code,
+    cardNumber: parsed.cardNumber,
+    memberName: parsed.memberName || user?.name || 'Smart Cart Member',
+    tier: derivedTier,
+    points: derivedPoints,
+    rawPayload: qrPayload.trim(),
+    linkedAt: new Date().toISOString(),
+  };
+
+  data.loyaltyCards.unshift(newCard);
+  db.save();
+
+  res.status(201).json({ success: true, updated: false, card: newCard });
+});
+
+app.delete('/api/shopper/loyalty/:id', (req, res) => {
+  const user = getAuthUser(req);
+  const ownerKey = getShopperOrGuestId(req, user);
+  const data = db.getRaw();
+  if (!data.loyaltyCards) data.loyaltyCards = [];
+
+  const idx = data.loyaltyCards.findIndex((c) => c.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Loyalty card not found.' });
+
+  const card = data.loyaltyCards[idx];
+  const isOwner = card.ownerKey === ownerKey || (user && card.userId === user.id);
+  if (!isOwner && user?.role !== 'admin') {
+    return res.status(403).json({ error: 'Forbidden: You cannot remove another shopper\'s loyalty card.' });
+  }
+
+  data.loyaltyCards.splice(idx, 1);
+  db.save();
+  res.json({ success: true });
+});
+
+// ==========================================
+// 12. GEMINI AI ASSISTANT & GOOGLE MAPS GROUNDING
+// ==========================================
+
+app.post('/api/ai/maps-grounding', async (req, res) => {
+  const ai = getGeminiClient();
+  if (!ai) {
+    return res.status(503).json({
+      error: 'Gemini AI service is not configured. Please check GEMINI_API_KEY in Settings > Secrets.',
+    });
+  }
+
+  const { query, lat, lng, language = 'en' } = req.body;
+  if (!query || typeof query !== 'string' || query.trim().length < 2) {
+    return res.status(400).json({ error: 'A location query is required.' });
+  }
+
+  try {
+    const config: any = {
+      tools: [{ googleMaps: {} }],
+      systemInstruction:
+        language === 'sw'
+          ? 'Wewe ni msaidizi wa Smart Cart wa kutafuta maduka makubwa karibu na mtumiaji. Jibu kwa Kiswahili ukitumia matokeo halisi ya Google Maps.'
+          : 'You are Smart Cart\'s live store locator assistant. Help shoppers find nearby supermarket branches, directions, and store details using real Google Maps data.',
+    };
+
+    const numLat = Number(lat);
+    const numLng = Number(lng);
+    if (!isNaN(numLat) && !isNaN(numLng) && isFinite(numLat) && isFinite(numLng)) {
+      config.toolConfig = {
+        retrievalConfig: {
+          latLng: {
+            latitude: numLat,
+            longitude: numLng,
+          },
+        },
+      };
+    }
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-4-hydrogen',
+      contents: query.trim(),
+      config,
+    });
+
+    const rawChunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+    const places = rawChunks
+      .filter((c: any) => c?.maps?.uri || c?.maps?.title)
+      .map((c: any) => ({
+        title: c.maps.title || 'View on Google Maps',
+        uri: c.maps.uri || '',
+        placeId: c.maps.placeId || '',
+        reviewSnippets: (c.maps.placeAnswerSources?.reviewSnippets || [])
+          .map((s: any) => s?.content || s?.text || '')
+          .filter(Boolean),
+      }));
+
+    res.json({
+      text: response.text || '',
+      places,
+    });
+  } catch (err: any) {
+    console.error('[Smart Cart AI Maps Grounding Error]', err?.message || err);
+    res.status(err?.status || 500).json({
+      error: err?.message || 'Failed to query Google Maps grounding.',
+    });
+  }
+});
+
+app.post('/api/ai/chat', async (req, res) => {
+  const ai = getGeminiClient();
+  if (!ai) {
+    return res.status(503).json({
+      error: 'Gemini AI service is not configured. Please check GEMINI_API_KEY in Settings > Secrets.',
+    });
+  }
+
+  const {
+    message,
+    history = [],
+    branchId,
+    language = 'en',
+    fastMode = false,
+    useMapsGrounding = false,
+    lat,
+    lng,
+  } = req.body;
+
+  if (!message || typeof message !== 'string' || !message.trim()) {
+    return res.status(400).json({ error: 'message is required.' });
+  }
+
+  const user = getAuthUser(req);
+  const data = db.getRaw();
+
+  const activeBranch = branchId ? data.branches.find((b) => b.id === branchId) : undefined;
+  const activeSupermarket = activeBranch
+    ? data.supermarkets.find((s) => s.id === activeBranch.supermarketId && s.status === 'active')
+    : user?.supermarketId
+    ? data.supermarkets.find((s) => s.id === user.supermarketId)
+    : undefined;
+
+  let storeContext = '';
+  if (activeBranch && activeSupermarket) {
+    const branchProducts = data.products
+      .filter((p) => p.supermarketId === activeSupermarket.id)
+      .slice(0, 18)
+      .map((p) => {
+        const bp = data.branchProducts.find((b) => b.branchId === activeBranch.id && b.productId === p.id);
+        const price = bp?.priceOverride ?? p.basePrice;
+        const stock = bp?.stock ?? 50;
+        const aisle = bp?.aisleOverride || p.aisle || '1';
+        const shelf = bp?.shelfOverride || p.shelf || 'A';
+        return `${p.name} (Barcode ${p.barcode}, KES ${price}, Aisle ${aisle} Shelf ${shelf}, Stock ${stock})`;
+      });
+    const activePromos = data.promotions
+      .filter((pr) => pr.isActive && pr.supermarketId === activeSupermarket.id)
+      .slice(0, 6)
+      .map((pr) => pr.name);
+
+    storeContext = `\nActive Branch Context: ${activeSupermarket.name} — ${activeBranch.name} (${activeBranch.address}, ${activeBranch.city}).\nSample Branch Catalogue: ${branchProducts.join('; ')}.\nActive Promotions: ${activePromos.join(', ') || 'None'}.`;
+  }
+
+  const roleNote = user
+    ? `Signed-in User Role: ${user.role} (${user.name}).`
+    : 'User is an unauthenticated Guest Shopper.';
+
+  const systemInstruction = [
+    language === 'sw'
+      ? 'Wewe ni Msaidizi wa Smart Cart. Jibu kwa Kiswahili au lugha aliyotumia mtumiaji, kwa ufupi na kwa uwazi.'
+      : 'You are the Smart Cart Assistant — helpful, concise, and accurate.',
+    'Smart Cart is a scan-as-you-shop supermarket platform with NO in-app payments; shoppers present their cart code to a cashier at the till.',
+    roleNote,
+    storeContext,
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  const formattedHistory: Content[] = Array.isArray(history)
+    ? history
+        .filter((m: any) => (m?.role === 'user' || m?.role === 'model') && typeof m?.text === 'string' && m.text.trim())
+        .slice(-20)
+        .map((m: any) => ({
+          role: m.role === 'model' ? 'model' : 'user',
+          parts: [{ text: m.text.trim() }],
+        }))
+    : [];
+
+  try {
+    const model = useMapsGrounding
+      ? 'gemini-4-hydrogen'
+      : fastMode
+      ? 'gemini-3.1-flash-lite'
+      : 'gemini-4-hydrogen';
+
+    const config: any = {
+      systemInstruction,
+    };
+
+    if (useMapsGrounding) {
+      config.tools = [{ googleMaps: {} }];
+      const numLat = Number(lat);
+      const numLng = Number(lng);
+      if (!isNaN(numLat) && !isNaN(numLng) && isFinite(numLat) && isFinite(numLng)) {
+        config.toolConfig = {
+          retrievalConfig: {
+            latLng: { latitude: numLat, longitude: numLng },
+          },
+        };
+      }
+    }
+
+    const chat = ai.chats.create({
+      model,
+      history: formattedHistory,
+      config,
+    });
+
+    const response = await chat.sendMessage({ message: message.trim() });
+
+    const rawChunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+    const places = rawChunks
+      .filter((c: any) => c?.maps?.uri || c?.maps?.title)
+      .map((c: any) => ({
+        title: c.maps.title || 'Google Maps Place',
+        uri: c.maps.uri || '',
+        reviewSnippets: (c.maps.placeAnswerSources?.reviewSnippets || [])
+          .map((s: any) => s?.content || s?.text || '')
+          .filter(Boolean),
+      }));
+
+    res.json({
+      reply: response.text || '',
+      model,
+      places,
+    });
+  } catch (err: any) {
+    console.error('[Smart Cart AI Chat Error]', err?.message || err);
+    res.status(err?.status || 500).json({
+      error: err?.message || 'Failed to generate AI response.',
+    });
+  }
+});
+
+// ==========================================
 // VITE DEV SERVER OR PRODUCTION SERVE
 // ==========================================
 
@@ -3365,7 +4095,7 @@ async function startServer() {
     app.use(vite.middlewares);
   }
 
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`[Smart Cart] Full-Stack Server running at http://0.0.0.0:${PORT}`);
   });

@@ -171,7 +171,22 @@ export interface CartItem {
   verifiedByCashier?: boolean;
 }
 
-export type CartStatus = 'active' | 'locked' | 'verified' | 'flagged' | 'completed';
+export type CartStatus = 'active' | 'locked' | 'verified' | 'flagged' | 'completed' | 'cancelled';
+
+export interface LoyaltyCard {
+  id: string;
+  ownerKey: string;
+  userId?: string | null;
+  supermarketId: string;
+  supermarketName: string;
+  supermarketCode: string;
+  cardNumber: string;
+  memberName: string;
+  tier: string;
+  points: number;
+  rawPayload: string;
+  linkedAt: string;
+}
 
 export interface Cart {
   id: string;
@@ -254,11 +269,29 @@ export interface ShoppingListItem {
 export interface ShoppingList {
   id: string;
   userId: string;
+  ownerName?: string;
+  collaboratorIds?: string[];
+  sourceType?: 'blank' | 'previous_purchase' | 'product_history';
+  sourceCartId?: string;
   title: string;
   shareCode: string;
   canEdit: boolean;
   items: ShoppingListItem[];
   createdAt: string;
   updatedAt?: string;
+}
+
+export interface ProductHistoryEntry {
+  barcode: string;
+  productId: string;
+  name: string;
+  category: string;
+  aisle: string;
+  shelf: string;
+  lastPurchasedAt: string;
+  purchaseCount: number;
+  totalQuantityPurchased: number;
+  lastPrice: number;
+  currentBranchPrice: number;
 }
 

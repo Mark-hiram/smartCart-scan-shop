@@ -1,8 +1,15 @@
 import React, { useState, useEffect } from 'react';
-import { X, MapPin, Navigation, Store, Check, Compass } from 'lucide-react';
+import { X, MapPin, Navigation, Store, Check, Compass, Search, ExternalLink, Sparkles } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
 import { Supermarket, Branch } from '../types';
 import { useAuth } from '../context/AuthContext';
 import { useTranslation } from '../utils/i18n';
+
+interface MapsPlaceResult {
+  title: string;
+  uri: string;
+  reviewSnippets?: string[];
+}
 
 interface StoreModalProps {
   isOpen: boolean;
@@ -11,13 +18,20 @@ interface StoreModalProps {
 
 export const StoreModal: React.FC<StoreModalProps> = ({ isOpen, onClose }) => {
   const { branch: currentBranch, setBranch } = useAuth();
-  const { t } = useTranslation();
+  const { t, language } = useTranslation();
 
   const [supermarkets, setSupermarkets] = useState<Supermarket[]>([]);
   const [selectedSupermarketId, setSelectedSupermarketId] = useState<string>('');
   const [branches, setBranches] = useState<Branch[]>([]);
   const [isLocating, setIsLocating] = useState(false);
   const [userCoords, setUserCoords] = useState<{ lat: number; lng: number } | null>(null);
+  const [geoMessage, setGeoMessage] = useState<string | null>(null);
+
+  const [mapsQuery, setMapsQuery] = useState('');
+  const [isSearchingMaps, setIsSearchingMaps] = useState(false);
+  const [mapsText, setMapsText] = useState<string | null>(null);
+  const [mapsPlaces, setMapsPlaces] = useState<MapsPlaceResult[]>([]);
+  const [mapsError, setMapsError] = useState<string | null>(null);
 
   // Fetch supermarkets on mount
   useEffect(() => {
@@ -36,8 +50,9 @@ export const StoreModal: React.FC<StoreModalProps> = ({ isOpen, onClose }) => {
 
   // Request GPS Location to calculate nearest branches
   const detectNearestBranch = () => {
+    setGeoMessage(null);
     if (!navigator.geolocation) {
-      alert('Geolocation is not supported by your browser.');
+      setGeoMessage('Geolocation is not supported by your browser.');
       return;
     }
     setIsLocating(true);
@@ -51,10 +66,41 @@ export const StoreModal: React.FC<StoreModalProps> = ({ isOpen, onClose }) => {
       },
       (err) => {
         console.warn('Geolocation denied or unavailable:', err);
+        setGeoMessage('Location permission denied or unavailable.');
         setIsLocating(false);
       },
       { timeout: 8000 }
     );
+  };
+
+  const handleMapsSearch = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!mapsQuery.trim()) return;
+    setIsSearchingMaps(true);
+    setMapsError(null);
+    try {
+      const res = await fetch('/api/ai/maps-grounding', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          query: mapsQuery.trim(),
+          lat: userCoords?.lat,
+          lng: userCoords?.lng,
+          language,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setMapsError(data.error || 'Could not retrieve Google Maps results.');
+      } else {
+        setMapsText(data.text || '');
+        setMapsPlaces(data.places || []);
+      }
+    } catch {
+      setMapsError('Network error while searching Google Maps.');
+    } finally {
+      setIsSearchingMaps(false);
+    }
   };
 
   // Fetch branches whenever supermarket or coords change
@@ -203,6 +249,72 @@ export const StoreModal: React.FC<StoreModalProps> = ({ isOpen, onClose }) => {
                 );
               })}
             </div>
+          </div>
+
+          {geoMessage && (
+            <p className="text-[11px] text-amber-600 dark:text-amber-400 text-center">{geoMessage}</p>
+          )}
+
+          {/* Live Google Maps Grounding Supermarket Finder */}
+          <div className="pt-3 border-t border-slate-100 dark:border-slate-800 space-y-2.5">
+            <label className="text-xs font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
+              <Sparkles className="w-3.5 h-3.5 text-emerald-600" />
+              <span>{t.mapsFinderTitle}</span>
+            </label>
+            <form onSubmit={handleMapsSearch} className="flex gap-2">
+              <input
+                type="text"
+                value={mapsQuery}
+                onChange={(e) => setMapsQuery(e.target.value)}
+                placeholder={t.mapsFinderPlaceholder}
+                className="flex-1 h-9 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs text-slate-900 dark:text-white"
+              />
+              <button
+                type="submit"
+                disabled={isSearchingMaps || !mapsQuery.trim()}
+                className="px-3 h-9 rounded-xl bg-slate-900 dark:bg-emerald-600 text-white text-xs font-semibold flex items-center gap-1.5 disabled:opacity-50"
+              >
+                <Search className="w-3.5 h-3.5" />
+                <span>{isSearchingMaps ? '...' : t.mapsSearchBtn}</span>
+              </button>
+            </form>
+
+            {mapsError && (
+              <p className="text-[11px] text-rose-600 dark:text-rose-400">{mapsError}</p>
+            )}
+
+            {mapsText && (
+              <div className="p-3 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 text-xs text-slate-700 dark:text-slate-200 prose prose-xs dark:prose-invert max-w-none">
+                <ReactMarkdown>{mapsText}</ReactMarkdown>
+              </div>
+            )}
+
+            {mapsPlaces.length > 0 && (
+              <div className="space-y-1.5">
+                {mapsPlaces.map((pl, idx) => (
+                  <a
+                    key={idx}
+                    href={pl.uri}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="block p-2.5 rounded-xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50/60 dark:bg-emerald-950/30 hover:bg-emerald-100 transition"
+                  >
+                    <div className="flex items-center justify-between gap-2 text-xs font-bold text-emerald-800 dark:text-emerald-300">
+                      <span className="truncate">{pl.title}</span>
+                      <span className="text-[10px] font-semibold flex items-center gap-1 shrink-0">
+                        {t.mapsViewOnGoogle}
+                        <ExternalLink className="w-3 h-3" />
+                      </span>
+                    </div>
+                    {pl.reviewSnippets && pl.reviewSnippets[0] && (
+                      <p className="text-[10px] text-slate-600 dark:text-slate-400 mt-1 line-clamp-2">
+                        “{pl.reviewSnippets[0]}”
+                      </p>
+                    )}
+                  </a>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       </div>

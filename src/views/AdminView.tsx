@@ -92,9 +92,9 @@ export const AdminView: React.FC = () => {
     loadAdminData();
   }, []);
 
-  // Supermarket toggle status (approve / suspend)
-  const handleToggleSupermarketStatus = async (sm: Supermarket) => {
-    const nextStatus = sm.status === 'active' ? 'suspended' : 'active';
+  // Supermarket toggle/set status (approve / suspend)
+  const handleToggleSupermarketStatus = async (sm: Supermarket, explicitStatus?: 'active' | 'suspended') => {
+    const nextStatus = explicitStatus || (sm.status === 'active' ? 'suspended' : 'active');
     try {
       const res = await fetch(`/api/admin/supermarkets/${sm.id}/status`, {
         method: 'PUT',
@@ -380,6 +380,11 @@ export const AdminView: React.FC = () => {
                     <td className="p-3.5">
                       <p className="font-bold text-slate-900 dark:text-white">{sm.name}</p>
                       <p className="text-[11px] text-slate-400 font-mono">{sm.code}</p>
+                      {sm.city && (
+                        <p className="text-[10px] text-slate-500 mt-0.5">
+                          {sm.city}{sm.firstBranchName ? ` · 1st Branch: ${sm.firstBranchName}` : ''}
+                        </p>
+                      )}
                     </td>
                     <td className="p-3.5 font-mono text-slate-600 dark:text-slate-300">
                       {sm.contactEmail}
@@ -392,23 +397,42 @@ export const AdminView: React.FC = () => {
                         className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
                           sm.status === 'active'
                             ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300'
+                            : sm.status === 'pending'
+                            ? 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300'
                             : 'bg-rose-100 text-rose-800 dark:bg-rose-950/60 dark:text-rose-300'
                         }`}
                       >
                         {sm.status}
                       </span>
                     </td>
-                    <td className="p-3.5 text-right">
-                      <button
-                        onClick={() => handleToggleSupermarketStatus(sm)}
-                        className={`px-3 py-1 rounded-lg text-xs font-semibold border transition ${
-                          sm.status === 'active'
-                            ? 'border-rose-300 text-rose-600 hover:bg-rose-50'
-                            : 'border-emerald-300 text-emerald-600 hover:bg-emerald-50'
-                        }`}
-                      >
-                        {sm.status === 'active' ? t.suspendSupermarket : t.approveSupermarket}
-                      </button>
+                    <td className="p-3.5 text-right space-x-1.5">
+                      {sm.status === 'pending' ? (
+                        <>
+                          <button
+                            onClick={() => handleToggleSupermarketStatus(sm, 'active')}
+                            className="px-3 py-1 rounded-lg text-xs font-semibold border border-emerald-300 text-emerald-600 hover:bg-emerald-50 transition"
+                          >
+                            {t.approveSupermarket}
+                          </button>
+                          <button
+                            onClick={() => handleToggleSupermarketStatus(sm, 'suspended')}
+                            className="px-3 py-1 rounded-lg text-xs font-semibold border border-rose-300 text-rose-600 hover:bg-rose-50 transition"
+                          >
+                            Reject
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          onClick={() => handleToggleSupermarketStatus(sm)}
+                          className={`px-3 py-1 rounded-lg text-xs font-semibold border transition ${
+                            sm.status === 'active'
+                              ? 'border-rose-300 text-rose-600 hover:bg-rose-50'
+                              : 'border-emerald-300 text-emerald-600 hover:bg-emerald-50'
+                          }`}
+                        >
+                          {sm.status === 'active' ? t.suspendSupermarket : t.approveSupermarket}
+                        </button>
+                      )}
                     </td>
                   </tr>
                 ))}

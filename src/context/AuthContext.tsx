@@ -12,6 +12,7 @@ interface AuthContextType {
   token: string | null;
   isLoading: boolean;
   demoMode: boolean;
+  adminSetupKeyRequired: boolean;
   setupStatus: SetupStatus | null;
   checkSetupStatus: () => Promise<SetupStatus | null>;
   login: (identifier: string, pass: string, portal?: string) => Promise<{ success: boolean; error?: string; remainingAttempts?: number; lockedUntil?: number; mustChangePassword?: boolean }>;
@@ -34,6 +35,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [token, setToken] = useState<string | null>(() => localStorage.getItem('smartcart_token'));
   const [isLoading, setIsLoading] = useState(true);
   const [demoMode, setDemoMode] = useState(false);
+  const [adminSetupKeyRequired, setAdminSetupKeyRequired] = useState(true);
   const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null);
 
   // Restore saved store from localStorage for shoppers
@@ -46,13 +48,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, []);
 
-  // Fetch client config (demoMode status)
+  // Fetch client config (demoMode & adminSetupKeyRequired status)
   useEffect(() => {
     fetch('/api/auth/config')
       .then((res) => res.json())
       .then((data) => {
         if (data && typeof data.demoMode === 'boolean') {
           setDemoMode(data.demoMode);
+        }
+        if (data && typeof data.adminSetupKeyRequired === 'boolean') {
+          setAdminSetupKeyRequired(data.adminSetupKeyRequired);
         }
       })
       .catch(() => {});
@@ -245,6 +250,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         token,
         isLoading,
         demoMode,
+        adminSetupKeyRequired,
         setupStatus,
         checkSetupStatus,
         login,

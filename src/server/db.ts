@@ -13,6 +13,7 @@ import {
   Announcement,
   SupportTicket,
   ShoppingList,
+  LoyaltyCard,
   BarcodeFormat,
   StaffPermissions,
   STAFF_PRESETS,
@@ -45,6 +46,7 @@ export interface DatabaseSchema {
   announcements: Announcement[];
   supportTickets: SupportTicket[];
   shoppingLists: ShoppingList[];
+  loyaltyCards: LoyaltyCard[];
   favourites: Record<string, string[]>; // userId -> array of barcodes
 }
 
@@ -826,6 +828,7 @@ export function createInitialDatabase(): DatabaseSchema {
     announcements,
     supportTickets,
     shoppingLists,
+    loyaltyCards: [],
     favourites,
   };
 }
@@ -845,6 +848,7 @@ export class Database {
         // Ensure phase 2 schema arrays exist if reading older DB file
         if (!parsed.favourites) parsed.favourites = {};
         if (!parsed.shoppingLists) parsed.shoppingLists = [];
+        if (!parsed.loyaltyCards) parsed.loyaltyCards = [];
 
         // STRICT SECURITY INVARIANT: Purge all demo/seed admin accounts
         let needsSave = false;

@@ -6,3 +6,5 @@ coverage/
 *.log
 .env*
 !.env.example
+smartcart_db.json
+smartcart_db.json.*.tmp
