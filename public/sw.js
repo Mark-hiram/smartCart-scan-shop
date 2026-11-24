@@ -1,10 +1,22 @@
-// Smart Cart Service Worker for Robust Offline Mode & Asset Caching
-const CACHE_VERSION = 'smartcart-v2';
+// Smart Cart Service Worker — Offline & Flaky-Network Caching for Critical Assets, Images, and Fonts
+const CACHE_VERSION = 'v3';
 const STATIC_CACHE = `smartcart-static-${CACHE_VERSION}`;
-const DYNAMIC_CACHE = `smartcart-dynamic-${CACHE_VERSION}`;
-const API_CACHE = `smartcart-api-${CACHE_VERSION}`;
+const FONTS_CACHE = `smartcart-fonts-${CACHE_VERSION}`;
+const IMAGES_CACHE = `smartcart-images-${CACHE_VERSION}`;
+const CATALOG_CACHE = `smartcart-catalog-${CACHE_VERSION}`;
 
-// Core UI assets to pre-cache on install
+const ACTIVE_CACHES = new Set([
+  STATIC_CACHE,
+  FONTS_CACHE,
+  IMAGES_CACHE,
+  CATALOG_CACHE,
+]);
+
+const MAX_FONT_ENTRIES = 30;
+const MAX_IMAGE_ENTRIES = 100;
+const MAX_CATALOG_ENTRIES = 40;
+
+// Critical shell assets & PWA icons pre-cached during install
 const CORE_ASSETS = [
   '/',
   '/index.html',
@@ -17,49 +29,133 @@ const CORE_ASSETS = [
   '/pwa-maskable-512x512.png',
 ];
 
-// Pre-cache core assets
+const PUBLIC_CATALOG_PREFIXES = [
+  '/api/shopper/branch-products/',
+  '/api/supermarkets',
+  '/api/branches',
+  '/api/products',
+];
+
+function fetchWithTimeout(request, timeoutMs = 4500) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(request, { signal: controller.signal }).finally(() => clearTimeout(timer));
+}
+
+async function trimCache(cacheName, maxEntries) {
+  try {
+    const cache = await caches.open(cacheName);
+    const keys = await cache.keys();
+    if (keys.length > maxEntries) {
+      const excess = keys.length - maxEntries;
+      await Promise.all(keys.slice(0, excess).map((key) => cache.delete(key)));
+    }
+  } catch {
+    // Ignore storage trim errors
+  }
+}
+
+function isCacheableResponse(response) {
+  return Boolean(response && (response.ok || response.type === 'opaque'));
+}
+
+function isFontRequest(request, url) {
+  if (request.destination === 'font') return true;
+  if (
+    url.origin === 'https://fonts.googleapis.com' ||
+    url.origin === 'https://fonts.gstatic.com'
+  ) {
+    return true;
+  }
+  return /\.(?:woff2?|ttf|otf|eot)(?:\?.*)?$/i.test(url.pathname);
+}
+
+function isImageRequest(request, url) {
+  if (request.destination === 'image') return true;
+  return /\.(?:png|jpe?g|webp|gif|svg|ico|avif)(?:\?.*)?$/i.test(url.pathname);
+}
+
+function isPublicCatalogApi(url) {
+  return PUBLIC_CATALOG_PREFIXES.some((prefix) => url.pathname.startsWith(prefix));
+}
+
+function isCriticalStaticAsset(request, url) {
+  if (url.origin !== self.location.origin) return false;
+  if (url.pathname === '/sw.js') return false;
+  if (url.pathname.startsWith('/api/')) return false;
+  if (
+    request.destination === 'script' ||
+    request.destination === 'style' ||
+    request.destination === 'manifest' ||
+    request.destination === 'worker'
+  ) {
+    return true;
+  }
+  return (
+    url.pathname.startsWith('/assets/') ||
+    /\.(?:js|mjs|css|json)(?:\?.*)?$/i.test(url.pathname)
+  );
+}
+
+// Install: Pre-cache critical shell assets and icons resiliently
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(STATIC_CACHE).then((cache) => {
-      return cache.addAll(CORE_ASSETS);
-    })
-  );
-  self.skipWaiting();
-});
-
-// Clean up previous version caches
-self.addEventListener('activate', (event) => {
-  event.waitUntil(
-    caches.keys().then((keys) => {
-      return Promise.all(
-        keys.map((key) => {
-          if (key !== STATIC_CACHE && key !== DYNAMIC_CACHE && key !== API_CACHE) {
-            return caches.delete(key);
+    caches.open(STATIC_CACHE).then(async (cache) => {
+      await Promise.allSettled(
+        CORE_ASSETS.map(async (assetUrl) => {
+          const response = await fetch(assetUrl, { cache: 'reload' });
+          if (response.ok) {
+            await cache.put(assetUrl, response);
           }
         })
       );
     })
   );
+  self.skipWaiting();
+});
+
+// Activate: Remove outdated cache versions and take control immediately
+self.addEventListener('activate', (event) => {
+  event.waitUntil(
+    caches.keys().then((keys) =>
+      Promise.all(
+        keys.map((key) => {
+          if (!ACTIVE_CACHES.has(key)) {
+            return caches.delete(key);
+          }
+          return Promise.resolve(false);
+        })
+      )
+    )
+  );
   self.clients.claim();
 });
 
+// Optional message handler to trigger immediate activation
+self.addEventListener('message', (event) => {
+  if (event.data && event.data.type === 'SKIP_WAITING') {
+    self.skipWaiting();
+  }
+});
+
+// Fetch routing for offline & flaky networks
 self.addEventListener('fetch', (event) => {
-  const request = event.request;
+  const { request } = event;
   const url = new URL(request.url);
 
-  // Ignore non-HTTP/HTTPS and non-GET requests
-  if (!url.protocol.startsWith('http') || request.method !== 'GET') {
+  // Only handle HTTP/HTTPS GET requests; never cache service worker itself
+  if (!url.protocol.startsWith('http') || request.method !== 'GET' || url.pathname === '/sw.js') {
     return;
   }
 
-  // 1. HTML Page Navigation requests: Network First -> Cache -> Fallback to /offline.html
+  // 1. Navigation / HTML requests: Network-First (with timeout) -> Cached Shell -> Offline Page
   if (request.mode === 'navigate' || request.headers.get('accept')?.includes('text/html')) {
     event.respondWith(
-      fetch(request)
+      fetchWithTimeout(request, 4500)
         .then((networkResponse) => {
-          if (networkResponse && networkResponse.status === 200) {
-            const responseClone = networkResponse.clone();
-            caches.open(STATIC_CACHE).then((cache) => cache.put(request, responseClone));
+          if (networkResponse && networkResponse.ok) {
+            const copy = networkResponse.clone();
+            caches.open(STATIC_CACHE).then((cache) => cache.put(request, copy));
           }
           return networkResponse;
         })
@@ -70,75 +166,132 @@ self.addEventListener('fetch', (event) => {
           const cachedRoot = await caches.match('/');
           if (cachedRoot) return cachedRoot;
 
-          const offlineFallback = await caches.match('/offline.html');
-          if (offlineFallback) return offlineFallback;
+          const cachedIndex = await caches.match('/index.html');
+          if (cachedIndex) return cachedIndex;
 
-          return new Response('You are currently offline. Please reconnect to internet.', {
-            headers: { 'Content-Type': 'text/plain' },
+          const offlinePage = await caches.match('/offline.html');
+          if (offlinePage) return offlinePage;
+
+          return new Response('You are offline. Please check your connection and try again.', {
+            status: 503,
+            headers: { 'Content-Type': 'text/plain; charset=utf-8' },
           });
         })
     );
     return;
   }
 
-  // 2. Product Catalogue & Store lookups: Network First, fallback to cached API response
-  if (
-    url.pathname.startsWith('/api/shopper') ||
-    url.pathname.startsWith('/api/branches') ||
-    url.pathname.startsWith('/api/supermarkets') ||
-    url.pathname.startsWith('/api/products')
-  ) {
+  // 2. Fonts (Google Fonts CSS + WOFF2/TTF files): Cache-First with background refresh
+  if (isFontRequest(request, url)) {
     event.respondWith(
-      fetch(request)
+      caches.open(FONTS_CACHE).then(async (cache) => {
+        const cached = await cache.match(request);
+        const networkPromise = fetchWithTimeout(request, 5000)
+          .then((networkResponse) => {
+            if (isCacheableResponse(networkResponse)) {
+              cache.put(request, networkResponse.clone()).then(() => trimCache(FONTS_CACHE, MAX_FONT_ENTRIES));
+            }
+            return networkResponse;
+          })
+          .catch(() => null);
+
+        if (cached) {
+          event.waitUntil(networkPromise);
+          return cached;
+        }
+
+        const fresh = await networkPromise;
+        return fresh || new Response('', { status: 504, statusText: 'Font unavailable offline' });
+      })
+    );
+    return;
+  }
+
+  // 3. Images (Icons, brand logos, product thumbnails): Cache-First with background refresh & SVG fallback
+  if (isImageRequest(request, url)) {
+    event.respondWith(
+      caches.open(IMAGES_CACHE).then(async (cache) => {
+        const cached = await cache.match(request);
+        const networkPromise = fetchWithTimeout(request, 5000)
+          .then((networkResponse) => {
+            if (isCacheableResponse(networkResponse)) {
+              cache.put(request, networkResponse.clone()).then(() => trimCache(IMAGES_CACHE, MAX_IMAGE_ENTRIES));
+            }
+            return networkResponse;
+          })
+          .catch(() => null);
+
+        if (cached) {
+          event.waitUntil(networkPromise);
+          return cached;
+        }
+
+        const fresh = await networkPromise;
+        if (fresh) return fresh;
+
+        const fallbackIcon = await caches.match('/icon.svg');
+        return fallbackIcon || new Response('', { status: 504, statusText: 'Image unavailable offline' });
+      })
+    );
+    return;
+  }
+
+  // 4. Public Branch & Product Catalog APIs: Network-First (4s timeout) -> Cached Catalog Fallback
+  // Authenticated user endpoints (cart, loyalty, lists, auth, admin, owner, cashier) bypass SW cache.
+  if (url.pathname.startsWith('/api/')) {
+    if (!isPublicCatalogApi(url)) {
+      return;
+    }
+
+    event.respondWith(
+      fetchWithTimeout(request, 4000)
         .then((networkResponse) => {
           if (networkResponse && networkResponse.ok) {
-            const responseClone = networkResponse.clone();
-            caches.open(API_CACHE).then((cache) => cache.put(request, responseClone));
+            const copy = networkResponse.clone();
+            caches
+              .open(CATALOG_CACHE)
+              .then((cache) => cache.put(request, copy).then(() => trimCache(CATALOG_CACHE, MAX_CATALOG_ENTRIES)));
           }
           return networkResponse;
         })
         .catch(async () => {
-          const cachedApiResponse = await caches.match(request);
-          if (cachedApiResponse) return cachedApiResponse;
+          const cached = await caches.match(request);
+          if (cached) return cached;
 
-          return new Response(JSON.stringify({ error: 'offline', offline: true, message: 'Working offline' }), {
-            headers: { 'Content-Type': 'application/json' },
-          });
+          return new Response(
+            JSON.stringify({ error: 'offline', offline: true, message: 'Working offline' }),
+            {
+              status: 503,
+              headers: { 'Content-Type': 'application/json; charset=utf-8' },
+            }
+          );
         })
     );
     return;
   }
 
-  // 3. Static assets (JS, CSS, fonts, icons, images): Cache First -> Network Fallback
-  event.respondWith(
-    caches.match(request).then((cachedResponse) => {
-      if (cachedResponse) {
-        // Fetch fresh in background to revalidate (Stale-While-Revalidate)
-        fetch(request)
+  // 5. Critical JS/CSS/Manifest/Static Assets: Stale-While-Revalidate
+  if (isCriticalStaticAsset(request, url)) {
+    event.respondWith(
+      caches.open(STATIC_CACHE).then(async (cache) => {
+        const cached = await cache.match(request);
+        const networkPromise = fetchWithTimeout(request, 4500)
           .then((networkResponse) => {
-            if (networkResponse && networkResponse.status === 200) {
-              caches.open(DYNAMIC_CACHE).then((cache) => cache.put(request, networkResponse));
+            if (networkResponse && networkResponse.ok) {
+              cache.put(request, networkResponse.clone());
             }
-          })
-          .catch(() => {});
-        return cachedResponse;
-      }
-
-      return fetch(request)
-        .then((networkResponse) => {
-          if (!networkResponse || networkResponse.status !== 200 || networkResponse.type !== 'basic') {
             return networkResponse;
-          }
-          const responseToCache = networkResponse.clone();
-          caches.open(DYNAMIC_CACHE).then((cache) => cache.put(request, responseToCache));
-          return networkResponse;
-        })
-        .catch(() => {
-          // If asset is an image, could return placeholder, otherwise match root
-          if (request.destination === 'image') {
-            return caches.match('/icon.svg');
-          }
-        });
-    })
-  );
+          })
+          .catch(() => null);
+
+        if (cached) {
+          event.waitUntil(networkPromise);
+          return cached;
+        }
+
+        const fresh = await networkPromise;
+        return fresh || new Response('', { status: 504, statusText: 'Asset unavailable offline' });
+      })
+    );
+  }
 });

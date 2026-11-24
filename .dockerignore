@@ -1,0 +1,15 @@
+node_modules/
+dist/
+build/
+coverage/
+.git/
+.DS_Store
+*.log
+.env
+.env.*
+!.env.example
+smartcart_db.json
+*.db.json
+*.tmp
+data/
+.aistudio/

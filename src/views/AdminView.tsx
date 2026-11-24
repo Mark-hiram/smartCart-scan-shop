@@ -76,6 +76,7 @@ export const AdminView: React.FC = () => {
   const [isUpdatingAcct, setIsUpdatingAcct] = useState(false);
 
   const loadAdminData = async () => {
+    if (!token) return;
     try {
       const [mRes, sRes, uRes, aRes, tRes, lRes, rRes] = await Promise.all([
         fetch('/api/admin/metrics', { headers: { Authorization: `Bearer ${token}` } }),
@@ -88,11 +89,26 @@ export const AdminView: React.FC = () => {
       ]);
 
       if (mRes.ok) setMetrics(await mRes.json());
-      if (sRes.ok) setSupermarkets(await sRes.json());
-      if (uRes.ok) setUsers(await uRes.json());
-      if (aRes.ok) setAnnouncements(await aRes.json());
-      if (tRes.ok) setSupportTickets(await tRes.json());
-      if (lRes.ok) setAuditLogs(await lRes.json());
+      if (sRes.ok) {
+        const d = await sRes.json();
+        if (Array.isArray(d)) setSupermarkets(d);
+      }
+      if (uRes.ok) {
+        const d = await uRes.json();
+        if (Array.isArray(d)) setUsers(d);
+      }
+      if (aRes.ok) {
+        const d = await aRes.json();
+        if (Array.isArray(d)) setAnnouncements(d);
+      }
+      if (tRes.ok) {
+        const d = await tRes.json();
+        if (Array.isArray(d)) setSupportTickets(d);
+      }
+      if (lRes.ok) {
+        const d = await lRes.json();
+        if (Array.isArray(d)) setAuditLogs(d);
+      }
       if (rRes.ok) setReportsData(await rRes.json());
     } catch (e) {
       console.error(e);
@@ -101,7 +117,7 @@ export const AdminView: React.FC = () => {
 
   useEffect(() => {
     loadAdminData();
-  }, []);
+  }, [token]);
 
   // Supermarket toggle/set status (approve / suspend)
   const handleToggleSupermarketStatus = async (sm: Supermarket, explicitStatus?: 'active' | 'suspended') => {
@@ -185,9 +201,26 @@ export const AdminView: React.FC = () => {
     } catch (e) {}
   };
 
-  // Export CSV
-  const handleExportReportCsv = (type: 'traffic' | 'products' | 'branches') => {
-    window.open(`/api/reports/csv?type=${type}`, '_blank');
+  // Export CSV with Bearer auth (no window.open)
+  const handleExportReportCsv = async (type: 'traffic' | 'products' | 'branches') => {
+    if (!token) return;
+    try {
+      const res = await fetch(`/api/reports/csv?type=${type}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) return;
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `smartcart_${type}_report.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error('CSV export failed:', e);
+    }
   };
 
   const filteredUsers = users.filter(
@@ -333,9 +366,9 @@ export const AdminView: React.FC = () => {
                 {t.bsyHours} (All Supermarkets)
               </h3>
               <div className="h-40 flex items-end gap-1 pt-4">
-                {reportsData.busiestHours.map((item: any) => {
-                  const max = Math.max(...reportsData.busiestHours.map((h: any) => h.count), 1);
-                  const heightPct = Math.round((item.count / max) * 100);
+                {(reportsData.busiestHours || (reportsData.hourCounts || []).map((count: number, hour: number) => ({ hour, count }))).map((item: any, _idx: number, arr: any[]) => {
+                  const max = Math.max(...arr.map((h: any) => h.count || 0), 1);
+                  const heightPct = Math.round(((item.count || 0) / max) * 100);
                   return (
                     <div key={item.hour} className="flex-1 flex flex-col items-center gap-1 group">
                       <div
@@ -360,9 +393,9 @@ export const AdminView: React.FC = () => {
                 {t.bsyDays} (All Supermarkets)
               </h3>
               <div className="h-40 flex items-end gap-3 pt-4">
-                {reportsData.busiestDays.map((item: any) => {
-                  const max = Math.max(...reportsData.busiestDays.map((d: any) => d.count), 1);
-                  const heightPct = Math.round((item.count / max) * 100);
+                {(reportsData.busiestDays || ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'].map((day: string, idx: number) => ({ day, count: (reportsData.dayCounts || [])[idx] || 0 }))).map((item: any, _idx: number, arr: any[]) => {
+                  const max = Math.max(...arr.map((d: any) => d.count || 0), 1);
+                  const heightPct = Math.round(((item.count || 0) / max) * 100);
                   return (
                     <div key={item.day} className="flex-1 flex flex-col items-center gap-1 group">
                       <span className="text-[10px] font-mono font-bold text-slate-700 dark:text-slate-300">
@@ -373,7 +406,7 @@ export const AdminView: React.FC = () => {
                         style={{ height: `${Math.max(6, heightPct)}%` }}
                       />
                       <span className="text-[10px] text-slate-500 font-semibold truncate">
-                        {item.day.slice(0, 3)}
+                        {String(item.day || '').slice(0, 3)}
                       </span>
                     </div>
                   );

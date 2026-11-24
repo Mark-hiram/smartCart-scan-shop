@@ -638,7 +638,26 @@ export const CashierView: React.FC = () => {
               Branch Analytics ({branch?.name})
             </h2>
             <button
-              onClick={() => window.open(`/api/reports/csv?type=traffic&branchId=${branch?.id}`, '_blank')}
+              onClick={async () => {
+                if (!token || !branch) return;
+                try {
+                  const res = await fetch(`/api/reports/csv?type=traffic&branchId=${branch.id}`, {
+                    headers: { Authorization: `Bearer ${token}` },
+                  });
+                  if (!res.ok) return;
+                  const blob = await res.blob();
+                  const blobUrl = URL.createObjectURL(blob);
+                  const a = document.createElement('a');
+                  a.href = blobUrl;
+                  a.download = `branch_${branch.id}_traffic_report.csv`;
+                  document.body.appendChild(a);
+                  a.click();
+                  a.remove();
+                  URL.revokeObjectURL(blobUrl);
+                } catch (e) {
+                  console.error('CSV export failed:', e);
+                }
+              }}
               className="py-1.5 px-3 rounded-xl border text-xs font-semibold flex items-center gap-1 text-slate-700 dark:text-slate-300"
             >
               <Download className="w-3.5 h-3.5" />

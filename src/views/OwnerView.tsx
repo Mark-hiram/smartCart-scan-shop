@@ -347,11 +347,12 @@ export const OwnerView: React.FC = () => {
     window.open(`/api/owner/products/csv-export?branchId=${selectedBranchId}`, '_blank');
   };
 
-  // Export Reports CSV
-  const handleExportReportCsv = (type: 'traffic' | 'products' | 'branches') => {
+  // Export Reports CSV with Bearer auth (no window.open)
+  const handleExportReportCsv = async (type: 'traffic' | 'products' | 'branches') => {
+    if (!token) return;
     let url = `/api/reports/csv?type=${type}&branchId=${reportBranchFilter}`;
     if (reportDateRange === 'today') {
-      const start = new Date(new Date().setHours(0,0,0,0)).toISOString();
+      const start = new Date(new Date().setHours(0, 0, 0, 0)).toISOString();
       url += `&startDate=${start}`;
     } else if (reportDateRange === '7days') {
       const start = new Date(Date.now() - 7 * 86400000).toISOString();
@@ -360,7 +361,21 @@ export const OwnerView: React.FC = () => {
       const start = new Date(Date.now() - 30 * 86400000).toISOString();
       url += `&startDate=${start}`;
     }
-    window.open(url, '_blank');
+    try {
+      const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+      if (!res.ok) return;
+      const blob = await res.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      a.download = `smartcart_${type}_report.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(blobUrl);
+    } catch (e) {
+      console.error('CSV export failed:', e);
+    }
   };
 
   // Import CSV Handler with discrete aisle/shelf
@@ -1058,9 +1073,9 @@ export const OwnerView: React.FC = () => {
                     </button>
                   </div>
                   <div className="h-40 flex items-end gap-1 pt-4">
-                    {reportsData.busiestHours.map((item: any) => {
-                      const max = Math.max(...reportsData.busiestHours.map((h: any) => h.count), 1);
-                      const heightPct = Math.round((item.count / max) * 100);
+                    {(reportsData.busiestHours || (reportsData.hourCounts || []).map((count: number, hour: number) => ({ hour, count }))).map((item: any, _idx: number, arr: any[]) => {
+                      const max = Math.max(...arr.map((h: any) => h.count || 0), 1);
+                      const heightPct = Math.round(((item.count || 0) / max) * 100);
                       return (
                         <div key={item.hour} className="flex-1 flex flex-col items-center gap-1 group">
                           <div
@@ -1094,9 +1109,9 @@ export const OwnerView: React.FC = () => {
                     </button>
                   </div>
                   <div className="h-40 flex items-end gap-3 pt-4">
-                    {reportsData.busiestDays.map((item: any) => {
-                      const max = Math.max(...reportsData.busiestDays.map((d: any) => d.count), 1);
-                      const heightPct = Math.round((item.count / max) * 100);
+                    {(reportsData.busiestDays || ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'].map((day: string, idx: number) => ({ day, count: (reportsData.dayCounts || [])[idx] || 0 }))).map((item: any, _idx: number, arr: any[]) => {
+                      const max = Math.max(...arr.map((d: any) => d.count || 0), 1);
+                      const heightPct = Math.round(((item.count || 0) / max) * 100);
                       return (
                         <div key={item.day} className="flex-1 flex flex-col items-center gap-1 group">
                           <span className="text-[10px] font-mono font-bold text-slate-700 dark:text-slate-300">
@@ -1107,7 +1122,7 @@ export const OwnerView: React.FC = () => {
                             style={{ height: `${Math.max(6, heightPct)}%` }}
                           />
                           <span className="text-[10px] text-slate-500 font-semibold truncate">
-                            {item.day.slice(0, 3)}
+                            {String(item.day || '').slice(0, 3)}
                           </span>
                         </div>
                       );
@@ -1142,14 +1157,14 @@ export const OwnerView: React.FC = () => {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                      {reportsData.topProducts.map((p: any) => (
+                      {(reportsData.topProducts || []).map((p: any) => (
                         <tr key={p.barcode} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
                           <td className="p-2.5 font-bold text-slate-900 dark:text-white">{p.name}</td>
                           <td className="p-2.5 font-mono text-slate-400">{p.barcode}</td>
-                          <td className="p-2.5 font-mono tabular-nums">{p.scanCount} scans</td>
-                          <td className="p-2.5 font-mono tabular-nums">{p.quantityPurchased} units</td>
+                          <td className="p-2.5 font-mono tabular-nums">{p.scanCount ?? p.count ?? 0} scans</td>
+                          <td className="p-2.5 font-mono tabular-nums">{p.quantityPurchased ?? p.count ?? 0} units</td>
                           <td className="p-2.5 text-right font-mono font-bold text-emerald-600 tabular-nums">
-                            KES {p.revenue.toLocaleString()}
+                            KES {((p.revenue ?? p.totalValue) || 0).toLocaleString()}
                           </td>
                         </tr>
                       ))}
@@ -1185,17 +1200,17 @@ export const OwnerView: React.FC = () => {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                      {reportsData.branchStats.map((bs: any) => (
+                      {(reportsData.branchStats || []).map((bs: any) => (
                         <tr key={bs.branchId} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
                           <td className="p-3 font-bold text-slate-900 dark:text-white">{bs.branchName}</td>
-                          <td className="p-3 font-mono tabular-nums">{bs.completedCarts}</td>
-                          <td className="p-3 font-mono tabular-nums">{bs.totalItemsScanned}</td>
+                          <td className="p-3 font-mono tabular-nums">{bs.completedCarts ?? bs.cartsCount ?? 0}</td>
+                          <td className="p-3 font-mono tabular-nums">{bs.totalItemsScanned || 0}</td>
                           <td className="p-3 font-mono font-bold text-emerald-600 tabular-nums">
-                            KES {bs.revenue.toLocaleString()}
+                            KES {(bs.revenue || 0).toLocaleString()}
                           </td>
-                          <td className="p-3 font-mono tabular-nums">{bs.avgCartSize} items</td>
+                          <td className="p-3 font-mono tabular-nums">{bs.avgCartSize || 0} items</td>
                           <td className="p-3 font-mono tabular-nums">
-                            KES {bs.avgCartValue.toLocaleString()}
+                            KES {(bs.avgCartValue || 0).toLocaleString()}
                           </td>
                         </tr>
                       ))}

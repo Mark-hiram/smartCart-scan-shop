@@ -1,5 +1,4 @@
 import express, { Request, Response, NextFunction } from 'express';
-import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import crypto from 'crypto';
 import { db, hashPassword, verifyPassword } from './src/server/db';
@@ -3365,7 +3364,17 @@ function computeReports(data: any, supermarketId?: string | null, branchId?: str
   const dayCounts = new Array(7).fill(0);
 
   // 3. Most Scanned Products
-  const itemCounts: Record<string, { barcode: string; name: string; count: number; totalValue: number; aisle: string; shelf: string }> = {};
+  const itemCounts: Record<string, {
+    barcode: string;
+    name: string;
+    count: number;
+    scanCount: number;
+    quantityPurchased: number;
+    totalValue: number;
+    revenue: number;
+    aisle: string;
+    shelf: string;
+  }> = {};
 
   let totalItems = 0;
   let totalRevenue = 0;
@@ -3384,13 +3393,19 @@ function computeReports(data: any, supermarketId?: string | null, branchId?: str
           barcode: item.barcode,
           name: item.name,
           count: 0,
+          scanCount: 0,
+          quantityPurchased: 0,
           totalValue: 0,
+          revenue: 0,
           aisle: item.aisle || 'Aisle 1',
           shelf: item.shelf || 'Shelf A',
         };
       }
       itemCounts[item.barcode].count += item.quantity;
+      itemCounts[item.barcode].scanCount += 1;
+      itemCounts[item.barcode].quantityPurchased += item.quantity;
       itemCounts[item.barcode].totalValue += item.effectiveTotal;
+      itemCounts[item.barcode].revenue += item.effectiveTotal;
     });
   });
 
@@ -3409,6 +3424,7 @@ function computeReports(data: any, supermarketId?: string | null, branchId?: str
       branchId: br.id,
       branchName: br.name,
       cartsCount: brCarts.length,
+      completedCarts: brCarts.length,
       revenue: rev,
       avgCartValue: brCarts.length > 0 ? Math.round(rev / brCarts.length) : 0,
       avgCartSize: brCarts.length > 0 ? Math.round((items / brCarts.length) * 10) / 10 : 0,
@@ -3416,16 +3432,31 @@ function computeReports(data: any, supermarketId?: string | null, branchId?: str
     };
   });
 
+  const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const busiestHours = hourCounts.map((count: number, hour: number) => ({ hour, count }));
+  const busiestDays = dayNames.map((day: string, idx: number) => ({ day, count: dayCounts[idx] || 0 }));
+  const avgCartValue = carts.length > 0 ? Math.round(totalRevenue / carts.length) : 0;
+  const avgCartSize = carts.length > 0 ? Math.round((totalItems / carts.length) * 10) / 10 : 0;
+
   return {
     kpis: {
       totalCarts: carts.length,
       totalRevenue,
       totalItems,
-      avgCartValue: carts.length > 0 ? Math.round(totalRevenue / carts.length) : 0,
-      avgCartSize: carts.length > 0 ? Math.round((totalItems / carts.length) * 10) / 10 : 0,
+      avgCartValue,
+      avgCartSize,
+    },
+    totals: {
+      completedCarts: carts.length,
+      totalRevenue,
+      totalItems,
+      avgCartValue,
+      avgCartSize,
     },
     hourCounts,
     dayCounts,
+    busiestHours,
+    busiestDays,
     topProducts,
     branchStats,
   };
@@ -3476,7 +3507,8 @@ app.get('/api/reports', requireAuth, (req, res) => {
 app.get('/api/reports/csv', requireAuth, (req, res) => {
   const user = (req as any).user as User;
   const data = db.getRaw();
-  const { reportType, branchId, startDate, endDate, supermarketId } = req.query as Record<string, string>;
+  const { reportType, type, branchId, startDate, endDate, supermarketId } = req.query as Record<string, string>;
+  const resolvedType = reportType || type || 'branches';
 
   let targetSmId: string | null = null;
   let targetBranchId: string | null = null;
@@ -3513,14 +3545,14 @@ app.get('/api/reports/csv', requireAuth, (req, res) => {
   let csvContent = '';
   let filename = 'smartcart_report.csv';
 
-  if (reportType === 'busiest_hours') {
+  if (resolvedType === 'busiest_hours' || resolvedType === 'traffic') {
     filename = 'busiest_hours_report.csv';
     csvContent = 'hour_of_day,carts_checked_out\n' + reports.hourCounts.map((count: number, hr: number) => `${hr}:00,${count}`).join('\n');
-  } else if (reportType === 'busiest_days') {
+  } else if (resolvedType === 'busiest_days') {
     filename = 'busiest_days_report.csv';
     const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
     csvContent = 'day_of_week,carts_checked_out\n' + reports.dayCounts.map((count: number, d: number) => `${days[d]},${count}`).join('\n');
-  } else if (reportType === 'most_scanned') {
+  } else if (resolvedType === 'most_scanned' || resolvedType === 'products') {
     filename = 'most_scanned_products.csv';
     csvContent = 'barcode,name,aisle,shelf,scans_count,total_revenue_kes\n' + reports.topProducts.map((p: any) => `${p.barcode},"${p.name.replace(/"/g, '""')}",${p.aisle},${p.shelf},${p.count},${p.totalValue}`).join('\n');
   } else {
@@ -4426,6 +4458,7 @@ async function startServer() {
       }
     );
   } else {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
@@ -4434,9 +4467,21 @@ async function startServer() {
   }
 
   const PORT = Number(process.env.PORT) || 3000;
-  app.listen(PORT, '0.0.0.0', () => {
+  const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`[Smart Cart] Full-Stack Server running at http://0.0.0.0:${PORT}`);
   });
+
+  const shutdown = (signal: string) => {
+    console.log(`[Smart Cart] Received ${signal}, shutting down gracefully...`);
+    server.closeIdleConnections?.();
+    server.close(() => {
+      process.exit(0);
+    });
+    setTimeout(() => process.exit(0), 8000).unref();
+  };
+
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
 startServer();

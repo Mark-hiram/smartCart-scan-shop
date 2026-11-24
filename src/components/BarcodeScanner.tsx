@@ -46,13 +46,6 @@ export const BarcodeScanner: React.FC<BarcodeScannerProps> = ({
     } catch (e) {
       // AudioContext not allowed or muted
     }
-
-    // Haptic vibration
-    if (typeof navigator !== 'undefined' && navigator.vibrate) {
-      try {
-        navigator.vibrate(80);
-      } catch (e) {}
-    }
   };
 
   const handleBarcodeDetected = (code: string) => {

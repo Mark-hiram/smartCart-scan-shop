@@ -74,6 +74,24 @@ Configure these variables in your deployment environment (never commit `.env` or
 
 ---
 
+## Deploying to Google Cloud Run
+
+The repository includes a production `Dockerfile` and `.dockerignore`, and `server.ts` listens on `0.0.0.0` using `Number(process.env.PORT) || 3000` (Cloud Run injects `PORT=8080`).
+
+1. **Important Architecture Constraints for Cloud Run:**
+   - Because sessions, rate-limit counters, and the JSON database (`DB_PATH`) reside in container memory / local file storage, set `--max-instances=1`.
+   - Container local disk is ephemeral on Cloud Run; mount a persistent volume (e.g., Cloud Storage FUSE or Filestore at `/var/data`) and point `DB_PATH=/var/data/smartcart_db.json` so data persists across restarts and revisions.
+2. **Required Environment Variables / Secrets on Cloud Run:**
+   - `NODE_ENV=production`
+   - `ADMIN_SETUP_KEY` (secret string, **at least 24 characters**)
+   - `DB_PATH=/var/data/smartcart_db.json` (matching your mounted persistent volume path)
+   - `TRUST_PROXY=true` (required behind Cloud Run's Google Front End proxy)
+   - `DEMO_MODE=false`
+   - Optional: `ADMIN_EMAIL`, `ADMIN_PASSWORD` (to pre-create the single system admin at startup), `SESSION_HOURS=12`, `GEMINI_API_KEY`
+3. **Health Check:** Configure startup/liveness HTTP probe path `/healthz`.
+
+---
+
 ## Safely Creating the Single System Admin Account (First Run)
 
 Smart Cart enforces a hard invariant across backend routes and database loading: **exactly ONE system administrator account can ever exist**.

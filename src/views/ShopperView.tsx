@@ -7,8 +7,9 @@ import { PriceCheckModal } from '../components/PriceCheckModal';
 import { CartCodeModal } from '../components/CartCodeModal';
 import { BudgetAlert } from '../components/BudgetAlert';
 import { LoyaltyQRScannerModal } from '../components/LoyaltyQRScannerModal';
-import { BatteryStatusIndicator } from '../components/BatteryStatusIndicator';
+import { BatteryStatus } from '../components/BatteryStatus';
 import { ShopperTab, BottomNav } from '../components/BottomNav';
+import { triggerPriceCheckHaptic, triggerScanSuccessHaptic } from '../utils/haptics';
 import {
   EnrichedProduct,
   Cart,
@@ -394,6 +395,7 @@ export const ShopperView: React.FC<ShopperViewProps> = ({ onOpenStoreModal }) =>
           promotion: localProd.activePromotion || null,
         });
         setIsPriceCheckModalOpen(true);
+        triggerPriceCheckHaptic();
         return;
       }
 
@@ -415,6 +417,7 @@ export const ShopperView: React.FC<ShopperViewProps> = ({ onOpenStoreModal }) =>
               promotion: data.activePromotion,
             });
             setIsPriceCheckModalOpen(true);
+            triggerPriceCheckHaptic();
             return;
           }
         } catch (e) {}
@@ -489,6 +492,7 @@ export const ShopperView: React.FC<ShopperViewProps> = ({ onOpenStoreModal }) =>
 
       setCart({ ...existingCart });
       localStorage.setItem(`offline_cart_${branch.id}`, JSON.stringify(existingCart));
+      triggerScanSuccessHaptic();
       return;
     }
 
@@ -503,6 +507,7 @@ export const ShopperView: React.FC<ShopperViewProps> = ({ onOpenStoreModal }) =>
       if (res.ok) {
         setCart(updatedCart);
         localStorage.setItem(`offline_cart_${branch.id}`, JSON.stringify(updatedCart));
+        triggerScanSuccessHaptic();
       } else {
         alert(updatedCart.error || t.noProductFound);
       }
@@ -2016,7 +2021,7 @@ export const ShopperView: React.FC<ShopperViewProps> = ({ onOpenStoreModal }) =>
         aria-label={t.batteryStatusLabel}
         className="fixed bottom-0 left-0 right-0 z-30 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-t border-slate-200 dark:border-slate-800"
       >
-        <BatteryStatusIndicator />
+        <BatteryStatus />
         <BottomNav
           activeTab={activeTab}
           onTabChange={setActiveTab}

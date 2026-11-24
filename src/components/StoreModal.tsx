@@ -37,8 +37,9 @@ export const StoreModal: React.FC<StoreModalProps> = ({ isOpen, onClose }) => {
   useEffect(() => {
     if (isOpen) {
       fetch('/api/supermarkets')
-        .then((r) => r.json())
+        .then((r) => (r.ok ? r.json() : []))
         .then((data) => {
+          if (!Array.isArray(data)) return;
           setSupermarkets(data);
           if (data.length > 0 && !selectedSupermarketId) {
             setSelectedSupermarketId(data[0].id);
@@ -113,9 +114,9 @@ export const StoreModal: React.FC<StoreModalProps> = ({ isOpen, onClose }) => {
     }
 
     fetch(url)
-      .then((r) => r.json())
+      .then((r) => (r.ok ? r.json() : []))
       .then((data) => {
-        setBranches(data);
+        if (Array.isArray(data)) setBranches(data);
       })
       .catch((e) => console.error(e));
   }, [isOpen, selectedSupermarketId, userCoords]);
