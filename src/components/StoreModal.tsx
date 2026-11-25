@@ -1,3 +1,5 @@
+// Copyright (c) 2026 SmartCart Owner. All rights reserved.
+
 import React, { useState, useEffect } from 'react';
 import { X, MapPin, Navigation, Store, Check, Compass, Search, ExternalLink, Sparkles } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';

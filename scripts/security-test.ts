@@ -337,12 +337,24 @@ async function runTests() {
       assert.equal(applyB.status, 200);
       smBId = applyB.data.supermarket.id;
 
-      // Pending owner rejected before approval
+      // Pending owner rejected before approval & pending branch is hidden from shoppers
       const preLogin = await api('/api/auth/login', {
         method: 'POST',
         body: JSON.stringify({ identifier: ownerAEmail, password: ownerAPass, portal: 'management' }),
       });
       assert.equal(preLogin.status, 403);
+
+      const preBranches = await api(`/api/branches?supermarketId=${smAId}`);
+      assert.equal(preBranches.status, 200);
+      assert.equal(preBranches.data.length, 0);
+
+      // Non-admin (shopper) cannot approve a newly registered shop
+      const nonAdminApprove = await api(`/api/admin/supermarkets/${smAId}/status`, {
+        method: 'PUT',
+        token: shopperAToken,
+        body: JSON.stringify({ status: 'active' }),
+      });
+      assert.equal(nonAdminApprove.status, 403);
 
       // Admin approves both supermarkets
       const appA = await api(`/api/admin/supermarkets/${smAId}/status`, {
@@ -351,6 +363,12 @@ async function runTests() {
         body: JSON.stringify({ status: 'active' }),
       });
       assert.equal(appA.status, 200);
+
+      // Approving a newly registered shop activates its initial branch for shoppers
+      const postBranches = await api(`/api/branches?supermarketId=${smAId}`);
+      assert.equal(postBranches.status, 200);
+      assert.equal(postBranches.data.length, 1);
+      assert.equal(postBranches.data[0].name, 'Alpha Branch X');
 
       const appB = await api(`/api/admin/supermarkets/${smBId}/status`, {
         method: 'PUT',
@@ -768,15 +786,27 @@ async function runTests() {
       assert.equal(stockAfter2, stockAfter1);
     });
 
-    // 13. Loyalty QR + Shared Shopping Lists from past purchases & product history
-    await check('12. Loyalty QR scan & Shared shopping lists work cleanly on non-demo stores', async () => {
-      const scanRes = await api('/api/shopper/loyalty/scan', {
+    // 13. Loyalty Points + Shared Shopping Lists from past purchases & product history
+    await check('12. Loyalty Points award on completed checkout, isolate per shopper, and Shared shopping lists work cleanly', async () => {
+      const legacyQrRes = await api('/api/shopper/loyalty/scan', {
         method: 'POST',
         token: shopperAToken,
         body: JSON.stringify({ qrPayload: `SMARTCART:LOYALTY:${smACode}:AM-100200` }),
       });
-      assert.equal(scanRes.status, 201);
-      assert.equal(scanRes.data.card.supermarketId, smAId);
+      assert.equal(legacyQrRes.status, 404);
+
+      const pointsRes = await api('/api/shopper/loyalty-points', { token: shopperAToken });
+      assert.equal(pointsRes.status, 200);
+      assert.ok(pointsRes.data.totalPoints > 0, 'Completed checkout should award loyalty points');
+      assert.ok(
+        pointsRes.data.history.some((tx: any) => tx.cartId === cartXId && tx.supermarketId === smAId),
+        'Shopper A loyalty history must include completed checkout cartXId'
+      );
+
+      // Shopper B must not see Shopper A loyalty points
+      const bPointsRes = await api('/api/shopper/loyalty-points', { token: shopperBToken });
+      assert.equal(bPointsRes.status, 200);
+      assert.equal(bPointsRes.data.totalPoints, 0);
 
       const pastRes = await api('/api/shopper/past-purchases', { token: shopperAToken });
       assert.equal(pastRes.status, 200);
@@ -962,6 +992,7 @@ async function runTests() {
     });
 
     // 17. Single system admin specific email & password setup, env bootstrap, and credential update
+    let updatedAdminToken = '';
     await check('16. Single admin supports specific email/password setup, env bootstrap, and credential update while blocking any second admin', async () => {
       // A) PUT /api/admin/account on main server
       const nonAdminUpdate = await api('/api/admin/account', {
@@ -1017,6 +1048,7 @@ async function runTests() {
         body: JSON.stringify({ identifier: newAdminEmail, password: newAdminPass, portal: 'admin' }),
       });
       assert.equal(newLogin.status, 200);
+      updatedAdminToken = newLogin.data.token;
 
       // B) Direct setup with custom email & password (no temp password needed)
       const directPort = TEST_PORT + 51;
@@ -1124,6 +1156,163 @@ async function runTests() {
       } finally {
         killProc(envProc);
       }
+    });
+
+    // 18. Only admin can approve shops and reset passwords for both shoppers and shops
+    await check('17. Only admin can approve shops and reset passwords for both shoppers and shops', async () => {
+      const currentAdminToken = updatedAdminToken;
+      assert.ok(currentAdminToken);
+
+      // Register a pending Shop C
+      const ownerCEmail = 'owner-gamma@example.com';
+      const ownerCPass = makeTestSecret('OwnerC');
+      const applyC = await api('/api/supermarket/apply', {
+        method: 'POST',
+        headers: { 'x-forwarded-for': '198.51.100.91' },
+        body: JSON.stringify({
+          chainName: 'GammaMart',
+          contactEmail: ownerCEmail,
+          contactPhone: '+254711000303',
+          city: 'Kisumu',
+          firstBranchName: 'Gamma Central',
+          ownerName: 'Owner Gamma',
+          password: ownerCPass,
+        }),
+      });
+      assert.equal(applyC.status, 200);
+      const smCId = applyC.data.supermarket.id;
+
+      // Register a fresh active Shopper C for RBAC & password reset testing
+      const shopperCEmail = 'shopper-c@example.com';
+      const shopperCPass = makeTestSecret('ShopperC');
+      const regC = await api('/api/auth/register', {
+        method: 'POST',
+        headers: { 'x-forwarded-for': '198.51.100.94' },
+        body: JSON.stringify({
+          name: 'Shopper C',
+          email: shopperCEmail,
+          phone: '+254700000003',
+          password: shopperCPass,
+        }),
+      });
+      assert.equal(regC.status, 200);
+      const shopperCToken = regC.data.token;
+      const shopperCId = regC.data.user.id;
+
+      // Active shopper, owner, and staff are all blocked (403) from approving Shop C or resetting passwords
+      for (const nonAdminTok of [shopperCToken, ownerAToken, clerkXToken]) {
+        const approveAttempt = await api(`/api/admin/supermarkets/${smCId}/status`, {
+          method: 'PUT',
+          token: nonAdminTok,
+          body: JSON.stringify({ status: 'active' }),
+        });
+        assert.equal(approveAttempt.status, 403);
+
+        const resetShopperAttempt = await api(`/api/admin/users/${shopperCId}/reset-password`, {
+          method: 'POST',
+          token: nonAdminTok,
+          body: JSON.stringify({}),
+        });
+        assert.equal(resetShopperAttempt.status, 403);
+
+        const resetShopAttempt = await api(`/api/admin/supermarkets/${smBId}/reset-password`, {
+          method: 'POST',
+          token: nonAdminTok,
+          body: JSON.stringify({}),
+        });
+        assert.equal(resetShopAttempt.status, 403);
+      }
+
+      // Admin approves Shop C and verifies its branch activates
+      const approveC = await api(`/api/admin/supermarkets/${smCId}/status`, {
+        method: 'PUT',
+        token: currentAdminToken,
+        body: JSON.stringify({ status: 'active' }),
+      });
+      assert.equal(approveC.status, 200);
+
+      const cBranches = await api(`/api/branches?supermarketId=${smCId}`);
+      assert.equal(cBranches.status, 200);
+      assert.equal(cBranches.data.length, 1);
+
+      // Admin resets Shopper C's password with server-generated temporary password
+      const resetShopperRes = await api(`/api/admin/users/${shopperCId}/reset-password`, {
+        method: 'POST',
+        token: currentAdminToken,
+        body: JSON.stringify({}),
+      });
+      assert.equal(resetShopperRes.status, 200);
+      assert.equal(resetShopperRes.data.success, true);
+      const shopperTempPass = resetShopperRes.data.generatedPassword;
+      assert.ok(typeof shopperTempPass === 'string' && shopperTempPass.length >= 10);
+
+      // Prior shopper session is revoked and new temp password works
+      assert.equal((await api('/api/auth/me', { token: shopperCToken })).status, 401);
+      const shopperRelogin = await api('/api/auth/login', {
+        method: 'POST',
+        headers: { 'x-forwarded-for': '198.51.100.92' },
+        body: JSON.stringify({ identifier: shopperCEmail, password: shopperTempPass, portal: 'shopper' }),
+      });
+      assert.equal(shopperRelogin.status, 200);
+
+      // Admin resets Shop B's owner password directly via /api/admin/supermarkets/:id/reset-password
+      const customShopPass = makeTestSecret('ShopReset');
+      const resetShopRes = await api(`/api/admin/supermarkets/${smBId}/reset-password`, {
+        method: 'POST',
+        token: currentAdminToken,
+        body: JSON.stringify({ newPassword: customShopPass }),
+      });
+      assert.equal(resetShopRes.status, 200);
+      assert.equal(resetShopRes.data.success, true);
+      assert.equal(resetShopRes.data.ownerEmail, ownerBEmail);
+      assert.equal(resetShopRes.data.generatedPassword, undefined);
+
+      // Prior Owner B session is revoked and custom reset password works
+      assert.equal((await api('/api/auth/me', { token: ownerBToken })).status, 401);
+      const ownerBRelogin = await api('/api/auth/login', {
+        method: 'POST',
+        headers: { 'x-forwarded-for': '198.51.100.93' },
+        body: JSON.stringify({ identifier: ownerBEmail, password: customShopPass, portal: 'management' }),
+      });
+      assert.equal(ownerBRelogin.status, 200);
+    });
+
+    await check('18. Past Receipts endpoint returns only logged-in shopper completed transactions without in-app payment', async () => {
+      // Unauthenticated request blocked
+      const unauthRes = await api('/api/shopper/receipts');
+      assert.equal(unauthRes.status, 401);
+
+      // Admin resets Shopper A password so we can log back in and check Shopper A receipts
+      const shopperANewPass = makeTestSecret('ShopperANew');
+      const resetA = await api(`/api/admin/users/${shopperAId}/reset-password`, {
+        method: 'POST',
+        token: updatedAdminToken,
+        body: JSON.stringify({ newPassword: shopperANewPass }),
+      });
+      assert.equal(resetA.status, 200);
+
+      const loginA = await api('/api/auth/login', {
+        method: 'POST',
+        headers: { 'x-forwarded-for': '198.51.100.95' },
+        body: JSON.stringify({ identifier: shopperAEmail, password: shopperANewPass, portal: 'shopper' }),
+      });
+      assert.equal(loginA.status, 200);
+      const freshShopperAToken = loginA.data.token;
+
+      const receiptsA = await api('/api/shopper/receipts', { token: freshShopperAToken });
+      assert.equal(receiptsA.status, 200);
+      assert.ok(Array.isArray(receiptsA.data.receipts));
+      const matched = receiptsA.data.receipts.find((r: any) => r.id === cartXId);
+      assert.ok(matched, 'Expected completed cartX to appear in Past Receipts');
+      assert.equal(matched.supermarketName, 'AlphaMart');
+      assert.equal(matched.branchName, 'Alpha Branch X');
+      assert.equal(matched.itemCount, 3);
+      assert.equal(matched.noPaymentInApp, true);
+      assert.equal(
+        receiptsA.data.receipts.some((r: any) => r.id === cartZId || r.shopperId !== shopperAId),
+        false,
+        'Shopper A receipts must never include another shopper cart'
+      );
     });
 
     console.log(`\n[security-test] Summary: ${passed} PASSED, ${failed} FAILED.`);

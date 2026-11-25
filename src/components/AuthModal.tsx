@@ -1,3 +1,5 @@
+// Copyright (c) 2026 SmartCart Owner. All rights reserved.
+
 import React, { useState } from 'react';
 import { X, Lock, Mail, Phone, User as UserIcon, AlertCircle, CheckCircle, ShieldCheck, ShoppingCart, Store, Building2 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';

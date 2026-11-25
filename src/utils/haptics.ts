@@ -1,3 +1,5 @@
+// Copyright (c) 2026 SmartCart Owner. All rights reserved.
+
 // Safe wrapper around the Web Vibration API for tactile shopper feedback.
 
 export function isHapticsSupported(): boolean {

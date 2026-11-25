@@ -1,3 +1,5 @@
+// Copyright (c) 2026 SmartCart Owner. All rights reserved.
+
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
@@ -13,7 +15,11 @@ import {
   Announcement,
   SupportTicket,
   ShoppingList,
-  LoyaltyCard,
+  LoyaltyTransaction,
+  LoyaltySettings,
+  LoyaltyLedgerEntry,
+  RewardItem,
+  RewardRedemptionOrder,
 } from '../types';
 
 const DB_FILE = process.env.DB_PATH ? path.resolve(process.env.DB_PATH) : path.resolve(process.cwd(), 'smartcart_db.json');
@@ -42,8 +48,89 @@ export interface DatabaseSchema {
   announcements: Announcement[];
   supportTickets: SupportTicket[];
   shoppingLists: ShoppingList[];
-  loyaltyCards: LoyaltyCard[];
+  loyaltyTransactions: LoyaltyTransaction[];
+  loyaltySettings: LoyaltySettings;
+  loyaltyLedger: LoyaltyLedgerEntry[];
+  loyaltyBalances: Record<string, number>;
+  rewards: RewardItem[];
+  rewardRedemptions: RewardRedemptionOrder[];
   favourites: Record<string, string[]>; // userId -> array of barcodes
+}
+
+export function createDefaultLoyaltySettings(): LoyaltySettings {
+  return {
+    pointsPerKesAmount: 25,
+    bonusPointsPerVerifiedCart: 5,
+    minCartValueKes: 100,
+    dailyCapPoints: 500,
+    monthlyCapPoints: 5000,
+    maxOpenRedemptionsPerShopper: 3,
+    pointsExpiryEnabled: false,
+    pointsExpiryDays: 365,
+    tierThresholds: {
+      silver: 500,
+      gold: 1500,
+    },
+    tierBonuses: {
+      bronze: 0,
+      silver: 2,
+      gold: 5,
+    },
+  };
+}
+
+export function createSeedRewards(): RewardItem[] {
+  const now = new Date().toISOString();
+  return [
+    {
+      id: 'rew_smartcart_tshirt',
+      name: 'Smart Cart T-shirt',
+      nameSw: 'Fulana ya Smart Cart',
+      description: 'Soft 100% combed cotton crew-neck T-shirt featuring the official Smart Cart mark.',
+      descriptionSw: 'Fulana laini ya pamba halisi yenye nembo rasmi ya Smart Cart.',
+      imageUrl: '/images/rewards/smartcart-tshirt.svg',
+      pointsCost: 250,
+      unitCostKes: 850,
+      colors: ['Emerald Green', 'Crisp White', 'Charcoal Slate'],
+      sizes: ['S', 'M', 'L', 'XL', 'XXL'],
+      stockBySize: { S: 8, M: 15, L: 15, XL: 10, XXL: 6 },
+      status: 'active',
+      createdAt: now,
+      updatedAt: now,
+    },
+    {
+      id: 'rew_smartcart_hoodie',
+      name: 'Smart Cart Hoodie',
+      nameSw: 'Sweta la Kofia la Smart Cart',
+      description: 'Heavyweight fleece pullover hoodie branded with the Smart Cart emblem.',
+      descriptionSw: 'Sweta zito la joto lenye nembo rasmi ya Smart Cart.',
+      imageUrl: '/images/rewards/smartcart-hoodie.svg',
+      pointsCost: 550,
+      unitCostKes: 1850,
+      colors: ['Midnight Navy', 'Emerald Green'],
+      sizes: ['S', 'M', 'L', 'XL', 'XXL'],
+      stockBySize: { S: 5, M: 10, L: 10, XL: 8, XXL: 4 },
+      status: 'active',
+      createdAt: now,
+      updatedAt: now,
+    },
+    {
+      id: 'rew_smartcart_cap',
+      name: 'Smart Cart Cap',
+      nameSw: 'Kofia ya Smart Cart',
+      description: 'Breathable cotton twill cap embroidered with the Smart Cart logo.',
+      descriptionSw: 'Kofia imara ya pamba yenye nembo ya Smart Cart iliyodariziwa.',
+      imageUrl: '/images/rewards/smartcart-cap.svg',
+      pointsCost: 150,
+      unitCostKes: 550,
+      colors: ['Emerald Green', 'Midnight Black'],
+      sizes: ['One Size', 'S', 'M', 'L', 'XL', 'XXL'],
+      stockBySize: { 'One Size': 20, S: 8, M: 12, L: 12, XL: 8, XXL: 4 },
+      status: 'active',
+      createdAt: now,
+      updatedAt: now,
+    },
+  ];
 }
 
 export function hashPassword(password: string, salt?: string): { hash: string; salt: string } {
@@ -72,7 +159,12 @@ export function createInitialDatabase(): DatabaseSchema {
     announcements: [],
     supportTickets: [],
     shoppingLists: [],
-    loyaltyCards: [],
+    loyaltyTransactions: [],
+    loyaltySettings: createDefaultLoyaltySettings(),
+    loyaltyLedger: [],
+    loyaltyBalances: {},
+    rewards: createSeedRewards(),
+    rewardRedemptions: [],
     favourites: {},
   };
 }
@@ -113,13 +205,37 @@ export class Database {
       if (fs.existsSync(DB_FILE)) {
         const raw = fs.readFileSync(DB_FILE, 'utf-8');
         const parsed = JSON.parse(raw);
-        if (!parsed.favourites) parsed.favourites = {};
-        if (!parsed.shoppingLists) parsed.shoppingLists = [];
-        if (!parsed.loyaltyCards) parsed.loyaltyCards = [];
+        let needsSave = false;
+
+        if (!parsed.favourites) { parsed.favourites = {}; needsSave = true; }
+        if (!parsed.shoppingLists) { parsed.shoppingLists = []; needsSave = true; }
+        if (!parsed.loyaltyTransactions) { parsed.loyaltyTransactions = []; needsSave = true; }
+        if (!parsed.loyaltySettings) {
+          parsed.loyaltySettings = createDefaultLoyaltySettings();
+          needsSave = true;
+        }
+        if (!Array.isArray(parsed.loyaltyLedger)) {
+          parsed.loyaltyLedger = [];
+          needsSave = true;
+        }
+        if (!parsed.loyaltyBalances || typeof parsed.loyaltyBalances !== 'object') {
+          parsed.loyaltyBalances = {};
+          needsSave = true;
+        }
+        if (!Array.isArray(parsed.rewards) || parsed.rewards.length === 0) {
+          parsed.rewards = createSeedRewards();
+          needsSave = true;
+        }
+        if (!Array.isArray(parsed.rewardRedemptions)) {
+          parsed.rewardRedemptions = [];
+          needsSave = true;
+        }
+        if (parsed.loyaltyCards !== undefined) {
+          delete parsed.loyaltyCards;
+          needsSave = true;
+        }
         if (!parsed.resetCodes) parsed.resetCodes = {};
         if (!parsed.passwords) parsed.passwords = {};
-
-        let needsSave = false;
 
         // Purge legacy demo users & hardcoded seed admin
         if (Array.isArray(parsed.users)) {

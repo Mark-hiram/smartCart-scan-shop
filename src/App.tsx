@@ -1,7 +1,4 @@
-/**
- * @license
- * SPDX-License-Identifier: Apache-2.0
- */
+// Copyright (c) 2026 SmartCart Owner. All rights reserved.
 
 import React, { useState, useEffect } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
@@ -9,10 +6,12 @@ import { LanguageProvider } from './utils/i18n';
 import { Header } from './components/Header';
 import { StoreModal } from './components/StoreModal';
 import { AuthModal } from './components/AuthModal';
+import { LegalFooter } from './components/LegalFooter';
 import { ShopperView } from './views/ShopperView';
 import { CashierView } from './views/CashierView';
 import { OwnerView } from './views/OwnerView';
 import { AdminView } from './views/AdminView';
+import { AboutView } from './views/AboutView';
 import { AdminLoginView } from './components/AdminLoginView';
 import { PortalLoginView } from './components/PortalLoginView';
 import { SmartCartChat } from './components/SmartCartChat';
@@ -30,14 +29,39 @@ function AppContent() {
   const [isStoreModalOpen, setIsStoreModalOpen] = useState(false);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
 
+  const [isDarkMode, setIsDarkMode] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('smartcart_theme');
+      if (saved === 'dark') return true;
+      if (saved === 'light') return false;
+      return window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false;
+    } catch {
+      return false;
+    }
+  });
+
   const [isOnline, setIsOnline] = useState<boolean>(() => (typeof navigator !== 'undefined' ? navigator.onLine : true));
+  const [isPowerSave, setIsPowerSave] = useState<boolean>(false);
 
   const navigateTo = (path: string) => {
     if (window.location.pathname !== path) {
       window.history.pushState({}, '', path);
     }
     setCurrentPath(path);
+    window.scrollTo({ top: 0, behavior: 'auto' });
   };
+
+  // Sync light/dark class on <html>
+  useEffect(() => {
+    const root = document.documentElement;
+    if (isDarkMode) root.classList.add('dark');
+    else root.classList.remove('dark');
+    try {
+      localStorage.setItem('smartcart_theme', isDarkMode ? 'dark' : 'light');
+    } catch {
+      // ignore storage errors
+    }
+  }, [isDarkMode]);
 
   // Sync route path on popstate
   useEffect(() => {
@@ -46,13 +70,15 @@ function AppContent() {
       setCurrentPath(p);
       if (p.startsWith('/staff')) setActivePortal('staff');
       else if (p.startsWith('/store')) setActivePortal('management');
-      else if (p.startsWith('/login')) setActivePortal('shopper');
+      else if (p.startsWith('/login') || p === '/' || p === '/receipts' || p === '/about') {
+        setActivePortal('shopper');
+      }
     };
     window.addEventListener('popstate', handleLocationChange);
     return () => window.removeEventListener('popstate', handleLocationChange);
   }, []);
 
-  // Monitor network connectivity status
+  // Monitor network connectivity & low-battery / data-saver to pause ambient motion automatically
   useEffect(() => {
     const handleOnline = () => setIsOnline(true);
     const handleOffline = () => setIsOnline(false);
@@ -60,13 +86,49 @@ function AppContent() {
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
 
+    const nav = navigator as unknown as {
+      connection?: { saveData?: boolean };
+      getBattery?: () => Promise<{
+        level: number;
+        charging: boolean;
+        addEventListener: (ev: string, fn: () => void) => void;
+        removeEventListener: (ev: string, fn: () => void) => void;
+      }>;
+    };
+
+    const saveData = Boolean(nav.connection?.saveData);
+    if (saveData) setIsPowerSave(true);
+
+    let batteryObj: Awaited<ReturnType<NonNullable<typeof nav.getBattery>>> | null = null;
+    const syncBatterySave = () => {
+      if (!batteryObj) return;
+      const lowPower = !batteryObj.charging && batteryObj.level <= 0.2;
+      setIsPowerSave(saveData || lowPower);
+    };
+
+    if (typeof nav.getBattery === 'function') {
+      nav
+        .getBattery()
+        .then((bat) => {
+          batteryObj = bat;
+          syncBatterySave();
+          bat.addEventListener('levelchange', syncBatterySave);
+          bat.addEventListener('chargingchange', syncBatterySave);
+        })
+        .catch(() => {});
+    }
+
     return () => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
+      if (batteryObj) {
+        batteryObj.removeEventListener('levelchange', syncBatterySave);
+        batteryObj.removeEventListener('chargingchange', syncBatterySave);
+      }
     };
   }, []);
 
-  // Register Service Worker for PWA (browser-safe, no process.env)
+  // Register Service Worker for PWA
   useEffect(() => {
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker
@@ -97,41 +159,82 @@ function AppContent() {
   }, [user]);
 
   const isAdminRoute = currentPath.startsWith('/admin');
+  const isAboutRoute = currentPath === '/about';
   const isShopperLoginRoute = currentPath === '/login';
+  const isReceiptsRoute = currentPath === '/receipts';
+
+  const resolvedThemePortal =
+    isAdminRoute || user?.role === 'admin'
+      ? 'admin'
+      : isAboutRoute
+      ? 'shopper'
+      : activePortal;
+
+  // Sync data attributes on <html> so themes.css variables & reduced-power selectors take effect everywhere
+  useEffect(() => {
+    const root = document.documentElement;
+    root.dataset.portal = resolvedThemePortal;
+    root.dataset.offline = isOnline ? 'false' : 'true';
+    root.dataset.powerSave = isPowerSave ? 'true' : 'false';
+  }, [resolvedThemePortal, isOnline, isPowerSave]);
 
   // Portal-specific page titles
   useEffect(() => {
-    if (isAdminRoute) {
-      document.title = user?.role === 'admin' && !user.mustChangePassword
-        ? 'Smart Cart — System Admin Dashboard'
-        : 'Smart Cart — System Administration Sign-In';
+    if (isAboutRoute) {
+      document.title = 'Smart Cart — About & Legal';
+    } else if (isAdminRoute) {
+      document.title =
+        user?.role === 'admin' && !user.mustChangePassword
+          ? 'Smart Cart — System Admin Dashboard'
+          : 'Smart Cart — System Administration Sign-In';
     } else if (activePortal === 'staff' || currentPath.startsWith('/staff')) {
       document.title = 'Smart Cart — Staff & Till Portal';
     } else if (activePortal === 'management' || currentPath.startsWith('/store')) {
       document.title = 'Smart Cart — Store Management Portal';
     } else if (isShopperLoginRoute) {
       document.title = 'Smart Cart — Shopper Sign-In';
+    } else if (isReceiptsRoute) {
+      document.title = 'Smart Cart — Past Receipts';
     } else {
       document.title = 'Smart Cart';
     }
-  }, [isAdminRoute, isShopperLoginRoute, activePortal, currentPath, user]);
+  }, [isAboutRoute, isAdminRoute, isShopperLoginRoute, isReceiptsRoute, activePortal, currentPath, user]);
 
   if (isLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-950">
+      <div className="min-h-screen flex items-center justify-center portal-shell-bg">
         <div className="flex flex-col items-center gap-3">
           <div className="w-10 h-10 border-3 border-emerald-500 border-t-transparent rounded-full animate-spin" />
-          <p className="text-xs font-semibold text-slate-500">Loading Smart Cart...</p>
+          <p className="text-xs font-semibold text-slate-600 dark:text-slate-300">Loading Smart Cart...</p>
         </div>
       </div>
     );
   }
 
+  const showingShopperShell =
+    !isAdminRoute &&
+    !isAboutRoute &&
+    !(isShopperLoginRoute && user?.role !== 'shopper') &&
+    !(user?.role === 'admin' && user.mustChangePassword) &&
+    activePortal === 'shopper';
+
   return (
-    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col antialiased">
-      {/* Top Bar Header with 3-portal switcher and store info */}
+    <div className="min-h-screen portal-shell-bg text-slate-900 dark:text-slate-100 flex flex-col antialiased transition-colors">
+      {/* Top Bar Header with 3-portal switcher, light/dark toggle, and store info */}
       <Header
-        activePortal={isAdminRoute ? 'management' : activePortal}
+        activePortal={isAdminRoute ? 'management' : isAboutRoute ? 'shopper' : activePortal}
+        onNavigateHome={() => {
+          if (isAdminRoute || (activePortal === 'management' && user?.role === 'admin')) {
+            navigateTo(user?.role === 'admin' && !user.mustChangePassword ? '/admin/dashboard' : '/admin/login');
+          } else if (activePortal === 'staff') {
+            navigateTo(user?.role === 'staff' ? '/staff' : '/staff/login');
+          } else if (activePortal === 'management') {
+            navigateTo(user?.role === 'owner' ? '/store' : '/store/login');
+          } else {
+            navigateTo('/');
+            setActivePortal('shopper');
+          }
+        }}
         onSwitchPortal={(portal) => {
           if (portal === 'shopper') navigateTo('/');
           else if (portal === 'staff') navigateTo('/staff/login');
@@ -140,18 +243,26 @@ function AppContent() {
         }}
         onOpenStoreModal={() => setIsStoreModalOpen(true)}
         onOpenAuthModal={() => {
-          if (activePortal === 'shopper') {
+          if (activePortal === 'shopper' || isAboutRoute) {
             navigateTo('/login');
           } else {
             setIsAuthModalOpen(true);
           }
         }}
+        isDarkMode={isDarkMode}
+        onToggleDarkMode={() => setIsDarkMode((prev) => !prev)}
       />
 
       {/* Main Content Area */}
       <main className="flex-1">
-        {/* Case 1: Dedicated Admin route (/admin, /admin/login, /admin/dashboard, /admin/setup) */}
-        {isAdminRoute ? (
+        {isAboutRoute ? (
+          <AboutView
+            onBackHome={() => {
+              navigateTo('/');
+              setActivePortal('shopper');
+            }}
+          />
+        ) : isAdminRoute ? (
           user?.role === 'admin' && !user.mustChangePassword ? (
             <AdminView />
           ) : (
@@ -162,7 +273,6 @@ function AppContent() {
             />
           )
         ) : (
-          /* Case 2: Three Portals From The Start */
           <>
             {/* If admin is signed in but must change temporary password, enforce it immediately */}
             {user?.role === 'admin' && user.mustChangePassword ? (
@@ -187,7 +297,11 @@ function AppContent() {
                 onOpenAdminLogin={() => navigateTo('/admin/login')}
               />
             ) : activePortal === 'shopper' ? (
-              <ShopperView onOpenStoreModal={() => setIsStoreModalOpen(true)} />
+              <ShopperView
+                initialTab={isReceiptsRoute ? 'history' : 'scan'}
+                onOpenStoreModal={() => setIsStoreModalOpen(true)}
+                onRequestSignIn={() => navigateTo('/login')}
+              />
             ) : activePortal === 'staff' ? (
               user?.role === 'staff' ? (
                 <CashierView />
@@ -230,6 +344,12 @@ function AppContent() {
           </>
         )}
       </main>
+
+      {/* Discreet Copyright & Legal Footer on Every Page & Portal (no link to /admin) */}
+      <LegalFooter
+        hasFixedBottomBar={showingShopperShell}
+        onNavigateAbout={() => navigateTo('/about')}
+      />
 
       {/* Store and Branch Selector Modal */}
       <StoreModal

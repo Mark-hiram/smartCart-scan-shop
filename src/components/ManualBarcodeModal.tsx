@@ -1,8 +1,11 @@
+// Copyright (c) 2026 SmartCart Owner. All rights reserved.
+
 import React, { useState, useMemo } from 'react';
 import { X, Search, Check, AlertCircle, ShoppingBag, Tag, Barcode } from 'lucide-react';
 import { validateBarcode } from '../utils/barcode';
 import { EnrichedProduct } from '../types';
 import { useTranslation } from '../utils/i18n';
+import { EmptySearchIllustration } from './Illustrations';
 
 interface ManualBarcodeModalProps {
   isOpen: boolean;
@@ -143,37 +146,46 @@ export const ManualBarcodeModal: React.FC<ManualBarcodeModalProps> = ({
 
             {/* List of matched items */}
             <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1 mt-2">
-              {filteredProducts.map((p) => (
-                <div
-                  key={p.id}
-                  onClick={() => {
-                    onSelectProduct(p.barcode);
-                    onClose();
-                  }}
-                  className="flex items-center justify-between p-2.5 rounded-xl border border-slate-100 dark:border-slate-800 hover:border-emerald-500 bg-white dark:bg-slate-800/80 cursor-pointer transition active:scale-98"
-                >
-                  <div className="min-w-0 pr-2">
-                    <p className="text-xs font-bold text-slate-900 dark:text-white truncate">
-                      {p.name}
-                    </p>
-                    <div className="flex items-center gap-2 text-[10px] text-slate-400 mt-0.5">
-                      <span className="font-mono tabular-nums">{p.barcode}</span>
-                      <span>·</span>
-                      <span>{p.aisleShelf}</span>
+              {filteredProducts.length > 0 ? (
+                filteredProducts.map((p) => (
+                  <div
+                    key={p.id}
+                    onClick={() => {
+                      onSelectProduct(p.barcode);
+                      onClose();
+                    }}
+                    className="flex items-center justify-between p-2.5 rounded-xl border border-slate-100 dark:border-slate-800 hover:border-emerald-500 bg-white dark:bg-slate-800/80 cursor-pointer transition active:scale-98"
+                  >
+                    <div className="min-w-0 pr-2">
+                      <p className="text-xs font-bold text-slate-900 dark:text-white truncate">
+                        {p.name}
+                      </p>
+                      <div className="flex items-center gap-2 text-[10px] text-slate-400 mt-0.5">
+                        <span className="font-mono tabular-nums">{p.barcode}</span>
+                        <span>·</span>
+                        <span>{p.aisleShelf}</span>
+                      </div>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <p className="text-xs font-bold text-emerald-600 dark:text-emerald-400 tabular-nums">
+                        KES {p.effectivePrice}
+                      </p>
+                      {p.activePromotion && (
+                        <p className="text-[10px] font-medium text-amber-600 dark:text-amber-400">
+                          {p.activePromotion.name}
+                        </p>
+                      )}
                     </div>
                   </div>
-                  <div className="text-right shrink-0">
-                    <p className="text-xs font-bold text-emerald-600 dark:text-emerald-400 tabular-nums">
-                      KES {p.effectivePrice}
-                    </p>
-                    {p.activePromotion && (
-                      <p className="text-[10px] font-medium text-amber-600 dark:text-amber-400">
-                        {p.activePromotion.name}
-                      </p>
-                    )}
-                  </div>
+                ))
+              ) : (
+                <div className="py-5 text-center space-y-2">
+                  <EmptySearchIllustration className="w-24 h-20" />
+                  <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
+                    {t.noProductFound}
+                  </p>
                 </div>
-              ))}
+              )}
             </div>
           </div>
         </div>

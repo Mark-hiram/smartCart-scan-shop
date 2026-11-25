@@ -1,3 +1,5 @@
+// Copyright (c) 2026 SmartCart Owner. All rights reserved.
+
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { User, Supermarket, Branch } from '../types';
 

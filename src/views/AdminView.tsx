@@ -1,6 +1,9 @@
+// Copyright (c) 2026 SmartCart Owner. All rights reserved.
+
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useTranslation } from '../utils/i18n';
+import { PortalBackgroundImage } from '../components/PortalBackgroundImage';
 import {
   Supermarket,
   User,
@@ -8,6 +11,10 @@ import {
   Announcement,
   SupportTicket,
   SupportCategory,
+  LoyaltySettings,
+  RewardItem,
+  RewardRedemptionOrder,
+  RedemptionStatus,
 } from '../types';
 import {
   ShieldCheck,
@@ -30,6 +37,15 @@ import {
   DollarSign,
   ShoppingCart,
   KeyRound,
+  Copy,
+  Check,
+  Eye,
+  EyeOff,
+  Gift,
+  Sliders,
+  Trash2,
+  Edit3,
+  X,
 } from 'lucide-react';
 
 export const AdminView: React.FC = () => {
@@ -37,7 +53,7 @@ export const AdminView: React.FC = () => {
   const { t } = useTranslation();
 
   const [activeTab, setActiveTab] = useState<
-    'metrics' | 'reports' | 'supermarkets' | 'users' | 'announcements' | 'support' | 'audit'
+    'metrics' | 'reports' | 'supermarkets' | 'users' | 'rewards' | 'loyalty_settings' | 'announcements' | 'support' | 'audit'
   >('metrics');
 
   const [metrics, setMetrics] = useState<any>(null);
@@ -48,8 +64,56 @@ export const AdminView: React.FC = () => {
   const [supportTickets, setSupportTickets] = useState<SupportTicket[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
 
+  // Loyalty Rewards, Redemptions & Settings state
+  const [rewards, setRewards] = useState<RewardItem[]>([]);
+  const [redemptionOrders, setRedemptionOrders] = useState<RewardRedemptionOrder[]>([]);
+  const [loyaltyTotals, setLoyaltyTotals] = useState<{
+    pointsIssued: number;
+    pointsRedeemed: number;
+    pointsOutstanding: number;
+    pointsExpired: number;
+    fulfilledCountThisMonth: number;
+    fulfilledCostThisMonthKes: number;
+  }>({
+    pointsIssued: 0,
+    pointsRedeemed: 0,
+    pointsOutstanding: 0,
+    pointsExpired: 0,
+    fulfilledCountThisMonth: 0,
+    fulfilledCostThisMonthKes: 0,
+  });
+  const [orderStatusFilter, setOrderStatusFilter] = useState<string>('all');
+  const [orderSearchQuery, setOrderSearchQuery] = useState<string>('');
+  const [loyaltyActionError, setLoyaltyActionError] = useState<string | null>(null);
+  const [loyaltyActionSuccess, setLoyaltyActionSuccess] = useState<string | null>(null);
+
+  // Reject/Cancel reason modal
+  const [rejectModalOrder, setRejectModalOrder] = useState<RewardRedemptionOrder | null>(null);
+  const [rejectReasonInput, setRejectReasonInput] = useState<string>('');
+
+  // Create / Edit Reward modal
+  const [rewardEditor, setRewardEditor] = useState<{
+    id?: string;
+    name: string;
+    nameSw: string;
+    description: string;
+    descriptionSw: string;
+    imageUrl: string;
+    pointsCost: number;
+    unitCostKes: number;
+    colorsText: string;
+    sizesText: string;
+    stockBySize: Record<string, number>;
+    status: 'active' | 'hidden';
+  } | null>(null);
+
+  // Loyalty Settings form
+  const [loyaltySettings, setLoyaltySettings] = useState<LoyaltySettings | null>(null);
+  const [isSavingSettings, setIsSavingSettings] = useState(false);
+
   // Search & filter
   const [userSearch, setUserSearch] = useState('');
+  const [userRoleFilter, setUserRoleFilter] = useState<'all' | 'shopper' | 'shops'>('all');
   const [ticketStatusFilter, setTicketStatusFilter] = useState<string>('all');
   const [ticketCategoryFilter, setTicketCategoryFilter] = useState<string>('all');
 
@@ -65,6 +129,21 @@ export const AdminView: React.FC = () => {
   const [replyTicketId, setReplyTicketId] = useState<string | null>(null);
   const [replyText, setReplyText] = useState('');
 
+  // Admin reset password modal for shoppers & shops
+  const [resetTarget, setResetTarget] = useState<{
+    mode: 'user' | 'shop';
+    id: string;
+    name: string;
+    subtitle: string;
+    roleLabel: string;
+  } | null>(null);
+  const [resetCustomPassword, setResetCustomPassword] = useState('');
+  const [resetShowPassword, setResetShowPassword] = useState(false);
+  const [resetGeneratedPassword, setResetGeneratedPassword] = useState<string | null>(null);
+  const [resetStatus, setResetStatus] = useState<{ type: 'error' | 'success'; text: string } | null>(null);
+  const [isResettingPassword, setIsResettingPassword] = useState(false);
+  const [copiedResetPass, setCopiedResetPass] = useState(false);
+
   // Admin account credentials modal state
   const [showAccountModal, setShowAccountModal] = useState(false);
   const [acctEmail, setAcctEmail] = useState(user?.email || '');
@@ -78,7 +157,7 @@ export const AdminView: React.FC = () => {
   const loadAdminData = async () => {
     if (!token) return;
     try {
-      const [mRes, sRes, uRes, aRes, tRes, lRes, rRes] = await Promise.all([
+      const [mRes, sRes, uRes, aRes, tRes, lRes, rRes, rewRes, ordRes, setRes] = await Promise.all([
         fetch('/api/admin/metrics', { headers: { Authorization: `Bearer ${token}` } }),
         fetch('/api/supermarkets', { headers: { Authorization: `Bearer ${token}` } }),
         fetch('/api/admin/users', { headers: { Authorization: `Bearer ${token}` } }),
@@ -86,6 +165,9 @@ export const AdminView: React.FC = () => {
         fetch('/api/support', { headers: { Authorization: `Bearer ${token}` } }),
         fetch('/api/audit-logs', { headers: { Authorization: `Bearer ${token}` } }),
         fetch('/api/reports', { headers: { Authorization: `Bearer ${token}` } }),
+        fetch('/api/admin/rewards', { headers: { Authorization: `Bearer ${token}` } }),
+        fetch('/api/admin/redemptions', { headers: { Authorization: `Bearer ${token}` } }),
+        fetch('/api/admin/loyalty/settings', { headers: { Authorization: `Bearer ${token}` } }),
       ]);
 
       if (mRes.ok) setMetrics(await mRes.json());
@@ -110,6 +192,18 @@ export const AdminView: React.FC = () => {
         if (Array.isArray(d)) setAuditLogs(d);
       }
       if (rRes.ok) setReportsData(await rRes.json());
+      if (rewRes.ok) {
+        const d = await rewRes.json();
+        if (Array.isArray(d)) setRewards(d);
+      }
+      if (ordRes.ok) {
+        const d = await ordRes.json();
+        if (Array.isArray(d?.orders)) setRedemptionOrders(d.orders);
+        if (d?.totals) setLoyaltyTotals(d.totals);
+      }
+      if (setRes.ok) {
+        setLoyaltySettings(await setRes.json());
+      }
     } catch (e) {
       console.error(e);
     }
@@ -145,20 +239,67 @@ export const AdminView: React.FC = () => {
     } catch (e) {}
   };
 
-  // Admin Reset User Password
-  const handleAdminResetPassword = async (u: User) => {
-    if (!confirm(`Reset password for ${u.name} to default: "Reset123!"?`)) return;
-    try {
-      const res = await fetch(`/api/admin/users/${u.id}/reset-password`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ newPassword: 'Reset123!' }),
+  // Open Admin Reset Password Modal for a shopper or shop user/chain
+  const openResetPasswordModal = (target: {
+    mode: 'user' | 'shop';
+    id: string;
+    name: string;
+    subtitle: string;
+    roleLabel: string;
+  }) => {
+    setResetTarget(target);
+    setResetCustomPassword('');
+    setResetShowPassword(false);
+    setResetGeneratedPassword(null);
+    setResetStatus(null);
+    setCopiedResetPass(false);
+  };
+
+  const handleSubmitAdminResetPassword = async (autoGenerate: boolean) => {
+    if (!resetTarget || !token) return;
+    setResetStatus(null);
+    setResetGeneratedPassword(null);
+
+    if (!autoGenerate && resetCustomPassword.trim().length < 8) {
+      setResetStatus({
+        type: 'error',
+        text: 'Password must be at least 8 characters long, or choose Generate Temporary Password.',
       });
-      if (res.ok) {
-        alert(`Password for ${u.name} has been reset to "Reset123!"`);
-        loadAdminData();
+      return;
+    }
+
+    setIsResettingPassword(true);
+    try {
+      const endpoint =
+        resetTarget.mode === 'shop'
+          ? `/api/admin/supermarkets/${resetTarget.id}/reset-password`
+          : `/api/admin/users/${resetTarget.id}/reset-password`;
+
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(autoGenerate ? {} : { newPassword: resetCustomPassword.trim() }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        setResetStatus({ type: 'error', text: data.error || 'Failed to reset password.' });
+      } else {
+        setResetStatus({ type: 'success', text: data.message || 'Password reset successfully.' });
+        if (data.generatedPassword) {
+          setResetGeneratedPassword(data.generatedPassword);
+        }
+        setResetCustomPassword('');
+        await loadAdminData();
       }
-    } catch (e) {}
+    } catch (e: any) {
+      setResetStatus({ type: 'error', text: e?.message || 'Network error resetting password.' });
+    } finally {
+      setIsResettingPassword(false);
+    }
   };
 
   // Create Announcement with Expiry Date (Phase 2)
@@ -223,13 +364,203 @@ export const AdminView: React.FC = () => {
     }
   };
 
-  const filteredUsers = users.filter(
-    (u) =>
+  // Export Loyalty Metric / Orders CSV with Bearer auth
+  const handleExportLoyaltyCsv = async (
+    type: 'issued' | 'redeemed' | 'outstanding' | 'fulfilled_cost' | 'orders'
+  ) => {
+    if (!token) return;
+    try {
+      const res = await fetch(`/api/admin/redemptions/export-csv?type=${type}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) return;
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `loyalty_${type}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error('Loyalty CSV export failed:', e);
+    }
+  };
+
+  const handleUpdateOrderStatus = async (
+    orderId: string,
+    status: RedemptionStatus,
+    reason?: string
+  ) => {
+    if (!token) return;
+    setLoyaltyActionError(null);
+    setLoyaltyActionSuccess(null);
+    try {
+      const res = await fetch(`/api/admin/redemptions/${orderId}/status`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ status, ...(reason ? { reason } : {}) }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setLoyaltyActionError(data.error || 'Could not update redemption status.');
+      } else {
+        setRejectModalOrder(null);
+        setRejectReasonInput('');
+        setLoyaltyActionSuccess(`Order ${data.order?.referenceCode} updated to ${status}.`);
+        await loadAdminData();
+      }
+    } catch (e: any) {
+      setLoyaltyActionError(e?.message || 'Network error.');
+    }
+  };
+
+  const handleSaveReward = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!rewardEditor || !token) return;
+    setLoyaltyActionError(null);
+    setLoyaltyActionSuccess(null);
+
+    const parsedSizes = rewardEditor.sizesText
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const parsedColors = rewardEditor.colorsText
+      .split(',')
+      .map((c) => c.trim())
+      .filter(Boolean);
+
+    const payload = {
+      name: rewardEditor.name.trim(),
+      nameSw: rewardEditor.nameSw.trim() || undefined,
+      description: rewardEditor.description.trim(),
+      descriptionSw: rewardEditor.descriptionSw.trim() || undefined,
+      imageUrl: rewardEditor.imageUrl.trim() || '/images/rewards/smartcart-tshirt.svg',
+      pointsCost: Number(rewardEditor.pointsCost),
+      unitCostKes: Number(rewardEditor.unitCostKes),
+      colors: parsedColors.length > 0 ? parsedColors : ['Emerald Green'],
+      sizes: parsedSizes.length > 0 ? parsedSizes : ['One Size'],
+      stockBySize: rewardEditor.stockBySize,
+      status: rewardEditor.status,
+    };
+
+    try {
+      const url = rewardEditor.id
+        ? `/api/admin/rewards/${rewardEditor.id}`
+        : '/api/admin/rewards';
+      const method = rewardEditor.id ? 'PUT' : 'POST';
+      const res = await fetch(url, {
+        method,
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setLoyaltyActionError(data.error || 'Failed to save reward.');
+      } else {
+        setRewardEditor(null);
+        setLoyaltyActionSuccess(`Reward "${data.name}" saved.`);
+        await loadAdminData();
+      }
+    } catch (err: any) {
+      setLoyaltyActionError(err?.message || 'Network error saving reward.');
+    }
+  };
+
+  const handleToggleRewardVisibility = async (rew: RewardItem) => {
+    if (!token) return;
+    const nextStatus = rew.status === 'active' ? 'hidden' : 'active';
+    const res = await fetch(`/api/admin/rewards/${rew.id}`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ status: nextStatus }),
+    });
+    if (res.ok) await loadAdminData();
+  };
+
+  const handleDeleteReward = async (rew: RewardItem) => {
+    if (!token) return;
+    setLoyaltyActionError(null);
+    const res = await fetch(`/api/admin/rewards/${rew.id}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      setLoyaltyActionError(data.error || 'Could not delete reward.');
+    } else {
+      setLoyaltyActionSuccess(`Reward "${rew.name}" deleted.`);
+      await loadAdminData();
+    }
+  };
+
+  const handleSaveLoyaltySettings = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!loyaltySettings || !token) return;
+    setIsSavingSettings(true);
+    setLoyaltyActionError(null);
+    setLoyaltyActionSuccess(null);
+    try {
+      const res = await fetch('/api/admin/loyalty/settings', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(loyaltySettings),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setLoyaltyActionError(data.error || 'Failed to save loyalty settings.');
+      } else {
+        setLoyaltySettings(data);
+        setLoyaltyActionSuccess('Loyalty points rules and caps updated.');
+      }
+    } catch (err: any) {
+      setLoyaltyActionError(err?.message || 'Network error.');
+    } finally {
+      setIsSavingSettings(false);
+    }
+  };
+
+  const pendingSupermarketCount = supermarkets.filter((sm) => sm.status === 'pending').length;
+  const requestedOrdersCount = redemptionOrders.filter((o) => o.status === 'requested').length;
+
+  const filteredRedemptionOrders = redemptionOrders.filter((o) => {
+    if (orderStatusFilter !== 'all' && o.status !== orderStatusFilter) return false;
+    const q = orderSearchQuery.trim().toLowerCase();
+    if (!q) return true;
+    return (
+      o.referenceCode.toLowerCase().includes(q) ||
+      o.shopperName.toLowerCase().includes(q) ||
+      o.shopperEmail.toLowerCase().includes(q) ||
+      o.rewardName.toLowerCase().includes(q) ||
+      o.contactPhone.toLowerCase().includes(q)
+    );
+  });
+
+  const filteredUsers = users.filter((u) => {
+    const matchesSearch =
       u.name.toLowerCase().includes(userSearch.toLowerCase()) ||
       u.email.toLowerCase().includes(userSearch.toLowerCase()) ||
       u.phone.includes(userSearch) ||
-      u.role.includes(userSearch.toLowerCase())
-  );
+      u.role.includes(userSearch.toLowerCase());
+
+    if (!matchesSearch) return false;
+    if (userRoleFilter === 'shopper') return u.role === 'shopper';
+    if (userRoleFilter === 'shops') return u.role === 'owner' || u.role === 'staff';
+    return true;
+  });
 
   // Filtered support tickets by Category & Status
   const filteredTickets = supportTickets.filter((tkt) => {
@@ -241,13 +572,14 @@ export const AdminView: React.FC = () => {
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6">
       {/* Admin Title Banner */}
-      <div className="p-6 rounded-3xl bg-slate-900 text-white shadow-xl flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div>
+      <div className="portal-banner-surface relative overflow-hidden p-6 rounded-3xl shadow-xl flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <PortalBackgroundImage portal="admin" variant="banner" priority />
+        <div className="relative z-10">
           <div className="flex items-center gap-2">
-            <ShieldCheck className="w-6 h-6 text-emerald-400" />
-            <h1 className="text-xl font-bold">{t.adminPortal}</h1>
+            <ShieldCheck className="w-6 h-6 text-indigo-200" />
+            <h1 className="text-xl font-bold text-white">{t.adminPortal}</h1>
           </div>
-          <p className="text-xs text-slate-400 mt-1">
+          <p className="text-xs text-indigo-100/90 mt-1">
             Platform governance, cross-chain supervision, user account management, and system broadcasts.
           </p>
         </div>
@@ -263,7 +595,7 @@ export const AdminView: React.FC = () => {
             setAcctStatus(null);
             setShowAccountModal(true);
           }}
-          className="self-start sm:self-auto px-3.5 py-2 rounded-xl bg-white/10 hover:bg-white/15 border border-white/15 text-xs font-semibold text-white flex items-center gap-2 transition"
+          className="relative z-10 self-start sm:self-auto px-3.5 py-2 rounded-xl bg-white/10 hover:bg-white/15 border border-white/15 text-xs font-semibold text-white flex items-center gap-2 transition"
         >
           <KeyRound className="w-4 h-4 text-emerald-400" />
           <span>Admin Credentials</span>
@@ -277,6 +609,8 @@ export const AdminView: React.FC = () => {
           { id: 'reports', label: 'Platform Analytics', icon: <TrendingUp className="w-4 h-4" /> },
           { id: 'supermarkets', label: t.allSupermarkets, icon: <Building2 className="w-4 h-4" /> },
           { id: 'users', label: t.allUsers, icon: <Users className="w-4 h-4" /> },
+          { id: 'rewards', label: t.adminTabRewards, icon: <Gift className="w-4 h-4" /> },
+          { id: 'loyalty_settings', label: t.adminTabLoyaltySettings, icon: <Sliders className="w-4 h-4" /> },
           { id: 'announcements', label: t.announcements, icon: <Bell className="w-4 h-4" /> },
           { id: 'support', label: t.supportInbox, icon: <MessageSquare className="w-4 h-4" /> },
           { id: 'audit', label: t.auditLog, icon: <History className="w-4 h-4" /> },
@@ -292,6 +626,16 @@ export const AdminView: React.FC = () => {
           >
             {tab.icon}
             <span>{tab.label}</span>
+            {tab.id === 'supermarkets' && pendingSupermarketCount > 0 && (
+              <span className="px-1.5 py-0.5 rounded-full bg-amber-500 text-white text-[10px] font-black leading-none">
+                {pendingSupermarketCount}
+              </span>
+            )}
+            {tab.id === 'rewards' && requestedOrdersCount > 0 && (
+              <span className="px-1.5 py-0.5 rounded-full bg-emerald-600 text-white text-[10px] font-black leading-none">
+                {requestedOrdersCount}
+              </span>
+            )}
           </button>
         ))}
       </div>
@@ -420,11 +764,23 @@ export const AdminView: React.FC = () => {
       {/* 3. SUPERMARKETS TAB */}
       {activeTab === 'supermarkets' && (
         <div className="space-y-4">
-          <h2 className="text-base font-bold text-slate-900 dark:text-white">
-            Supermarket Chains
-          </h2>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h2 className="text-base font-bold text-slate-900 dark:text-white">
+                Supermarket Chains ({supermarkets.length})
+              </h2>
+              <p className="text-[11px] text-slate-500">
+                Only the System Administrator can approve newly registered shops or reset shop owner passwords.
+              </p>
+            </div>
+            {pendingSupermarketCount > 0 && (
+              <span className="px-3 py-1 rounded-full bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 text-xs font-bold">
+                {pendingSupermarketCount} Pending Approval
+              </span>
+            )}
+          </div>
 
-          <div className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 overflow-hidden shadow-xs">
+          <div className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 overflow-x-auto shadow-xs">
             <table className="w-full text-left text-xs">
               <thead className="bg-slate-50 dark:bg-slate-800/60 text-slate-500 border-b border-slate-200 dark:border-slate-800 font-semibold">
                 <tr>
@@ -436,6 +792,13 @@ export const AdminView: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                {supermarkets.length === 0 && (
+                  <tr>
+                    <td colSpan={5} className="p-6 text-center text-xs text-slate-400">
+                      No shops registered yet.
+                    </td>
+                  </tr>
+                )}
                 {supermarkets.map((sm) => (
                   <tr key={sm.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
                     <td className="p-3.5">
@@ -466,7 +829,7 @@ export const AdminView: React.FC = () => {
                         {sm.status}
                       </span>
                     </td>
-                    <td className="p-3.5 text-right space-x-1.5">
+                    <td className="p-3.5 text-right whitespace-nowrap space-x-1.5">
                       {sm.status === 'pending' ? (
                         <>
                           <button
@@ -494,6 +857,22 @@ export const AdminView: React.FC = () => {
                           {sm.status === 'active' ? t.suspendSupermarket : t.approveSupermarket}
                         </button>
                       )}
+                      <button
+                        type="button"
+                        onClick={() =>
+                          openResetPasswordModal({
+                            mode: 'shop',
+                            id: sm.id,
+                            name: sm.name,
+                            subtitle: sm.contactEmail,
+                            roleLabel: 'Shop Owner',
+                          })
+                        }
+                        className="px-2.5 py-1 rounded-lg bg-slate-100 dark:bg-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-200 transition inline-flex items-center gap-1"
+                      >
+                        <KeyRound className="w-3 h-3 text-emerald-600" />
+                        <span>Reset Pass</span>
+                      </button>
                     </td>
                   </tr>
                 ))}
@@ -507,9 +886,31 @@ export const AdminView: React.FC = () => {
       {activeTab === 'users' && (
         <div className="space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <h2 className="text-base font-bold text-slate-900 dark:text-white">
-              Platform User Accounts ({users.length})
-            </h2>
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-base font-bold text-slate-900 dark:text-white mr-2">
+                Platform User Accounts ({filteredUsers.length})
+              </h2>
+              <div className="flex items-center gap-1 p-1 rounded-xl bg-slate-100 dark:bg-slate-800">
+                {[
+                  { id: 'all', label: 'All' },
+                  { id: 'shopper', label: 'Shoppers' },
+                  { id: 'shops', label: 'Shops & Staff' },
+                ].map((f) => (
+                  <button
+                    key={f.id}
+                    type="button"
+                    onClick={() => setUserRoleFilter(f.id as any)}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition ${
+                      userRoleFilter === f.id
+                        ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
+                        : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
+                    }`}
+                  >
+                    {f.label}
+                  </button>
+                ))}
+              </div>
+            </div>
 
             <div className="relative w-full sm:w-64">
               <Search className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
@@ -547,7 +948,7 @@ export const AdminView: React.FC = () => {
                       </td>
                       <td className="p-3.5">
                         <span className="font-semibold capitalize text-slate-800 dark:text-slate-200">
-                          {u.role}
+                          {u.role === 'owner' ? 'Shop Owner' : u.role}
                         </span>
                       </td>
                       <td className="p-3.5">
@@ -561,7 +962,7 @@ export const AdminView: React.FC = () => {
                           {u.status}
                         </span>
                       </td>
-                      <td className="p-3.5 text-right space-x-2">
+                      <td className="p-3.5 text-right space-x-2 whitespace-nowrap">
                         {u.role !== 'admin' ? (
                           <>
                             <button
@@ -571,10 +972,25 @@ export const AdminView: React.FC = () => {
                               {u.status === 'active' ? 'Suspend' : 'Activate'}
                             </button>
                             <button
-                              onClick={() => handleAdminResetPassword(u)}
-                              className="px-2.5 py-1 rounded-lg bg-slate-100 dark:bg-slate-800 text-[11px] font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-200"
+                              type="button"
+                              onClick={() =>
+                                openResetPasswordModal({
+                                  mode: 'user',
+                                  id: u.id,
+                                  name: u.name,
+                                  subtitle: u.email,
+                                  roleLabel:
+                                    u.role === 'owner'
+                                      ? 'Shop Owner'
+                                      : u.role === 'staff'
+                                      ? 'Shop Staff'
+                                      : 'Shopper',
+                                })
+                              }
+                              className="px-2.5 py-1 rounded-lg bg-slate-100 dark:bg-slate-800 text-[11px] font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-200 inline-flex items-center gap-1"
                             >
-                              Reset Pass
+                              <KeyRound className="w-3 h-3 text-emerald-600" />
+                              <span>Reset Pass</span>
                             </button>
                           </>
                         ) : (
@@ -590,6 +1006,629 @@ export const AdminView: React.FC = () => {
               </table>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* 4B. REWARDS CATALOGUE & REDEMPTION ORDERS QUEUE */}
+      {activeTab === 'rewards' && (
+        <div className="space-y-6">
+          {loyaltyActionError && (
+            <div className="p-3 rounded-2xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-xs text-rose-700 dark:text-rose-300 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{loyaltyActionError}</span>
+              </div>
+              <button type="button" onClick={() => setLoyaltyActionError(null)}>
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          )}
+
+          {loyaltyActionSuccess && (
+            <div className="p-3 rounded-2xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-xs text-emerald-700 dark:text-emerald-300 flex items-center justify-between gap-2 font-semibold">
+              <div className="flex items-center gap-2">
+                <CheckCircle className="w-4 h-4 shrink-0" />
+                <span>{loyaltyActionSuccess}</span>
+              </div>
+              <button type="button" onClick={() => setLoyaltyActionSuccess(null)}>
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          )}
+
+          {/* Loyalty KPIs with individual CSV export buttons */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
+            <div className="p-4 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-2">
+              <span className="text-xs text-slate-500">{t.adminLoyaltyIssued}</span>
+              <p className="text-2xl font-black text-slate-900 dark:text-white tabular-nums">
+                {loyaltyTotals.pointsIssued.toLocaleString()} pts
+              </p>
+              <button
+                type="button"
+                onClick={() => handleExportLoyaltyCsv('issued')}
+                className="text-[11px] font-semibold text-emerald-700 dark:text-emerald-400 hover:underline inline-flex items-center gap-1"
+              >
+                <Download className="w-3 h-3" />
+                <span>Export CSV</span>
+              </button>
+            </div>
+
+            <div className="p-4 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-2">
+              <span className="text-xs text-slate-500">{t.adminLoyaltyRedeemed}</span>
+              <p className="text-2xl font-black text-slate-900 dark:text-white tabular-nums">
+                {loyaltyTotals.pointsRedeemed.toLocaleString()} pts
+              </p>
+              <button
+                type="button"
+                onClick={() => handleExportLoyaltyCsv('redeemed')}
+                className="text-[11px] font-semibold text-emerald-700 dark:text-emerald-400 hover:underline inline-flex items-center gap-1"
+              >
+                <Download className="w-3 h-3" />
+                <span>Export CSV</span>
+              </button>
+            </div>
+
+            <div className="p-4 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-2">
+              <span className="text-xs text-slate-500">{t.adminLoyaltyOutstanding}</span>
+              <p className="text-2xl font-black text-emerald-600 tabular-nums">
+                {loyaltyTotals.pointsOutstanding.toLocaleString()} pts
+              </p>
+              <button
+                type="button"
+                onClick={() => handleExportLoyaltyCsv('outstanding')}
+                className="text-[11px] font-semibold text-emerald-700 dark:text-emerald-400 hover:underline inline-flex items-center gap-1"
+              >
+                <Download className="w-3 h-3" />
+                <span>Export CSV</span>
+              </button>
+            </div>
+
+            <div className="p-4 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-2">
+              <span className="text-xs text-slate-500">{t.adminLoyaltyFulfilledCost}</span>
+              <p className="text-2xl font-black text-slate-900 dark:text-white tabular-nums">
+                KES {loyaltyTotals.fulfilledCostThisMonthKes.toLocaleString()}
+              </p>
+              <button
+                type="button"
+                onClick={() => handleExportLoyaltyCsv('fulfilled_cost')}
+                className="text-[11px] font-semibold text-emerald-700 dark:text-emerald-400 hover:underline inline-flex items-center gap-1"
+              >
+                <Download className="w-3 h-3" />
+                <span>Export CSV</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Rewards Orders Queue */}
+          <div className="space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <h2 className="text-base font-bold text-slate-900 dark:text-white">
+                Rewards Orders Queue ({filteredRedemptionOrders.length})
+              </h2>
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  type="text"
+                  value={orderSearchQuery}
+                  onChange={(e) => setOrderSearchQuery(e.target.value)}
+                  placeholder="Search Ref RW-..., shopper, phone..."
+                  className="h-9 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs"
+                />
+                <select
+                  value={orderStatusFilter}
+                  onChange={(e) => setOrderStatusFilter(e.target.value)}
+                  className="h-9 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-medium"
+                >
+                  <option value="all">All Statuses</option>
+                  <option value="requested">Requested</option>
+                  <option value="approved">Approved</option>
+                  <option value="ready">Ready for collection</option>
+                  <option value="dispatched">Dispatched</option>
+                  <option value="completed">Completed</option>
+                  <option value="cancelled">Cancelled</option>
+                </select>
+                <button
+                  type="button"
+                  onClick={() => handleExportLoyaltyCsv('orders')}
+                  className="h-9 px-3 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold flex items-center gap-1 text-slate-700 dark:text-slate-300"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Orders CSV</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 overflow-x-auto shadow-xs">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-slate-50 dark:bg-slate-800/60 text-slate-500 border-b border-slate-200 dark:border-slate-800 font-semibold">
+                  <tr>
+                    <th className="p-3.5">Ref / Date</th>
+                    <th className="p-3.5">Shopper</th>
+                    <th className="p-3.5">Reward &amp; Size</th>
+                    <th className="p-3.5">Fulfillment</th>
+                    <th className="p-3.5">Status</th>
+                    <th className="p-3.5 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                  {filteredRedemptionOrders.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="p-6 text-center text-xs text-slate-400">
+                        No redemption orders matching filter.
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredRedemptionOrders.map((ord) => (
+                      <tr key={ord.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
+                        <td className="p-3.5">
+                          <p className="font-mono font-bold text-slate-900 dark:text-white">
+                            {ord.referenceCode}
+                          </p>
+                          <p className="text-[10px] text-slate-400 font-mono">
+                            {new Date(ord.createdAt).toLocaleDateString()}
+                          </p>
+                        </td>
+                        <td className="p-3.5">
+                          <p className="font-bold text-slate-900 dark:text-white">{ord.shopperName}</p>
+                          <p className="text-[11px] text-slate-500 font-mono">{ord.contactPhone}</p>
+                          <p className="text-[10px] text-slate-400">{ord.shopperEmail}</p>
+                        </td>
+                        <td className="p-3.5">
+                          <p className="font-bold text-slate-900 dark:text-white">{ord.rewardName}</p>
+                          <p className="text-[11px] text-slate-500 tabular-nums">
+                            {ord.size} · {ord.color} · {ord.pointsCost.toLocaleString()} pts (KES {ord.unitCostKes})
+                          </p>
+                        </td>
+                        <td className="p-3.5 text-[11px] text-slate-600 dark:text-slate-300 max-w-[200px]">
+                          {ord.fulfillmentMethod === 'collection'
+                            ? `Collect: ${ord.branchName || 'Branch'}`
+                            : `Deliver: ${ord.deliveryAddress || ''}`}
+                        </td>
+                        <td className="p-3.5">
+                          <span className="px-2 py-0.5 rounded-md text-[10px] font-bold uppercase bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
+                            {ord.status}
+                          </span>
+                        </td>
+                        <td className="p-3.5 text-right whitespace-nowrap space-x-1.5">
+                          {ord.status === 'requested' && (
+                            <button
+                              type="button"
+                              onClick={() => handleUpdateOrderStatus(ord.id, 'approved')}
+                              className="px-2.5 py-1 rounded-lg bg-emerald-600 text-white text-[11px] font-semibold hover:bg-emerald-700"
+                            >
+                              Approve
+                            </button>
+                          )}
+                          {ord.status === 'approved' && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleUpdateOrderStatus(
+                                  ord.id,
+                                  ord.fulfillmentMethod === 'collection' ? 'ready' : 'dispatched'
+                                )
+                              }
+                              className="px-2.5 py-1 rounded-lg bg-teal-600 text-white text-[11px] font-semibold hover:bg-teal-700"
+                            >
+                              {ord.fulfillmentMethod === 'collection' ? 'Mark Ready' : 'Mark Dispatched'}
+                            </button>
+                          )}
+                          {(ord.status === 'approved' || ord.status === 'ready' || ord.status === 'dispatched') && (
+                            <button
+                              type="button"
+                              onClick={() => handleUpdateOrderStatus(ord.id, 'completed')}
+                              className="px-2.5 py-1 rounded-lg bg-slate-900 dark:bg-slate-700 text-white text-[11px] font-semibold"
+                            >
+                              Complete
+                            </button>
+                          )}
+                          {ord.status !== 'completed' && ord.status !== 'cancelled' && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setRejectModalOrder(ord);
+                                setRejectReasonInput('');
+                              }}
+                              className="px-2.5 py-1 rounded-lg border border-rose-300 text-rose-600 text-[11px] font-semibold hover:bg-rose-50"
+                            >
+                              Reject / Cancel
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Rewards Catalogue Manager */}
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-base font-bold text-slate-900 dark:text-white">
+                  Merchandise Rewards Catalogue ({rewards.length})
+                </h2>
+                <p className="text-[11px] text-slate-500">
+                  Managed strictly by the System Administrator. Supermarket owners cannot alter catalogue items.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() =>
+                  setRewardEditor({
+                    name: '',
+                    nameSw: '',
+                    description: '',
+                    descriptionSw: '',
+                    imageUrl: '/images/rewards/smartcart-tshirt.svg',
+                    pointsCost: 150,
+                    unitCostKes: 900,
+                    colorsText: 'Emerald Green, White',
+                    sizesText: 'S, M, L, XL, XXL',
+                    stockBySize: { S: 10, M: 15, L: 15, XL: 10, XXL: 5 },
+                    status: 'active',
+                  })
+                }
+                className="py-2 px-3.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center gap-1.5"
+              >
+                <Plus className="w-4 h-4" />
+                <span>Add Reward</span>
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {rewards.map((rew) => (
+                <div
+                  key={rew.id}
+                  className="p-4 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-3"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <img
+                        src={rew.imageUrl}
+                        alt={rew.name}
+                        width={56}
+                        height={56}
+                        className="w-14 h-14 rounded-2xl bg-slate-50 dark:bg-slate-800 object-contain p-1 border border-slate-100 dark:border-slate-700 shrink-0"
+                      />
+                      <div className="min-w-0">
+                        <h3 className="text-sm font-bold text-slate-900 dark:text-white truncate">
+                          {rew.name}
+                        </h3>
+                        <p className="text-xs font-mono font-bold text-emerald-600 tabular-nums">
+                          {rew.pointsCost.toLocaleString()} pts · Cost KES {rew.unitCostKes.toLocaleString()}
+                        </p>
+                        <span
+                          className={`inline-block mt-1 px-2 py-0.5 rounded-md text-[10px] font-bold uppercase ${
+                            rew.status === 'active'
+                              ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300'
+                              : 'bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300'
+                          }`}
+                        >
+                          {rew.status}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                    Stock:{' '}
+                    {rew.sizes.map((sz) => `${sz}: ${rew.stockBySize?.[sz] ?? 0}`).join(' · ')}
+                  </p>
+
+                  <div className="flex flex-wrap gap-1.5 pt-1">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setRewardEditor({
+                          id: rew.id,
+                          name: rew.name,
+                          nameSw: rew.nameSw || '',
+                          description: rew.description,
+                          descriptionSw: rew.descriptionSw || '',
+                          imageUrl: rew.imageUrl,
+                          pointsCost: rew.pointsCost,
+                          unitCostKes: rew.unitCostKes,
+                          colorsText: rew.colors.join(', '),
+                          sizesText: rew.sizes.join(', '),
+                          stockBySize: { ...rew.stockBySize },
+                          status: rew.status,
+                        })
+                      }
+                      className="px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-[11px] font-semibold inline-flex items-center gap-1"
+                    >
+                      <Edit3 className="w-3 h-3" />
+                      <span>Edit</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleToggleRewardVisibility(rew)}
+                      className="px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-[11px] font-semibold"
+                    >
+                      {rew.status === 'active' ? 'Hide' : 'Activate'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteReward(rew)}
+                      className="px-2.5 py-1.5 rounded-lg border border-rose-200 text-rose-600 text-[11px] font-semibold inline-flex items-center gap-1"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                      <span>Delete</span>
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 4C. LOYALTY RULES & CAPS SETTINGS */}
+      {activeTab === 'loyalty_settings' && loyaltySettings && (
+        <div className="space-y-4">
+          {loyaltyActionError && (
+            <div className="p-3 rounded-2xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 text-xs text-rose-700">
+              {loyaltyActionError}
+            </div>
+          )}
+          {loyaltyActionSuccess && (
+            <div className="p-3 rounded-2xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 text-xs text-emerald-700 font-semibold">
+              {loyaltyActionSuccess}
+            </div>
+          )}
+
+          <form
+            onSubmit={handleSaveLoyaltySettings}
+            className="p-6 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-5"
+          >
+            <div>
+              <h2 className="text-base font-bold text-slate-900 dark:text-white">
+                Loyalty Earning Rules, Anti-Fraud Caps &amp; Tiers
+              </h2>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Points are calculated server-side only when a cashier verifies a shopper trolley at the till.
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 text-xs">
+              <div>
+                <label className="font-semibold block mb-1">1 Point Earned Per (KES)</label>
+                <input
+                  type="number"
+                  min={1}
+                  value={loyaltySettings.pointsPerKesAmount}
+                  onChange={(e) =>
+                    setLoyaltySettings({
+                      ...loyaltySettings,
+                      pointsPerKesAmount: Math.max(1, parseInt(e.target.value, 10) || 1),
+                    })
+                  }
+                  className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 font-mono"
+                />
+              </div>
+
+              <div>
+                <label className="font-semibold block mb-1">Fixed Bonus Per Verified Cart (pts)</label>
+                <input
+                  type="number"
+                  min={0}
+                  value={loyaltySettings.bonusPointsPerVerifiedCart}
+                  onChange={(e) =>
+                    setLoyaltySettings({
+                      ...loyaltySettings,
+                      bonusPointsPerVerifiedCart: Math.max(0, parseInt(e.target.value, 10) || 0),
+                    })
+                  }
+                  className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 font-mono"
+                />
+              </div>
+
+              <div>
+                <label className="font-semibold block mb-1">Minimum Cart Value to Earn (KES)</label>
+                <input
+                  type="number"
+                  min={0}
+                  value={loyaltySettings.minCartValueKes}
+                  onChange={(e) =>
+                    setLoyaltySettings({
+                      ...loyaltySettings,
+                      minCartValueKes: Math.max(0, parseInt(e.target.value, 10) || 0),
+                    })
+                  }
+                  className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 font-mono"
+                />
+              </div>
+
+              <div>
+                <label className="font-semibold block mb-1">Daily Maximum Points Per Shopper</label>
+                <input
+                  type="number"
+                  min={0}
+                  value={loyaltySettings.dailyCapPoints}
+                  onChange={(e) =>
+                    setLoyaltySettings({
+                      ...loyaltySettings,
+                      dailyCapPoints: Math.max(0, parseInt(e.target.value, 10) || 0),
+                    })
+                  }
+                  className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 font-mono"
+                />
+              </div>
+
+              <div>
+                <label className="font-semibold block mb-1">Monthly Maximum Points Per Shopper</label>
+                <input
+                  type="number"
+                  min={0}
+                  value={loyaltySettings.monthlyCapPoints}
+                  onChange={(e) =>
+                    setLoyaltySettings({
+                      ...loyaltySettings,
+                      monthlyCapPoints: Math.max(0, parseInt(e.target.value, 10) || 0),
+                    })
+                  }
+                  className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 font-mono"
+                />
+              </div>
+
+              <div>
+                <label className="font-semibold block mb-1">Max Open Redemptions Per Shopper</label>
+                <input
+                  type="number"
+                  min={1}
+                  value={loyaltySettings.maxOpenRedemptionsPerShopper}
+                  onChange={(e) =>
+                    setLoyaltySettings({
+                      ...loyaltySettings,
+                      maxOpenRedemptionsPerShopper: Math.max(1, parseInt(e.target.value, 10) || 1),
+                    })
+                  }
+                  className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 font-mono"
+                />
+              </div>
+
+              <div>
+                <label className="font-semibold block mb-1">Silver Tier Threshold (Lifetime pts)</label>
+                <input
+                  type="number"
+                  min={10}
+                  value={loyaltySettings.tierThresholds.silver}
+                  onChange={(e) =>
+                    setLoyaltySettings({
+                      ...loyaltySettings,
+                      tierThresholds: {
+                        ...loyaltySettings.tierThresholds,
+                        silver: Math.max(10, parseInt(e.target.value, 10) || 10),
+                      },
+                    })
+                  }
+                  className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 font-mono"
+                />
+              </div>
+
+              <div>
+                <label className="font-semibold block mb-1">Gold Tier Threshold (Lifetime pts)</label>
+                <input
+                  type="number"
+                  min={20}
+                  value={loyaltySettings.tierThresholds.gold}
+                  onChange={(e) =>
+                    setLoyaltySettings({
+                      ...loyaltySettings,
+                      tierThresholds: {
+                        ...loyaltySettings.tierThresholds,
+                        gold: Math.max(20, parseInt(e.target.value, 10) || 20),
+                      },
+                    })
+                  }
+                  className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 font-mono"
+                />
+              </div>
+
+              <div className="grid grid-cols-3 gap-2">
+                <div>
+                  <label className="font-semibold block mb-1 text-[11px]">Bronze Bonus</label>
+                  <input
+                    type="number"
+                    min={0}
+                    value={loyaltySettings.tierBonuses.bronze}
+                    onChange={(e) =>
+                      setLoyaltySettings({
+                        ...loyaltySettings,
+                        tierBonuses: {
+                          ...loyaltySettings.tierBonuses,
+                          bronze: Math.max(0, parseInt(e.target.value, 10) || 0),
+                        },
+                      })
+                    }
+                    className="w-full h-10 px-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="font-semibold block mb-1 text-[11px]">Silver Bonus</label>
+                  <input
+                    type="number"
+                    min={0}
+                    value={loyaltySettings.tierBonuses.silver}
+                    onChange={(e) =>
+                      setLoyaltySettings({
+                        ...loyaltySettings,
+                        tierBonuses: {
+                          ...loyaltySettings.tierBonuses,
+                          silver: Math.max(0, parseInt(e.target.value, 10) || 0),
+                        },
+                      })
+                    }
+                    className="w-full h-10 px-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="font-semibold block mb-1 text-[11px]">Gold Bonus</label>
+                  <input
+                    type="number"
+                    min={0}
+                    value={loyaltySettings.tierBonuses.gold}
+                    onChange={(e) =>
+                      setLoyaltySettings({
+                        ...loyaltySettings,
+                        tierBonuses: {
+                          ...loyaltySettings.tierBonuses,
+                          gold: Math.max(0, parseInt(e.target.value, 10) || 0),
+                        },
+                      })
+                    }
+                    className="w-full h-10 px-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 font-mono"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <label className="flex items-center gap-2 text-xs font-bold text-slate-800 dark:text-slate-200">
+                <input
+                  type="checkbox"
+                  checked={loyaltySettings.pointsExpiryEnabled}
+                  onChange={(e) =>
+                    setLoyaltySettings({
+                      ...loyaltySettings,
+                      pointsExpiryEnabled: e.target.checked,
+                    })
+                  }
+                  className="rounded text-emerald-600"
+                />
+                <span>Enable automatic points expiry (default off)</span>
+              </label>
+
+              {loyaltySettings.pointsExpiryEnabled && (
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="font-semibold">Expire unused points after (days):</span>
+                  <input
+                    type="number"
+                    min={1}
+                    value={loyaltySettings.pointsExpiryDays}
+                    onChange={(e) =>
+                      setLoyaltySettings({
+                        ...loyaltySettings,
+                        pointsExpiryDays: Math.max(1, parseInt(e.target.value, 10) || 365),
+                      })
+                    }
+                    className="w-24 h-9 px-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono"
+                  />
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-end">
+              <button
+                type="submit"
+                disabled={isSavingSettings}
+                className="py-2.5 px-5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-bold transition"
+              >
+                {isSavingSettings ? 'Saving...' : 'Save Loyalty Settings'}
+              </button>
+            </div>
+          </form>
         </div>
       )}
 
@@ -1023,6 +2062,361 @@ export const AdminView: React.FC = () => {
                   className="flex-1 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold disabled:opacity-60"
                 >
                   {isUpdatingAcct ? 'Saving...' : 'Save Credentials'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+      {/* Modal: Admin Password Reset Helper for Shoppers & Shops */}
+      {resetTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in">
+          <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl p-5 shadow-2xl border border-slate-200 dark:border-slate-800 space-y-4">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <KeyRound className="w-5 h-5 text-emerald-600" />
+                <div>
+                  <h3 className="text-base font-bold text-slate-900 dark:text-white leading-tight">
+                    Reset Account Password
+                  </h3>
+                  <p className="text-[11px] text-slate-500">
+                    {resetTarget.name} · {resetTarget.roleLabel}
+                  </p>
+                </div>
+              </div>
+              <span className="text-[10px] font-mono text-slate-400 truncate max-w-[140px]">
+                {resetTarget.subtitle}
+              </span>
+            </div>
+
+            {resetStatus && (
+              <div
+                className={`p-3 rounded-xl border text-xs flex items-start gap-2 ${
+                  resetStatus.type === 'error'
+                    ? 'bg-rose-50 dark:bg-rose-950/40 border-rose-200 dark:border-rose-800 text-rose-700 dark:text-rose-300'
+                    : 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300'
+                }`}
+              >
+                {resetStatus.type === 'error' ? (
+                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                ) : (
+                  <CheckCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                )}
+                <span>{resetStatus.text}</span>
+              </div>
+            )}
+
+            {resetGeneratedPassword && (
+              <div className="p-3 rounded-2xl bg-slate-900 text-white space-y-2">
+                <p className="text-[11px] text-slate-300">
+                  One-time generated password (existing sessions revoked &amp; any account lock cleared):
+                </p>
+                <div className="flex items-center justify-between gap-2 bg-slate-800 px-3 py-2 rounded-xl border border-slate-700">
+                  <code className="text-sm font-mono font-bold text-emerald-400 select-all">
+                    {resetGeneratedPassword}
+                  </code>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      await navigator.clipboard.writeText(resetGeneratedPassword);
+                      setCopiedResetPass(true);
+                      setTimeout(() => setCopiedResetPass(false), 2000);
+                    }}
+                    className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold flex items-center gap-1 shrink-0"
+                  >
+                    {copiedResetPass ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                    <span>{copiedResetPass ? 'Copied' : 'Copy'}</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <div className="space-y-3">
+              <div>
+                <label className="text-xs font-semibold block mb-1">
+                  Set Custom Password (min 8 chars)
+                </label>
+                <div className="relative">
+                  <input
+                    type={resetShowPassword ? 'text' : 'password'}
+                    value={resetCustomPassword}
+                    onChange={(e) => setResetCustomPassword(e.target.value)}
+                    placeholder="Enter new password for this account..."
+                    className="w-full h-10 pl-3 pr-10 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setResetShowPassword(!resetShowPassword)}
+                    className="absolute right-2.5 top-2.5 text-slate-400 hover:text-slate-600"
+                    aria-label={resetShowPassword ? 'Hide password' : 'Show password'}
+                  >
+                    {resetShowPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex flex-col sm:flex-row gap-2">
+                <button
+                  type="button"
+                  disabled={isResettingPassword || resetCustomPassword.trim().length < 8}
+                  onClick={() => handleSubmitAdminResetPassword(false)}
+                  className="flex-1 py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-45 text-white text-xs font-bold transition"
+                >
+                  Set Password
+                </button>
+                <button
+                  type="button"
+                  disabled={isResettingPassword}
+                  onClick={() => handleSubmitAdminResetPassword(true)}
+                  className="flex-1 py-2.5 px-3 rounded-xl bg-slate-900 dark:bg-slate-800 hover:bg-slate-800 disabled:opacity-45 text-white text-xs font-bold transition"
+                >
+                  Generate Temp Password
+                </button>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setResetTarget(null)}
+                className="w-full py-2 rounded-xl border border-slate-300 dark:border-slate-700 text-xs font-semibold text-slate-600 dark:text-slate-300"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Reject / Cancel Redemption Order with Reason */}
+      {rejectModalOrder && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in">
+          <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl p-5 shadow-2xl border border-slate-200 dark:border-slate-800 space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                Reject / Cancel Order {rejectModalOrder.referenceCode}
+              </h3>
+              <button type="button" onClick={() => setRejectModalOrder(null)}>
+                <X className="w-4 h-4 text-slate-400" />
+              </button>
+            </div>
+            <p className="text-xs text-slate-500">
+              Cancelling returns {rejectModalOrder.pointsCost.toLocaleString()} points to{' '}
+              <strong>{rejectModalOrder.shopperName}</strong> and restores size stock if previously approved.
+            </p>
+            <textarea
+              rows={3}
+              required
+              value={rejectReasonInput}
+              onChange={(e) => setRejectReasonInput(e.target.value)}
+              placeholder="Reason for rejection or cancellation..."
+              className="w-full p-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
+            />
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setRejectModalOrder(null)}
+                className="flex-1 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold"
+              >
+                {t.cancel}
+              </button>
+              <button
+                type="button"
+                disabled={!rejectReasonInput.trim()}
+                onClick={() =>
+                  handleUpdateOrderStatus(
+                    rejectModalOrder.id,
+                    'cancelled',
+                    rejectReasonInput.trim()
+                  )
+                }
+                className="flex-1 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:opacity-45 text-white text-xs font-bold"
+              >
+                Confirm Rejection &amp; Refund Points
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Create / Edit Reward Item */}
+      {rewardEditor && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in">
+          <div className="w-full max-w-lg bg-white dark:bg-slate-900 rounded-3xl p-5 shadow-2xl border border-slate-200 dark:border-slate-800 space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                {rewardEditor.id ? 'Edit Reward Item' : 'Add New Reward Item'}
+              </h3>
+              <button type="button" onClick={() => setRewardEditor(null)}>
+                <X className="w-4 h-4 text-slate-400" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveReward} className="space-y-3 text-xs">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="font-semibold block mb-1">Reward Name (EN) *</label>
+                  <input
+                    type="text"
+                    required
+                    value={rewardEditor.name}
+                    onChange={(e) => setRewardEditor({ ...rewardEditor, name: e.target.value })}
+                    className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800"
+                  />
+                </div>
+                <div>
+                  <label className="font-semibold block mb-1">Reward Name (SW)</label>
+                  <input
+                    type="text"
+                    value={rewardEditor.nameSw}
+                    onChange={(e) => setRewardEditor({ ...rewardEditor, nameSw: e.target.value })}
+                    className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="font-semibold block mb-1">Description (EN)</label>
+                <textarea
+                  rows={2}
+                  value={rewardEditor.description}
+                  onChange={(e) => setRewardEditor({ ...rewardEditor, description: e.target.value })}
+                  className="w-full p-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800"
+                />
+              </div>
+
+              <div>
+                <label className="font-semibold block mb-1">Description (SW)</label>
+                <textarea
+                  rows={2}
+                  value={rewardEditor.descriptionSw}
+                  onChange={(e) => setRewardEditor({ ...rewardEditor, descriptionSw: e.target.value })}
+                  className="w-full p-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="font-semibold block mb-1">Points Cost *</label>
+                  <input
+                    type="number"
+                    min={1}
+                    required
+                    value={rewardEditor.pointsCost}
+                    onChange={(e) =>
+                      setRewardEditor({
+                        ...rewardEditor,
+                        pointsCost: Math.max(1, parseInt(e.target.value, 10) || 1),
+                      })
+                    }
+                    className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="font-semibold block mb-1">Unit Cost (KES)</label>
+                  <input
+                    type="number"
+                    min={0}
+                    value={rewardEditor.unitCostKes}
+                    onChange={(e) =>
+                      setRewardEditor({
+                        ...rewardEditor,
+                        unitCostKes: Math.max(0, parseInt(e.target.value, 10) || 0),
+                      })
+                    }
+                    className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="font-semibold block mb-1">Status</label>
+                  <select
+                    value={rewardEditor.status}
+                    onChange={(e) =>
+                      setRewardEditor({
+                        ...rewardEditor,
+                        status: e.target.value as 'active' | 'hidden',
+                      })
+                    }
+                    className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800"
+                  >
+                    <option value="active">Active</option>
+                    <option value="hidden">Hidden</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="font-semibold block mb-1">Image Path / URL</label>
+                <input
+                  type="text"
+                  value={rewardEditor.imageUrl}
+                  onChange={(e) => setRewardEditor({ ...rewardEditor, imageUrl: e.target.value })}
+                  className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 font-mono"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="font-semibold block mb-1">Colours (comma-separated)</label>
+                  <input
+                    type="text"
+                    value={rewardEditor.colorsText}
+                    onChange={(e) => setRewardEditor({ ...rewardEditor, colorsText: e.target.value })}
+                    className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800"
+                  />
+                </div>
+                <div>
+                  <label className="font-semibold block mb-1">Sizes (comma-separated)</label>
+                  <input
+                    type="text"
+                    value={rewardEditor.sizesText}
+                    onChange={(e) => setRewardEditor({ ...rewardEditor, sizesText: e.target.value })}
+                    className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="font-semibold block mb-1.5">Stock Count Per Size</label>
+                <div className="flex flex-wrap gap-2">
+                  {rewardEditor.sizesText
+                    .split(',')
+                    .map((s) => s.trim())
+                    .filter(Boolean)
+                    .map((sz) => (
+                      <div key={sz} className="w-20">
+                        <span className="text-[10px] font-bold text-slate-500 block mb-0.5">{sz}</span>
+                        <input
+                          type="number"
+                          min={0}
+                          value={rewardEditor.stockBySize[sz] ?? 0}
+                          onChange={(e) =>
+                            setRewardEditor({
+                              ...rewardEditor,
+                              stockBySize: {
+                                ...rewardEditor.stockBySize,
+                                [sz]: Math.max(0, parseInt(e.target.value, 10) || 0),
+                              },
+                            })
+                          }
+                          className="w-full h-9 px-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 font-mono"
+                        />
+                      </div>
+                    ))}
+                </div>
+              </div>
+
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setRewardEditor(null)}
+                  className="flex-1 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 font-semibold"
+                >
+                  {t.cancel}
+                </button>
+                <button
+                  type="submit"
+                  className="flex-1 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold"
+                >
+                  Save Reward
                 </button>
               </div>
             </form>

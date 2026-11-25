@@ -1,7 +1,9 @@
+// Copyright (c) 2026 SmartCart Owner. All rights reserved.
+
 import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
 import crypto from 'crypto';
-import { db, hashPassword, verifyPassword } from './src/server/db';
+import { db, hashPassword, verifyPassword, createDefaultLoyaltySettings } from './src/server/db';
 import { validateBarcode } from './src/utils/barcode';
 import { GoogleGenAI, Content } from '@google/genai';
 import {
@@ -17,7 +19,14 @@ import {
   Announcement,
   SupportTicket,
   ShoppingList,
-  LoyaltyCard,
+  LoyaltyTransaction,
+  LoyaltyPointsSummary,
+  LoyaltySettings,
+  LoyaltyLedgerEntry,
+  LoyaltyLedgerEntryType,
+  RewardItem,
+  RewardRedemptionOrder,
+  RedemptionStatus,
   StaffPermissions,
   STAFF_PRESETS,
 } from './src/types';
@@ -113,6 +122,8 @@ function createIpRateLimiter(maxRequests: number, windowMs: number, keyPrefix: s
 const loginRateLimiter = createIpRateLimiter(30, 10 * 60 * 1000, 'login');
 // Sensitive operations: max 10 attempts per hour per IP
 const sensitiveOpsRateLimiter = createIpRateLimiter(10, 60 * 60 * 1000, 'sensitive');
+// Rewards redemption requests: max 12 attempts per 15 minutes per IP
+const redemptionRateLimiter = createIpRateLimiter(12, 15 * 60 * 1000, 'redemption');
 
 function getSessionDurationMs(portal?: string, role?: string): number {
   if (role === 'admin' || portal === 'admin') {
@@ -1406,8 +1417,19 @@ app.post('/api/shopper/scan-lookup', (req, res) => {
 app.get('/api/shopper/cart', (req, res) => {
   const user = getAuthUser(req);
   const callerId = getShopperOrGuestId(req, user);
-  const { branchId } = req.query;
+  const { branchId, cartId } = req.query;
   const data = db.getRaw();
+
+  if (cartId && typeof cartId === 'string') {
+    const specificCart = data.carts.find((c) => c.id === cartId);
+    if (!specificCart) {
+      return res.status(404).json({ error: 'Cart not found' });
+    }
+    if (!canAccessCart(user, specificCart, callerId)) {
+      return res.status(403).json({ error: 'Forbidden: You cannot view another shopper\'s cart.' });
+    }
+    return res.json(specificCart);
+  }
 
   let cart = data.carts.find(
     (c) =>
@@ -1637,6 +1659,20 @@ app.post('/api/shopper/cart/sync', (req, res) => {
     return res.status(403).json({ error: 'Forbidden: You cannot sync into another shopper\'s cart.' });
   }
 
+  // Never allow client sync to alter or forge an already verified/completed/flagged/cancelled cart
+  if (
+    serverCart &&
+    (serverCart.status === 'verified' ||
+      serverCart.status === 'completed' ||
+      serverCart.status === 'flagged' ||
+      serverCart.status === 'cancelled')
+  ) {
+    return res.status(400).json({ error: 'Cannot modify a cart that has already been verified or finalized.' });
+  }
+
+  // Strictly limit client-supplied cart status to shopper-owned pre-till states only
+  const safeClientStatus: Cart['status'] = payload.status === 'locked' ? 'locked' : 'active';
+
   if (!serverCart) {
     serverCart = data.carts.find(
       (c) =>
@@ -1657,7 +1693,7 @@ app.post('/api/shopper/cart/sync', (req, res) => {
       shopperPhone: user?.phone || payload.shopperPhone || '',
       supermarketId: branch.supermarketId,
       branchId: branch.id,
-      status: payload.status || 'active',
+      status: safeClientStatus,
       items: Array.isArray(payload.items) ? payload.items : [],
       subtotal: payload.subtotal || 0,
       totalDiscount: payload.totalDiscount || 0,
@@ -1673,7 +1709,7 @@ app.post('/api/shopper/cart/sync', (req, res) => {
     // Preserve the locked price the shopper saw when scanning offline!
     if (Array.isArray(payload.items)) serverCart.items = payload.items;
     if (payload.budgetLimit !== undefined) serverCart.budgetLimit = payload.budgetLimit;
-    if (payload.status) serverCart.status = payload.status;
+    serverCart.status = safeClientStatus;
     serverCart.isOfflineCreated = true;
     serverCart.syncedAt = new Date().toISOString();
   }
@@ -1706,13 +1742,48 @@ app.delete('/api/shopper/cart/:id', (req, res) => {
 // 5. SHOPPER PHASE 2: HISTORY & RE-ADD, FAVOURITES, LISTS
 // ==========================================
 
+const buildShopperReceiptSummary = (c: Cart, data: ReturnType<typeof db.getRaw>) => {
+  const sm = data.supermarkets.find((s) => s.id === c.supermarketId);
+  const br = data.branches.find((b) => b.id === c.branchId);
+  const verifier = c.verifiedByStaffId
+    ? data.users.find((u) => u.id === c.verifiedByStaffId)
+    : undefined;
+  const itemCount = c.items.reduce((sum, it) => sum + (it.quantity || 1), 0);
+  return {
+    ...c,
+    supermarketName: sm?.name || 'Supermarket',
+    branchName: br?.name || 'Branch',
+    branchAddress: br?.address || '',
+    branchCity: br?.city || '',
+    verifiedByName: verifier?.name || undefined,
+    itemCount,
+    noPaymentInApp: true,
+  };
+};
+
+// Shopper Past Receipts (authenticated shopper completed/verified transaction summaries)
+app.get('/api/shopper/receipts', requireAuth, (req, res) => {
+  const user = (req as any).user as User;
+  const data = db.getRaw();
+  const receipts = data.carts
+    .filter((c) => c.shopperId === user.id && (c.status === 'completed' || c.status === 'verified'))
+    .sort(
+      (a, b) =>
+        new Date(b.verifiedAt || b.updatedAt || b.createdAt).getTime() -
+        new Date(a.verifiedAt || a.updatedAt || a.createdAt).getTime()
+    )
+    .map((c) => buildShopperReceiptSummary(c, data));
+  res.json({ receipts });
+});
+
 // Shopper past cart history (authenticated)
 app.get('/api/shopper/history', requireAuth, (req, res) => {
   const user = (req as any).user as User;
   const data = db.getRaw();
   const history = data.carts
     .filter((c) => c.shopperId === user.id && (c.status === 'completed' || c.status === 'verified'))
-    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+    .map((c) => buildShopperReceiptSummary(c, data));
   res.json(history);
 });
 
@@ -2411,18 +2482,26 @@ app.post('/api/cashier/flag', requireAuth, (req, res) => {
   cart.mismatchNotes = reason;
   cart.updatedAt = new Date().toISOString();
 
+  // Reverse any loyalty points previously earned on this cart
+  const reversedPts = reversePointsForCart(
+    data,
+    cart,
+    user,
+    `Cart ${cart.shortCode} flagged: ${reason || 'Mismatch reported'}`
+  );
+
   logAudit(
     user,
     'CART_FLAGGED',
     'cart',
     cart.id,
-    `Cart ${cart.shortCode} flagged for mismatch: ${reason}`,
+    `Cart ${cart.shortCode} flagged for mismatch: ${reason}${reversedPts > 0 ? ` (reversed ${reversedPts} pts)` : ''}`,
     cart.supermarketId,
     cart.branchId
   );
   db.save();
 
-  res.json({ success: true, cart });
+  res.json({ success: true, cart, reversedPoints: reversedPts });
 });
 
 app.post('/api/cashier/verify', requireAuth, (req, res) => {
@@ -2446,7 +2525,12 @@ app.post('/api/cashier/verify', requireAuth, (req, res) => {
     return res.status(403).json({ error: 'Forbidden: Cart belongs to another supermarket.' });
   }
 
-  if (cart.status === 'completed' || cart.status === 'verified' || cart.status === 'cancelled') {
+  if (
+    cart.status === 'completed' ||
+    cart.status === 'verified' ||
+    cart.status === 'cancelled' ||
+    cart.status === 'flagged'
+  ) {
     return res.status(400).json({ error: `Cart is already ${cart.status}` });
   }
 
@@ -2455,18 +2539,21 @@ app.post('/api/cashier/verify', requireAuth, (req, res) => {
   cart.verifiedAt = new Date().toISOString();
   cart.updatedAt = new Date().toISOString();
 
+  // Award Loyalty Points strictly on cashier verification (idempotent, configurable rates/caps/min spend)
+  const pointsEarned = awardPointsForVerifiedCart(data, cart, user);
+
   logAudit(
     user,
     'CART_VERIFIED',
     'cart',
     cart.id,
-    `Cart ${cart.shortCode} verified by ${user.name}`,
+    `Cart ${cart.shortCode} verified by ${user.name}${pointsEarned > 0 ? ` (+${pointsEarned} loyalty pts)` : ''}`,
     cart.supermarketId,
     cart.branchId
   );
   db.save();
 
-  res.json({ success: true, cart });
+  res.json({ success: true, cart, loyaltyPointsEarned: pointsEarned });
 });
 
 app.post('/api/cashier/complete', requireAuth, (req, res) => {
@@ -2497,6 +2584,11 @@ app.post('/api/cashier/complete', requireAuth, (req, res) => {
   if (cart.status === 'cancelled') {
     return res.status(400).json({ error: 'Cart is cancelled' });
   }
+  if (cart.status !== 'verified') {
+    return res.status(400).json({
+      error: 'Unverified carts cannot be completed or earn loyalty points. Verify the cart at the till first.',
+    });
+  }
 
   cart.status = 'completed';
   cart.updatedAt = new Date().toISOString();
@@ -2509,18 +2601,21 @@ app.post('/api/cashier/complete', requireAuth, (req, res) => {
     }
   });
 
+  // Never double-award points on completion; verify already awarded idempotently
+  const pointsEarned = awardPointsForVerifiedCart(data, cart, user);
+
   logAudit(
     user,
     'CART_COMPLETED',
     'cart',
     cart.id,
-    `Cart ${cart.shortCode} payment finalized at till`,
+    `Cart ${cart.shortCode} checkout finalized at till${(cart.loyaltyPointsEarned || 0) > 0 ? ` (${cart.loyaltyPointsEarned} loyalty pts)` : ''}`,
     cart.supermarketId,
     cart.branchId
   );
   db.save();
 
-  res.json({ success: true, cart });
+  res.json({ success: true, cart, loyaltyPointsEarned: cart.loyaltyPointsEarned || pointsEarned || 0 });
 });
 
 // ==========================================
@@ -3583,6 +3678,9 @@ app.get('/api/admin/metrics', requireAuth, requireRole(['admin']), (req, res) =>
 
 app.put('/api/admin/supermarkets/:id/status', requireAuth, requireRole(['admin']), (req, res) => {
   const user = (req as any).user as User;
+  if (user.role !== 'admin') {
+    return res.status(403).json({ error: 'Forbidden: Only the System Administrator can approve or manage shops.' });
+  }
   const { status } = req.body;
   if (!['active', 'suspended', 'pending'].includes(status)) {
     return res.status(400).json({ error: 'Invalid status. Allowed: active, suspended, pending.' });
@@ -3591,8 +3689,17 @@ app.put('/api/admin/supermarkets/:id/status', requireAuth, requireRole(['admin']
   const sm = data.supermarkets.find((s) => s.id === req.params.id);
   if (!sm) return res.status(404).json({ error: 'Supermarket not found' });
 
+  const prevStatus = sm.status;
   sm.status = status;
-  if (status === 'suspended' || status === 'pending') {
+
+  if (status === 'active') {
+    // Activate the shop's branches when approved by admin so shoppers can immediately select the store
+    data.branches.forEach((b) => {
+      if (b.supermarketId === sm.id && (prevStatus === 'pending' || !b.isActive)) {
+        b.isActive = true;
+      }
+    });
+  } else if (status === 'suspended' || status === 'pending') {
     revokeSupermarketSessions(sm.id);
   }
   logAudit(user, `SUPERMARKET_${status.toUpperCase()}`, 'supermarket', sm.id, `Supermarket ${sm.name} ${status} by admin`);
@@ -3675,7 +3782,7 @@ app.put('/api/admin/users/:id/status', requireAuth, requireRole(['admin']), (req
 
 app.post('/api/admin/users/:id/reset-password', requireAuth, requireRole(['admin']), (req, res) => {
   const adminUser = (req as any).user as User;
-  const { newPassword } = req.body;
+  const { newPassword } = req.body || {};
   const data = db.getRaw();
   const targetUser = data.users.find((u) => u.id === req.params.id);
   if (!targetUser) return res.status(404).json({ error: 'User not found' });
@@ -3687,12 +3794,16 @@ app.post('/api/admin/users/:id/reset-password', requireAuth, requireRole(['admin
     });
   }
 
-  let finalPassword = typeof newPassword === 'string' && newPassword.trim() ? newPassword.trim() : '';
-  if (finalPassword && finalPassword.length < 8) {
+  let customPassword = typeof newPassword === 'string' && newPassword.trim() ? newPassword.trim() : '';
+  if (customPassword && customPassword.length < 8) {
     return res.status(400).json({ error: 'New password must be at least 8 characters long.' });
   }
+
+  let generatedPassword: string | undefined;
+  let finalPassword = customPassword;
   if (!finalPassword) {
-    finalPassword = `Sc!${crypto.randomBytes(4).toString('hex')}${crypto.randomInt(100, 1000)}`;
+    generatedPassword = `Sc!${crypto.randomBytes(4).toString('hex')}${crypto.randomInt(100, 1000)}`;
+    finalPassword = generatedPassword;
   }
 
   const { hash, salt } = hashPassword(finalPassword);
@@ -3702,9 +3813,73 @@ app.post('/api/admin/users/:id/reset-password', requireAuth, requireRole(['admin
 
   revokeUserSessions(targetUser.id);
 
-  logAudit(adminUser, 'USER_PASSWORD_RESET', 'staff', targetUser.id, `Admin reset password for ${targetUser.name}`);
+  logAudit(
+    adminUser,
+    'USER_PASSWORD_RESET',
+    targetUser.role === 'shopper' ? 'user' : 'staff',
+    targetUser.id,
+    `Admin reset password for ${targetUser.role} account ${targetUser.name} (${targetUser.email})`,
+    targetUser.supermarketId || null,
+    targetUser.branchId || null
+  );
   db.save();
-  res.json({ success: true, message: `Password reset for ${targetUser.name}` });
+  res.json({
+    success: true,
+    message: `Password reset for ${targetUser.name}`,
+    ...(generatedPassword ? { generatedPassword } : {}),
+  });
+});
+
+// Admin helper: reset primary shop owner password directly from the Supermarkets / Shops view
+app.post('/api/admin/supermarkets/:id/reset-password', requireAuth, requireRole(['admin']), (req, res) => {
+  const adminUser = (req as any).user as User;
+  const { newPassword } = req.body || {};
+  const data = db.getRaw();
+  const sm = data.supermarkets.find((s) => s.id === req.params.id);
+  if (!sm) return res.status(404).json({ error: 'Supermarket not found' });
+
+  const ownerUser =
+    data.users.find((u) => u.supermarketId === sm.id && u.role === 'owner') ||
+    data.users.find((u) => u.email.toLowerCase() === sm.contactEmail.toLowerCase() && u.role !== 'admin');
+
+  if (!ownerUser) {
+    return res.status(404).json({ error: 'No shop owner account found for this supermarket.' });
+  }
+
+  const customPassword = typeof newPassword === 'string' && newPassword.trim() ? newPassword.trim() : '';
+  if (customPassword && customPassword.length < 8) {
+    return res.status(400).json({ error: 'New password must be at least 8 characters long.' });
+  }
+
+  let generatedPassword: string | undefined;
+  let finalPassword = customPassword;
+  if (!finalPassword) {
+    generatedPassword = `Sc!${crypto.randomBytes(4).toString('hex')}${crypto.randomInt(100, 1000)}`;
+    finalPassword = generatedPassword;
+  }
+
+  const { hash, salt } = hashPassword(finalPassword);
+  data.passwords[ownerUser.id] = { hash, salt };
+  ownerUser.failedAttempts = 0;
+  ownerUser.lockedUntil = null;
+
+  revokeUserSessions(ownerUser.id);
+
+  logAudit(
+    adminUser,
+    'SHOP_PASSWORD_RESET',
+    'supermarket',
+    sm.id,
+    `Admin reset shop owner password for "${sm.name}" (${ownerUser.email})`,
+    sm.id
+  );
+  db.save();
+  res.json({
+    success: true,
+    message: `Shop password reset for ${sm.name} (${ownerUser.email})`,
+    ownerEmail: ownerUser.email,
+    ...(generatedPassword ? { generatedPassword } : {}),
+  });
 });
 
 // Update the single System Administrator's credentials (email, name, and/or password)
@@ -3941,183 +4116,1096 @@ app.get('/api/audit-logs', requireAuth, (req, res) => {
 });
 
 // ==========================================
-// 11. STORE LOYALTY QR SCANNING APIS
+// 11. LOYALTY LEDGER, REWARDS CATALOGUE & REDEMPTION APIS
 // ==========================================
 
-function parseLoyaltyQrPayload(
-  rawPayload: string,
-  activeSupermarkets: Supermarket[],
-  branchSupermarketId?: string
-): { supermarket: Supermarket; cardNumber: string; memberName?: string; tier?: string; points?: number } | null {
-  const raw = (rawPayload || '').trim();
-  if (!raw || raw.length > 500) return null;
-
-  let codeHint = '';
-  let cardNumber = '';
-  let memberName: string | undefined;
-  let tier: string | undefined;
-  let points: number | undefined;
-
-  // Format 1: SMARTCART:LOYALTY:<CHAIN_CODE>:<CARD_NUMBER>[:<MEMBER_NAME>]
-  if (raw.toUpperCase().startsWith('SMARTCART:LOYALTY:')) {
-    const parts = raw.split(':');
-    codeHint = (parts[2] || '').trim().toUpperCase();
-    cardNumber = (parts[3] || '').trim();
-    if (parts[4]) memberName = parts.slice(4).join(':').trim();
-  } else if (raw.startsWith('{') && raw.endsWith('}')) {
-    // Format 2: JSON payload { supermarketCode | chain, cardNumber | loyaltyId, memberName, tier, points }
-    try {
-      const parsed = JSON.parse(raw);
-      codeHint = String(parsed.supermarketCode || parsed.chain || parsed.storeCode || '').trim().toUpperCase();
-      cardNumber = String(parsed.cardNumber || parsed.loyaltyId || parsed.code || '').trim();
-      if (parsed.memberName) memberName = String(parsed.memberName).trim();
-      if (parsed.tier) tier = String(parsed.tier).trim();
-      if (parsed.points !== undefined && !isNaN(Number(parsed.points))) points = Math.max(0, Math.round(Number(parsed.points)));
-    } catch {
-      return null;
-    }
-  } else if (/^https?:\/\//i.test(raw)) {
-    // Format 3: URL query params ?chain=NAIVAS&card=NV-12345
-    try {
-      const url = new URL(raw);
-      codeHint = (url.searchParams.get('chain') || url.searchParams.get('store') || '').trim().toUpperCase();
-      cardNumber = (url.searchParams.get('card') || url.searchParams.get('loyaltyId') || url.searchParams.get('code') || '').trim();
-      const mName = url.searchParams.get('name');
-      if (mName) memberName = mName.trim();
-    } catch {
-      return null;
-    }
-  } else if (raw.includes(':')) {
-    // Format 4: <CHAIN_CODE>:<CARD_NUMBER>
-    const [prefix, ...rest] = raw.split(':');
-    codeHint = prefix.trim().toUpperCase();
-    cardNumber = rest.join(':').trim();
-  } else {
-    // Format 5: Direct card number matching chain prefix or active branch's chain
-    cardNumber = raw;
-    const matchedByPrefix = activeSupermarkets.find((s) =>
-      raw.toUpperCase().startsWith(s.code.substring(0, 2).toUpperCase())
-    );
-    if (matchedByPrefix) {
-      codeHint = matchedByPrefix.code.toUpperCase();
-    }
-  }
-
-  if (!cardNumber || cardNumber.length < 3 || cardNumber.length > 64) {
-    return null;
-  }
-
-  let supermarket = codeHint
-    ? activeSupermarkets.find(
-        (s) =>
-          s.code.toUpperCase() === codeHint ||
-          s.name.toUpperCase().includes(codeHint) ||
-          s.id.toUpperCase() === codeHint
-      )
-    : undefined;
-
-  if (!supermarket && branchSupermarketId) {
-    supermarket = activeSupermarkets.find((s) => s.id === branchSupermarketId);
-  }
-
-  if (!supermarket) return null;
-
-  return { supermarket, cardNumber, memberName, tier, points };
+function ensureLoyaltyContainers(data: ReturnType<typeof db.getRaw>) {
+  if (!data.loyaltySettings) data.loyaltySettings = createDefaultLoyaltySettings();
+  if (!Array.isArray(data.loyaltyLedger)) data.loyaltyLedger = [];
+  if (!data.loyaltyBalances || typeof data.loyaltyBalances !== 'object') data.loyaltyBalances = {};
+  if (!Array.isArray(data.loyaltyTransactions)) data.loyaltyTransactions = [];
+  if (!Array.isArray(data.rewards)) data.rewards = [];
+  if (!Array.isArray(data.rewardRedemptions)) data.rewardRedemptions = [];
 }
 
-app.get('/api/shopper/loyalty', (req, res) => {
-  const user = getAuthUser(req);
-  const ownerKey = getShopperOrGuestId(req, user);
-  const data = db.getRaw();
-  if (!data.loyaltyCards) data.loyaltyCards = [];
+function getLedgerBalance(data: ReturnType<typeof db.getRaw>, userId: string): number {
+  ensureLoyaltyContainers(data);
+  return data.loyaltyLedger
+    .filter((e) => e.userId === userId)
+    .reduce((sum, e) => sum + e.amount, 0);
+}
 
-  const cards = data.loyaltyCards.filter((c) => c.ownerKey === ownerKey || (user && c.userId === user.id));
-  res.json(cards);
-});
+function getStoredBalance(data: ReturnType<typeof db.getRaw>, userId: string): number {
+  ensureLoyaltyContainers(data);
+  return data.loyaltyBalances[userId] ?? 0;
+}
 
-app.post('/api/shopper/loyalty/scan', (req, res) => {
-  const user = getAuthUser(req);
-  const ownerKey = getShopperOrGuestId(req, user);
-  const { qrPayload, branchId } = req.body;
+function getLifetimeEarnedPoints(data: ReturnType<typeof db.getRaw>, userId: string): number {
+  ensureLoyaltyContainers(data);
+  const netEarned = data.loyaltyLedger
+    .filter((e) => e.userId === userId && (e.type === 'earn' || e.type === 'reversal' || (e.type === 'adjustment' && e.amount > 0)))
+    .reduce((sum, e) => sum + e.amount, 0);
+  return Math.max(0, netEarned);
+}
 
-  if (!qrPayload || typeof qrPayload !== 'string') {
-    return res.status(400).json({ error: 'qrPayload is required.' });
+function computeTierFromLifetime(lifetimePoints: number, settings: LoyaltySettings): {
+  tier: 'Bronze' | 'Silver' | 'Gold';
+  nextTier: 'Silver' | 'Gold' | null;
+  pointsToNextTier: number;
+  tierBonusPerCart: number;
+} {
+  const silverThresh = Math.max(1, settings.tierThresholds?.silver ?? 500);
+  const goldThresh = Math.max(silverThresh + 1, settings.tierThresholds?.gold ?? 1500);
+  if (lifetimePoints >= goldThresh) {
+    return {
+      tier: 'Gold',
+      nextTier: null,
+      pointsToNextTier: 0,
+      tierBonusPerCart: settings.tierBonuses?.gold ?? 5,
+    };
+  }
+  if (lifetimePoints >= silverThresh) {
+    return {
+      tier: 'Silver',
+      nextTier: 'Gold',
+      pointsToNextTier: goldThresh - lifetimePoints,
+      tierBonusPerCart: settings.tierBonuses?.silver ?? 2,
+    };
+  }
+  return {
+    tier: 'Bronze',
+    nextTier: 'Silver',
+    pointsToNextTier: silverThresh - lifetimePoints,
+    tierBonusPerCart: settings.tierBonuses?.bronze ?? 0,
+  };
+}
+
+function appendLedgerEntry(
+  data: ReturnType<typeof db.getRaw>,
+  params: {
+    userId: string;
+    type: LoyaltyLedgerEntryType;
+    amount: number;
+    reason: string;
+    cartId?: string | null;
+    cartShortCode?: string | null;
+    redemptionId?: string | null;
+    supermarketId?: string | null;
+    supermarketName?: string | null;
+    branchId?: string | null;
+    branchName?: string | null;
+    amountSpent?: number | null;
+    createdByUserId?: string | null;
+  }
+): LoyaltyLedgerEntry {
+  ensureLoyaltyContainers(data);
+  const currentBal = getLedgerBalance(data, params.userId);
+  const nextBalance = currentBal + params.amount;
+  if (nextBalance < 0) {
+    throw new Error('Loyalty points balance cannot go negative.');
   }
 
-  const data = db.getRaw();
-  if (!data.loyaltyCards) data.loyaltyCards = [];
+  const entry: LoyaltyLedgerEntry = {
+    id: `led_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
+    userId: params.userId,
+    type: params.type,
+    amount: params.amount,
+    balanceAfter: nextBalance,
+    reason: params.reason,
+    cartId: params.cartId ?? null,
+    cartShortCode: params.cartShortCode ?? null,
+    redemptionId: params.redemptionId ?? null,
+    supermarketId: params.supermarketId ?? null,
+    supermarketName: params.supermarketName ?? null,
+    branchId: params.branchId ?? null,
+    branchName: params.branchName ?? null,
+    amountSpent: params.amountSpent ?? null,
+    createdByUserId: params.createdByUserId ?? null,
+    createdAt: new Date().toISOString(),
+  };
 
-  const activeSupermarkets = data.supermarkets.filter((s) => s.status === 'active');
-  const activeBranch = branchId ? data.branches.find((b) => b.id === branchId) : undefined;
+  data.loyaltyLedger.unshift(entry);
+  data.loyaltyBalances[params.userId] = nextBalance;
+  return entry;
+}
 
-  const parsed = parseLoyaltyQrPayload(qrPayload, activeSupermarkets, activeBranch?.supermarketId);
-  if (!parsed) {
-    return res.status(400).json({
-      error:
-        'Unrecognized store loyalty QR code. Expected store code (e.g. SMARTCART:LOYALTY:STORE:CARD-001) or active branch loyalty card number.',
+function getEarnedWindowTotals(data: ReturnType<typeof db.getRaw>, userId: string): {
+  earnedToday: number;
+  earnedThisMonth: number;
+} {
+  ensureLoyaltyContainers(data);
+  const now = new Date();
+  const todayPrefix = now.toISOString().slice(0, 10); // YYYY-MM-DD
+  const monthPrefix = now.toISOString().slice(0, 7); // YYYY-MM
+
+  let earnedToday = 0;
+  let earnedThisMonth = 0;
+
+  for (const e of data.loyaltyLedger) {
+    if (e.userId !== userId) continue;
+    if (e.type !== 'earn' && e.type !== 'reversal') continue;
+    if (e.createdAt.startsWith(monthPrefix)) {
+      earnedThisMonth += e.amount;
+    }
+    if (e.createdAt.startsWith(todayPrefix)) {
+      earnedToday += e.amount;
+    }
+  }
+
+  return {
+    earnedToday: Math.max(0, earnedToday),
+    earnedThisMonth: Math.max(0, earnedThisMonth),
+  };
+}
+
+function applyPointsExpiryIfEnabled(data: ReturnType<typeof db.getRaw>, userId: string): number {
+  ensureLoyaltyContainers(data);
+  const settings = data.loyaltySettings;
+  if (!settings.pointsExpiryEnabled || !settings.pointsExpiryDays || settings.pointsExpiryDays <= 0) {
+    return 0;
+  }
+
+  const cutoffMs = Date.now() - settings.pointsExpiryDays * 86400 * 1000;
+  const expiredAlready = Math.abs(
+    data.loyaltyLedger
+      .filter((e) => e.userId === userId && e.type === 'expiry')
+      .reduce((s, e) => s + e.amount, 0)
+  );
+  const spentOrReversed = Math.abs(
+    data.loyaltyLedger
+      .filter((e) => e.userId === userId && e.amount < 0 && e.type !== 'expiry')
+      .reduce((s, e) => s + e.amount, 0)
+  );
+  const oldEarned = data.loyaltyLedger
+    .filter((e) => e.userId === userId && e.amount > 0 && new Date(e.createdAt).getTime() < cutoffMs)
+    .reduce((s, e) => s + e.amount, 0);
+
+  const unspentExpired = Math.max(0, oldEarned - spentOrReversed - expiredAlready);
+  const currentBal = getLedgerBalance(data, userId);
+  const toExpire = Math.min(currentBal, unspentExpired);
+
+  if (toExpire > 0) {
+    appendLedgerEntry(data, {
+      userId,
+      type: 'expiry',
+      amount: -toExpire,
+      reason: `Points expired after ${settings.pointsExpiryDays} days`,
+      createdByUserId: 'system',
+    });
+    db.save();
+  }
+  return toExpire;
+}
+
+function awardPointsForVerifiedCart(
+  data: ReturnType<typeof db.getRaw>,
+  cart: Cart,
+  verifierUser: User
+): number {
+  ensureLoyaltyContainers(data);
+
+  // Never award from unverified carts
+  if (cart.status !== 'verified' && cart.status !== 'completed') {
+    return 0;
+  }
+
+  // Strict idempotency: a cart can be evaluated & awarded at most once
+  if (
+    cart.loyaltyEvaluated ||
+    data.loyaltyLedger.some((e) => e.cartId === cart.id && e.type === 'earn') ||
+    data.loyaltyTransactions.some((tx) => tx.cartId === cart.id)
+  ) {
+    return 0;
+  }
+
+  cart.loyaltyEvaluated = true;
+
+  // Only registered active shopper accounts accrue points (frozen if suspended; guests cannot farm)
+  const shopperUser = data.users.find((u) => u.id === cart.shopperId);
+  if (!shopperUser || shopperUser.role !== 'shopper' || shopperUser.status !== 'active') {
+    cart.loyaltyPointsEarned = 0;
+    return 0;
+  }
+
+  const settings = data.loyaltySettings;
+  if (cart.finalTotal < Math.max(0, settings.minCartValueKes)) {
+    cart.loyaltyPointsEarned = 0;
+    return 0;
+  }
+
+  const lifetimeBefore = getLifetimeEarnedPoints(data, shopperUser.id);
+  const tierInfo = computeTierFromLifetime(lifetimeBefore, settings);
+  const spendPoints = Math.floor(cart.finalTotal / Math.max(1, settings.pointsPerKesAmount));
+  const rawPoints = Math.max(
+    0,
+    spendPoints + Math.max(0, settings.bonusPointsPerVerifiedCart) + Math.max(0, tierInfo.tierBonusPerCart)
+  );
+
+  const { earnedToday, earnedThisMonth } = getEarnedWindowTotals(data, shopperUser.id);
+  const dailyRemaining = Math.max(0, settings.dailyCapPoints - earnedToday);
+  const monthlyRemaining = Math.max(0, settings.monthlyCapPoints - earnedThisMonth);
+  const awardedPoints = Math.max(0, Math.min(rawPoints, dailyRemaining, monthlyRemaining));
+
+  if (awardedPoints <= 0) {
+    cart.loyaltyPointsEarned = 0;
+    return 0;
+  }
+
+  const sm = data.supermarkets.find((s) => s.id === cart.supermarketId);
+  const br = data.branches.find((b) => b.id === cart.branchId);
+  const createdAt = cart.verifiedAt || new Date().toISOString();
+
+  appendLedgerEntry(data, {
+    userId: shopperUser.id,
+    type: 'earn',
+    amount: awardedPoints,
+    reason: `Verified cart ${cart.shortCode} at ${br?.name || 'branch'} (KES ${cart.finalTotal.toLocaleString()})`,
+    cartId: cart.id,
+    cartShortCode: cart.shortCode,
+    supermarketId: cart.supermarketId,
+    supermarketName: sm?.name || 'Supermarket',
+    branchId: cart.branchId,
+    branchName: br?.name || 'Branch',
+    amountSpent: cart.finalTotal,
+    createdByUserId: verifierUser.id,
+  });
+
+  data.loyaltyTransactions.unshift({
+    id: `lpt_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
+    ownerKey: shopperUser.id,
+    userId: shopperUser.id,
+    supermarketId: cart.supermarketId,
+    supermarketName: sm?.name || 'Supermarket',
+    branchId: cart.branchId,
+    branchName: br?.name || 'Branch',
+    cartId: cart.id,
+    cartShortCode: cart.shortCode,
+    amountSpent: cart.finalTotal,
+    pointsEarned: awardedPoints,
+    createdAt,
+  });
+
+  cart.loyaltyPointsEarned = awardedPoints;
+
+  logAudit(
+    verifierUser,
+    'LOYALTY_POINTS_EARNED',
+    'loyalty',
+    cart.id,
+    `Awarded ${awardedPoints} pts to ${shopperUser.email} for verified cart ${cart.shortCode}`,
+    cart.supermarketId,
+    cart.branchId
+  );
+
+  return awardedPoints;
+}
+
+function reversePointsForCart(
+  data: ReturnType<typeof db.getRaw>,
+  cart: Cart,
+  actorUser: User,
+  reason: string
+): number {
+  ensureLoyaltyContainers(data);
+  const cartEntries = data.loyaltyLedger.filter((e) => e.cartId === cart.id);
+  const netAwarded = cartEntries
+    .filter((e) => e.type === 'earn' || e.type === 'reversal')
+    .reduce((s, e) => s + e.amount, 0);
+
+  if (netAwarded <= 0) return 0;
+
+  const currentBal = getLedgerBalance(data, cart.shopperId);
+  const deduct = Math.min(currentBal, netAwarded);
+
+  if (deduct > 0) {
+    const sm = data.supermarkets.find((s) => s.id === cart.supermarketId);
+    const br = data.branches.find((b) => b.id === cart.branchId);
+    appendLedgerEntry(data, {
+      userId: cart.shopperId,
+      type: 'reversal',
+      amount: -deduct,
+      reason,
+      cartId: cart.id,
+      cartShortCode: cart.shortCode,
+      supermarketId: cart.supermarketId,
+      supermarketName: sm?.name || 'Supermarket',
+      branchId: cart.branchId,
+      branchName: br?.name || 'Branch',
+      createdByUserId: actorUser.id,
     });
   }
 
-  const existing = data.loyaltyCards.find(
-    (c) =>
-      (c.ownerKey === ownerKey || (user && c.userId === user.id)) &&
-      c.supermarketId === parsed.supermarket.id
+  cart.loyaltyPointsEarned = 0;
+
+  logAudit(
+    actorUser,
+    'LOYALTY_POINTS_REVERSED',
+    'loyalty',
+    cart.id,
+    `Reversed ${deduct} pts for cart ${cart.shortCode}${deduct < netAwarded ? ` (shortfall ${netAwarded - deduct} already redeemed)` : ''}: ${reason}`,
+    cart.supermarketId,
+    cart.branchId
   );
 
-  const stableSeed = crypto.createHash('sha256').update(parsed.cardNumber).digest();
-  const derivedPoints = parsed.points ?? 120 + (stableSeed.readUInt16BE(0) % 1800);
-  const derivedTier = parsed.tier || (derivedPoints >= 1000 ? 'Gold Member' : derivedPoints >= 500 ? 'Silver Member' : 'Member');
+  return deduct;
+}
 
-  if (existing) {
-    existing.cardNumber = parsed.cardNumber;
-    existing.memberName = parsed.memberName || user?.name || existing.memberName;
-    existing.tier = derivedTier;
-    existing.points = derivedPoints;
-    existing.rawPayload = qrPayload.trim();
-    existing.linkedAt = new Date().toISOString();
-    db.save();
-    return res.json({ success: true, updated: true, card: existing });
+function generateRedemptionReference(existing: RewardRedemptionOrder[]): string {
+  const used = new Set(existing.map((r) => r.referenceCode.toUpperCase()));
+  for (let i = 0; i < 50; i++) {
+    const code = `RW-${crypto.randomInt(100000, 1000000)}`;
+    if (!used.has(code)) return code;
+  }
+  return `RW-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+}
+
+function buildLoyaltySummary(data: ReturnType<typeof db.getRaw>, userId: string, isFrozen = false): LoyaltyPointsSummary {
+  ensureLoyaltyContainers(data);
+  const settings = data.loyaltySettings;
+  const ledgerBalance = getLedgerBalance(data, userId);
+  const storedBalance = getStoredBalance(data, userId);
+  const lifetimePoints = getLifetimeEarnedPoints(data, userId);
+  const tierInfo = computeTierFromLifetime(lifetimePoints, settings);
+  const { earnedToday, earnedThisMonth } = getEarnedWindowTotals(data, userId);
+
+  const history = data.loyaltyTransactions
+    .filter((tx) => tx.ownerKey === userId || tx.userId === userId)
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+  const ledger = data.loyaltyLedger
+    .filter((e) => e.userId === userId)
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+  const storeMap = new Map<
+    string,
+    { supermarketId: string; supermarketName: string; points: number; completedCheckouts: number }
+  >();
+
+  for (const tx of history) {
+    const cur = storeMap.get(tx.supermarketId);
+    if (cur) {
+      cur.points += tx.pointsEarned;
+      cur.completedCheckouts += 1;
+    } else {
+      storeMap.set(tx.supermarketId, {
+        supermarketId: tx.supermarketId,
+        supermarketName: tx.supermarketName,
+        points: tx.pointsEarned,
+        completedCheckouts: 1,
+      });
+    }
   }
 
-  const newCard: LoyaltyCard = {
-    id: `loy_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
-    ownerKey,
-    userId: user?.id || null,
-    supermarketId: parsed.supermarket.id,
-    supermarketName: parsed.supermarket.name,
-    supermarketCode: parsed.supermarket.code,
-    cardNumber: parsed.cardNumber,
-    memberName: parsed.memberName || user?.name || 'Smart Cart Member',
-    tier: derivedTier,
-    points: derivedPoints,
-    rawPayload: qrPayload.trim(),
-    linkedAt: new Date().toISOString(),
+  return {
+    totalPoints: ledgerBalance,
+    storedBalance,
+    ledgerBalance,
+    lifetimePoints,
+    earnedToday,
+    earnedThisMonth,
+    tier: tierInfo.tier,
+    nextTier: tierInfo.nextTier,
+    pointsToNextTier: tierInfo.pointsToNextTier,
+    tierBonusPerCart: tierInfo.tierBonusPerCart,
+    earnRateKes: settings.pointsPerKesAmount,
+    bonusPointsPerVerifiedCart: settings.bonusPointsPerVerifiedCart,
+    minCartValueKes: settings.minCartValueKes,
+    dailyCapPoints: settings.dailyCapPoints,
+    monthlyCapPoints: settings.monthlyCapPoints,
+    maxOpenRedemptionsPerShopper: settings.maxOpenRedemptionsPerShopper,
+    isFrozen,
+    bySupermarket: Array.from(storeMap.values()).sort((a, b) => b.points - a.points),
+    history: history.slice(0, 50),
+    ledger: ledger.slice(0, 80),
   };
+}
 
-  data.loyaltyCards.unshift(newCard);
-  db.save();
+// Shopper Loyalty Points summary & ledger (never allows guest points farming)
+app.get('/api/shopper/loyalty-points', (req, res) => {
+  const user = getAuthUser(req);
+  const data = db.getRaw();
+  ensureLoyaltyContainers(data);
 
-  res.status(201).json({ success: true, updated: false, card: newCard });
+  if (!user || user.role !== 'shopper') {
+    return res.json(buildLoyaltySummary(data, '__guest__', false));
+  }
+
+  applyPointsExpiryIfEnabled(data, user.id);
+  const summary = buildLoyaltySummary(data, user.id, user.status === 'suspended');
+  res.json(summary);
 });
 
-app.delete('/api/shopper/loyalty/:id', (req, res) => {
-  const user = getAuthUser(req);
-  const ownerKey = getShopperOrGuestId(req, user);
+// Explicitly block client-supplied points claims / forged receipt claims
+app.post(['/api/shopper/loyalty/claim', '/api/shopper/receipts/import'], requireAuth, (req, res) => {
+  const user = (req as any).user as User;
+  logAudit(
+    user,
+    'LOYALTY_FORGED_CLAIM_BLOCKED',
+    'loyalty',
+    user.id,
+    'Blocked attempt to claim loyalty points directly from client or supplied receipt.'
+  );
+  res.status(403).json({
+    error: 'Loyalty points can only be awarded when a cashier verifies your cart at the supermarket till.',
+  });
+});
+
+// Public / Shopper Rewards Catalogue (active items only)
+app.get('/api/rewards', (req, res) => {
   const data = db.getRaw();
-  if (!data.loyaltyCards) data.loyaltyCards = [];
+  ensureLoyaltyContainers(data);
+  const activeRewards = data.rewards.filter((r) => r.status === 'active');
+  res.json(activeRewards);
+});
 
-  const idx = data.loyaltyCards.findIndex((c) => c.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Loyalty card not found.' });
+// Shopper: view own redemption orders
+app.get('/api/shopper/rewards/redemptions', requireAuth, requireRole(['shopper']), (req, res) => {
+  const user = (req as any).user as User;
+  const data = db.getRaw();
+  ensureLoyaltyContainers(data);
+  const orders = data.rewardRedemptions
+    .filter((r) => r.shopperId === user.id)
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  res.json(orders);
+});
 
-  const card = data.loyaltyCards[idx];
-  const isOwner = card.ownerKey === ownerKey || (user && card.userId === user.id);
-  if (!isOwner && user?.role !== 'admin') {
-    return res.status(403).json({ error: 'Forbidden: You cannot remove another shopper\'s loyalty card.' });
+// Shopper: Atomic Reward Redemption (check balance, check stock, reserve points, create order in one step)
+app.post('/api/shopper/rewards/redeem', redemptionRateLimiter, requireAuth, requireRole(['shopper']), (req, res) => {
+  const user = (req as any).user as User;
+  if (user.status !== 'active') {
+    return res.status(403).json({ error: 'Account suspended. Loyalty points are frozen and cannot be redeemed.' });
   }
 
-  data.loyaltyCards.splice(idx, 1);
+  const {
+    rewardId,
+    size,
+    color,
+    fulfillmentMethod,
+    branchId,
+    contactPhone,
+    deliveryAddress,
+  } = req.body || {};
+
+  const data = db.getRaw();
+  ensureLoyaltyContainers(data);
+  const settings = data.loyaltySettings;
+
+  // Validate reward
+  const reward = data.rewards.find((r) => r.id === rewardId && r.status === 'active');
+  if (!reward) {
+    return res.status(404).json({ error: 'Reward item is unavailable or not found.' });
+  }
+
+  // Validate size & stock for that size
+  const cleanSize = typeof size === 'string' ? size.trim() : '';
+  if (!cleanSize || !reward.sizes.includes(cleanSize)) {
+    return res.status(400).json({ error: 'Please choose a valid size for this reward.' });
+  }
+  const availableStock = Number(reward.stockBySize?.[cleanSize] ?? 0);
+  if (availableStock <= 0) {
+    return res.status(400).json({ error: `Size "${cleanSize}" is currently out of stock.` });
+  }
+
+  // Validate colour
+  const cleanColor = typeof color === 'string' && color.trim()
+    ? color.trim()
+    : (reward.colors[0] || 'Default');
+  if (reward.colors.length > 0 && !reward.colors.includes(cleanColor)) {
+    return res.status(400).json({ error: 'Please select an available colour.' });
+  }
+
+  // Validate fulfillment & minimal personal data
+  if (fulfillmentMethod !== 'collection' && fulfillmentMethod !== 'delivery') {
+    return res.status(400).json({ error: 'Choose either branch collection or delivery.' });
+  }
+
+  const cleanPhone = typeof contactPhone === 'string' && contactPhone.trim()
+    ? contactPhone.trim()
+    : (user.phone || '').trim();
+  if (cleanPhone.length < 6) {
+    return res.status(400).json({ error: 'A valid contact phone number is required.' });
+  }
+
+  let resolvedBranch: Branch | undefined;
+  let resolvedSm: Supermarket | undefined;
+  let cleanAddress: string | null = null;
+
+  if (fulfillmentMethod === 'collection') {
+    resolvedBranch = data.branches.find((b) => b.id === branchId && b.isActive);
+    if (!resolvedBranch) {
+      return res.status(400).json({ error: 'Please select an active participating branch for collection.' });
+    }
+    resolvedSm = data.supermarkets.find((s) => s.id === resolvedBranch!.supermarketId && s.status === 'active');
+    if (!resolvedSm) {
+      return res.status(400).json({ error: 'Selected supermarket is not active.' });
+    }
+  } else {
+    const rawAddr = typeof deliveryAddress === 'string' ? deliveryAddress.trim() : '';
+    if (rawAddr.length < 5) {
+      return res.status(400).json({ error: 'Please enter your delivery address.' });
+    }
+    cleanAddress = rawAddr.slice(0, 240);
+  }
+
+  // Check max open redemptions per shopper
+  const openRedemptionsCount = data.rewardRedemptions.filter(
+    (o) =>
+      o.shopperId === user.id &&
+      (o.status === 'requested' || o.status === 'approved' || o.status === 'ready' || o.status === 'dispatched')
+  ).length;
+
+  if (openRedemptionsCount >= Math.max(1, settings.maxOpenRedemptionsPerShopper)) {
+    return res.status(429).json({
+      error: `You have reached the limit of ${settings.maxOpenRedemptionsPerShopper} open reward redemptions. Wait for existing orders to finish before placing another.`,
+    });
+  }
+
+  // Apply expiry if enabled before checking balance
+  applyPointsExpiryIfEnabled(data, user.id);
+
+  // Critical atomic section (synchronous): verify balance >= cost, reserve points, create order
+  const ledgerBalance = getLedgerBalance(data, user.id);
+  const storedBalance = getStoredBalance(data, user.id);
+  const effectiveBalance = Math.min(ledgerBalance, storedBalance);
+
+  if (effectiveBalance < reward.pointsCost) {
+    return res.status(400).json({
+      error: `Not enough points. You need ${reward.pointsCost - effectiveBalance} more points.`,
+      pointsNeeded: reward.pointsCost - effectiveBalance,
+    });
+  }
+
+  const now = new Date().toISOString();
+  const orderId = `red_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+  const referenceCode = generateRedemptionReference(data.rewardRedemptions);
+
+  appendLedgerEntry(data, {
+    userId: user.id,
+    type: 'redemption_reserve',
+    amount: -reward.pointsCost,
+    reason: `Reserved for ${reward.name} (${cleanSize}, ${cleanColor}) · Ref ${referenceCode}`,
+    redemptionId: orderId,
+    branchId: resolvedBranch?.id ?? null,
+    branchName: resolvedBranch?.name ?? null,
+    supermarketId: resolvedSm?.id ?? null,
+    supermarketName: resolvedSm?.name ?? null,
+    createdByUserId: user.id,
+  });
+
+  const newOrder: RewardRedemptionOrder = {
+    id: orderId,
+    referenceCode,
+    shopperId: user.id,
+    shopperName: user.name,
+    shopperEmail: user.email,
+    rewardId: reward.id,
+    rewardName: reward.name,
+    rewardImageUrl: reward.imageUrl,
+    pointsCost: reward.pointsCost,
+    unitCostKes: reward.unitCostKes,
+    size: cleanSize,
+    color: cleanColor,
+    fulfillmentMethod,
+    branchId: resolvedBranch?.id ?? null,
+    branchName: resolvedBranch?.name ?? null,
+    supermarketName: resolvedSm?.name ?? null,
+    contactPhone: cleanPhone,
+    deliveryAddress: cleanAddress,
+    status: 'requested',
+    stockDecreased: false,
+    pointsRefunded: false,
+    notificationMessage: `Redemption ${referenceCode} requested. ${reward.pointsCost} points reserved awaiting admin review.`,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  data.rewardRedemptions.unshift(newOrder);
+
+  logAudit(
+    user,
+    'REWARD_REDEMPTION_REQUESTED',
+    'redemption',
+    orderId,
+    `Shopper ${user.email} redeemed ${reward.pointsCost} pts for ${reward.name} (${cleanSize}, ${cleanColor}) [${fulfillmentMethod}] Ref ${referenceCode}`
+  );
   db.save();
+
+  res.json({
+    success: true,
+    order: newOrder,
+    summary: buildLoyaltySummary(data, user.id, false),
+  });
+});
+
+// Admin: Get & Update Loyalty Settings
+app.get('/api/admin/loyalty/settings', requireAuth, requireRole(['admin']), (req, res) => {
+  const data = db.getRaw();
+  ensureLoyaltyContainers(data);
+  res.json(data.loyaltySettings);
+});
+
+app.put('/api/admin/loyalty/settings', requireAuth, requireRole(['admin']), (req, res) => {
+  const adminUser = (req as any).user as User;
+  const data = db.getRaw();
+  ensureLoyaltyContainers(data);
+
+  const body = req.body || {};
+  const next: LoyaltySettings = {
+    pointsPerKesAmount: Math.max(1, Math.round(Number(body.pointsPerKesAmount ?? data.loyaltySettings.pointsPerKesAmount))),
+    bonusPointsPerVerifiedCart: Math.max(0, Math.round(Number(body.bonusPointsPerVerifiedCart ?? data.loyaltySettings.bonusPointsPerVerifiedCart))),
+    minCartValueKes: Math.max(0, Math.round(Number(body.minCartValueKes ?? data.loyaltySettings.minCartValueKes))),
+    dailyCapPoints: Math.max(0, Math.round(Number(body.dailyCapPoints ?? data.loyaltySettings.dailyCapPoints))),
+    monthlyCapPoints: Math.max(0, Math.round(Number(body.monthlyCapPoints ?? data.loyaltySettings.monthlyCapPoints))),
+    maxOpenRedemptionsPerShopper: Math.max(1, Math.round(Number(body.maxOpenRedemptionsPerShopper ?? data.loyaltySettings.maxOpenRedemptionsPerShopper))),
+    pointsExpiryEnabled: Boolean(body.pointsExpiryEnabled ?? data.loyaltySettings.pointsExpiryEnabled),
+    pointsExpiryDays: Math.max(1, Math.round(Number(body.pointsExpiryDays ?? data.loyaltySettings.pointsExpiryDays))),
+    tierThresholds: {
+      silver: Math.max(10, Math.round(Number(body.tierThresholds?.silver ?? data.loyaltySettings.tierThresholds.silver))),
+      gold: Math.max(20, Math.round(Number(body.tierThresholds?.gold ?? data.loyaltySettings.tierThresholds.gold))),
+    },
+    tierBonuses: {
+      bronze: Math.max(0, Math.round(Number(body.tierBonuses?.bronze ?? data.loyaltySettings.tierBonuses.bronze))),
+      silver: Math.max(0, Math.round(Number(body.tierBonuses?.silver ?? data.loyaltySettings.tierBonuses.silver))),
+      gold: Math.max(0, Math.round(Number(body.tierBonuses?.gold ?? data.loyaltySettings.tierBonuses.gold))),
+    },
+  };
+
+  if (next.tierThresholds.gold <= next.tierThresholds.silver) {
+    next.tierThresholds.gold = next.tierThresholds.silver + 100;
+  }
+
+  data.loyaltySettings = next;
+  logAudit(
+    adminUser,
+    'LOYALTY_SETTINGS_UPDATED',
+    'loyalty',
+    'settings',
+    `Admin updated loyalty rules: 1 pt/KES ${next.pointsPerKesAmount}, bonus=${next.bonusPointsPerVerifiedCart}, minCart=KES ${next.minCartValueKes}, dailyCap=${next.dailyCapPoints}, monthlyCap=${next.monthlyCapPoints}, maxOpen=${next.maxOpenRedemptionsPerShopper}`
+  );
+  db.save();
+
+  res.json(next);
+});
+
+// Admin: Reversal of points for an already verified/completed cart
+app.post('/api/admin/carts/:id/reverse-points', requireAuth, requireRole(['admin']), (req, res) => {
+  const adminUser = (req as any).user as User;
+  const data = db.getRaw();
+  const cart = data.carts.find((c) => c.id === req.params.id);
+  if (!cart) return res.status(404).json({ error: 'Cart not found' });
+
+  const reason = typeof req.body?.reason === 'string' && req.body.reason.trim()
+    ? req.body.reason.trim()
+    : 'Admin fraud / audit reversal';
+
+  const reversed = reversePointsForCart(data, cart, adminUser, reason);
+  cart.status = 'flagged';
+  cart.mismatchNotes = reason;
+  cart.updatedAt = new Date().toISOString();
+  db.save();
+
+  res.json({ success: true, cart, reversedPoints: reversed });
+});
+
+// Admin: Rewards Catalogue CRUD (admin only; owners/staff/shoppers get 403)
+app.get('/api/admin/rewards', requireAuth, requireRole(['admin']), (req, res) => {
+  const data = db.getRaw();
+  ensureLoyaltyContainers(data);
+  res.json(data.rewards);
+});
+
+app.post('/api/admin/rewards', requireAuth, requireRole(['admin']), (req, res) => {
+  const adminUser = (req as any).user as User;
+  const { name, nameSw, description, descriptionSw, imageUrl, pointsCost, unitCostKes, colors, sizes, stockBySize, status } = req.body || {};
+
+  if (!name || typeof name !== 'string' || !name.trim()) {
+    return res.status(400).json({ error: 'Reward name is required.' });
+  }
+  const cost = Number(pointsCost);
+  if (!Number.isFinite(cost) || cost < 1) {
+    return res.status(400).json({ error: 'Points cost must be at least 1.' });
+  }
+
+  const parsedSizes: string[] = Array.isArray(sizes) && sizes.length > 0
+    ? sizes.map((s: any) => String(s).trim()).filter(Boolean)
+    : ['S', 'M', 'L', 'XL', 'XXL'];
+  const parsedColors: string[] = Array.isArray(colors) && colors.length > 0
+    ? colors.map((c: any) => String(c).trim()).filter(Boolean)
+    : ['Emerald Green'];
+
+  const normalizedStock: Record<string, number> = {};
+  for (const sz of parsedSizes) {
+    normalizedStock[sz] = Math.max(0, Math.round(Number(stockBySize?.[sz] ?? 0)));
+  }
+
+  const now = new Date().toISOString();
+  const item: RewardItem = {
+    id: `rew_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
+    name: name.trim(),
+    nameSw: typeof nameSw === 'string' && nameSw.trim() ? nameSw.trim() : undefined,
+    description: typeof description === 'string' ? description.trim() : '',
+    descriptionSw: typeof descriptionSw === 'string' && descriptionSw.trim() ? descriptionSw.trim() : undefined,
+    imageUrl: typeof imageUrl === 'string' && imageUrl.trim() ? imageUrl.trim() : '/images/rewards/smartcart-tshirt.svg',
+    pointsCost: Math.round(cost),
+    unitCostKes: Math.max(0, Math.round(Number(unitCostKes || 0))),
+    colors: parsedColors,
+    sizes: parsedSizes,
+    stockBySize: normalizedStock,
+    status: status === 'hidden' ? 'hidden' : 'active',
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  const data = db.getRaw();
+  ensureLoyaltyContainers(data);
+  data.rewards.unshift(item);
+
+  logAudit(adminUser, 'REWARD_CREATED', 'reward', item.id, `Created reward "${item.name}" (${item.pointsCost} pts)`);
+  db.save();
+
+  res.json(item);
+});
+
+app.put('/api/admin/rewards/:id', requireAuth, requireRole(['admin']), (req, res) => {
+  const adminUser = (req as any).user as User;
+  const data = db.getRaw();
+  ensureLoyaltyContainers(data);
+  const reward = data.rewards.find((r) => r.id === req.params.id);
+  if (!reward) return res.status(404).json({ error: 'Reward not found.' });
+
+  const { name, nameSw, description, descriptionSw, imageUrl, pointsCost, unitCostKes, colors, sizes, stockBySize, status } = req.body || {};
+
+  if (name !== undefined && typeof name === 'string' && name.trim()) reward.name = name.trim();
+  if (nameSw !== undefined) reward.nameSw = typeof nameSw === 'string' && nameSw.trim() ? nameSw.trim() : undefined;
+  if (description !== undefined && typeof description === 'string') reward.description = description.trim();
+  if (descriptionSw !== undefined) reward.descriptionSw = typeof descriptionSw === 'string' && descriptionSw.trim() ? descriptionSw.trim() : undefined;
+  if (imageUrl !== undefined && typeof imageUrl === 'string' && imageUrl.trim()) reward.imageUrl = imageUrl.trim();
+  if (pointsCost !== undefined) {
+    const cost = Number(pointsCost);
+    if (!Number.isFinite(cost) || cost < 1) return res.status(400).json({ error: 'Points cost must be at least 1.' });
+    reward.pointsCost = Math.round(cost);
+  }
+  if (unitCostKes !== undefined) reward.unitCostKes = Math.max(0, Math.round(Number(unitCostKes || 0)));
+  if (Array.isArray(colors) && colors.length > 0) {
+    reward.colors = colors.map((c: any) => String(c).trim()).filter(Boolean);
+  }
+  if (Array.isArray(sizes) && sizes.length > 0) {
+    reward.sizes = sizes.map((s: any) => String(s).trim()).filter(Boolean);
+  }
+  if (stockBySize && typeof stockBySize === 'object') {
+    const nextStock: Record<string, number> = {};
+    for (const sz of reward.sizes) {
+      nextStock[sz] = Math.max(0, Math.round(Number(stockBySize[sz] ?? reward.stockBySize[sz] ?? 0)));
+    }
+    reward.stockBySize = nextStock;
+  }
+  if (status === 'active' || status === 'hidden') {
+    reward.status = status;
+  }
+  reward.updatedAt = new Date().toISOString();
+
+  logAudit(adminUser, 'REWARD_UPDATED', 'reward', reward.id, `Updated reward "${reward.name}" (${reward.pointsCost} pts, status=${reward.status})`);
+  db.save();
+
+  res.json(reward);
+});
+
+app.delete('/api/admin/rewards/:id', requireAuth, requireRole(['admin']), (req, res) => {
+  const adminUser = (req as any).user as User;
+  const data = db.getRaw();
+  ensureLoyaltyContainers(data);
+  const idx = data.rewards.findIndex((r) => r.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Reward not found.' });
+
+  const reward = data.rewards[idx];
+  const hasOpenOrders = data.rewardRedemptions.some(
+    (o) => o.rewardId === reward.id && (o.status === 'requested' || o.status === 'approved' || o.status === 'ready' || o.status === 'dispatched')
+  );
+  if (hasOpenOrders) {
+    return res.status(400).json({ error: 'Cannot delete a reward that has open redemption orders. Hide it instead.' });
+  }
+
+  data.rewards.splice(idx, 1);
+  logAudit(adminUser, 'REWARD_DELETED', 'reward', reward.id, `Deleted reward "${reward.name}"`);
+  db.save();
+
   res.json({ success: true });
+});
+
+function computeAdminLoyaltyTotals(data: ReturnType<typeof db.getRaw>) {
+  ensureLoyaltyContainers(data);
+  let pointsIssued = 0;
+  let pointsReversed = 0;
+  let pointsExpired = 0;
+  for (const e of data.loyaltyLedger) {
+    if (e.type === 'earn' || (e.type === 'adjustment' && e.amount > 0)) {
+      pointsIssued += e.amount;
+    } else if (e.type === 'reversal') {
+      pointsReversed += Math.abs(e.amount);
+    } else if (e.type === 'expiry') {
+      pointsExpired += Math.abs(e.amount);
+    }
+  }
+
+  const pointsRedeemed = data.rewardRedemptions
+    .filter((o) => o.status !== 'cancelled')
+    .reduce((sum, o) => sum + o.pointsCost, 0);
+
+  const pointsOutstanding = Object.values(data.loyaltyBalances).reduce((s, b) => s + Math.max(0, b), 0);
+
+  const currentMonthPrefix = new Date().toISOString().slice(0, 7);
+  const fulfilledThisMonth = data.rewardRedemptions.filter(
+    (o) => o.status === 'completed' && (o.updatedAt || o.createdAt).startsWith(currentMonthPrefix)
+  );
+  const fulfilledCostThisMonthKes = fulfilledThisMonth.reduce((sum, o) => sum + (o.unitCostKes || 0), 0);
+
+  return {
+    pointsIssued: Math.max(0, pointsIssued - pointsReversed),
+    pointsRedeemed,
+    pointsOutstanding,
+    pointsExpired,
+    fulfilledCountThisMonth: fulfilledThisMonth.length,
+    fulfilledCostThisMonthKes,
+  };
+}
+
+// Admin: Rewards Orders Queue + Totals
+app.get('/api/admin/redemptions', requireAuth, requireRole(['admin']), (req, res) => {
+  const data = db.getRaw();
+  ensureLoyaltyContainers(data);
+  const statusFilter = (req.query.status as string) || '';
+  const q = ((req.query.q as string) || '').trim().toLowerCase();
+
+  let orders = [...data.rewardRedemptions];
+  if (statusFilter && statusFilter !== 'all') {
+    orders = orders.filter((o) => o.status === statusFilter);
+  }
+  if (q) {
+    orders = orders.filter(
+      (o) =>
+        o.referenceCode.toLowerCase().includes(q) ||
+        o.shopperName.toLowerCase().includes(q) ||
+        o.shopperEmail.toLowerCase().includes(q) ||
+        o.contactPhone.toLowerCase().includes(q) ||
+        o.rewardName.toLowerCase().includes(q)
+    );
+  }
+
+  orders.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+  res.json({
+    orders,
+    totals: computeAdminLoyaltyTotals(data),
+  });
+});
+
+// Admin: Approve, Reject/Cancel, Mark Ready/Dispatched, or Complete a Redemption Order
+app.put('/api/admin/redemptions/:id/status', requireAuth, requireRole(['admin']), (req, res) => {
+  const adminUser = (req as any).user as User;
+  const { status, reason } = req.body || {};
+  const allowed: RedemptionStatus[] = ['approved', 'ready', 'dispatched', 'completed', 'cancelled'];
+  if (!allowed.includes(status)) {
+    return res.status(400).json({ error: 'Invalid redemption status.' });
+  }
+
+  const data = db.getRaw();
+  ensureLoyaltyContainers(data);
+  const order = data.rewardRedemptions.find((o) => o.id === req.params.id);
+  if (!order) return res.status(404).json({ error: 'Redemption order not found.' });
+
+  if (order.status === 'completed' || order.status === 'cancelled') {
+    return res.status(400).json({ error: `Order ${order.referenceCode} is already ${order.status} and cannot be changed.` });
+  }
+
+  const reward = data.rewards.find((r) => r.id === order.rewardId);
+  const now = new Date().toISOString();
+
+  if (status === 'approved') {
+    if (order.status !== 'requested') {
+      return res.status(400).json({ error: 'Only requested orders can be approved.' });
+    }
+    if (!reward) {
+      return res.status(404).json({ error: 'Reward item no longer exists in catalogue.' });
+    }
+    const curStock = Number(reward.stockBySize?.[order.size] ?? 0);
+    if (curStock <= 0) {
+      return res.status(400).json({ error: `Size "${order.size}" is out of stock; cannot approve.` });
+    }
+    reward.stockBySize[order.size] = curStock - 1;
+    reward.updatedAt = now;
+    order.stockDecreased = true;
+    order.status = 'approved';
+    order.notificationMessage = `Your reward ${order.referenceCode} (${order.rewardName}, ${order.size}) has been approved!`;
+  } else if (status === 'ready') {
+    if (order.status !== 'approved') {
+      return res.status(400).json({ error: 'Approve the order before marking it ready for collection.' });
+    }
+    order.status = 'ready';
+    order.notificationMessage = `Your reward ${order.referenceCode} is ready for collection${order.branchName ? ` at ${order.branchName}` : ''}.`;
+  } else if (status === 'dispatched') {
+    if (order.status !== 'approved') {
+      return res.status(400).json({ error: 'Approve the order before marking it dispatched.' });
+    }
+    order.status = 'dispatched';
+    order.notificationMessage = `Your reward ${order.referenceCode} has been dispatched for delivery.`;
+  } else if (status === 'completed') {
+    if (order.status !== 'approved' && order.status !== 'ready' && order.status !== 'dispatched') {
+      return res.status(400).json({ error: 'Order must be approved before marking completed.' });
+    }
+    order.status = 'completed';
+    order.notificationMessage = `Reward ${order.referenceCode} fulfilled and completed. Thank you for shopping with Smart Cart!`;
+  } else if (status === 'cancelled') {
+    const cleanReason = typeof reason === 'string' && reason.trim()
+      ? reason.trim()
+      : 'Rejected / cancelled by platform administrator';
+
+    // Refund reserved points ONCE
+    if (!order.pointsRefunded) {
+      appendLedgerEntry(data, {
+        userId: order.shopperId,
+        type: 'redemption_refund',
+        amount: order.pointsCost,
+        reason: `Refund for cancelled reward ${order.referenceCode}: ${cleanReason}`,
+        redemptionId: order.id,
+        createdByUserId: adminUser.id,
+      });
+      order.pointsRefunded = true;
+    }
+
+    // Restore stock ONCE if it had been decreased upon approval
+    if (order.stockDecreased && reward) {
+      reward.stockBySize[order.size] = Number(reward.stockBySize?.[order.size] ?? 0) + 1;
+      reward.updatedAt = now;
+      order.stockDecreased = false;
+    }
+
+    order.status = 'cancelled';
+    order.rejectionReason = cleanReason;
+    order.notificationMessage = `Order ${order.referenceCode} was cancelled (${cleanReason}). ${order.pointsCost} points returned to your balance.`;
+  }
+
+  order.updatedAt = now;
+
+  logAudit(
+    adminUser,
+    `REDEMPTION_${status.toUpperCase()}`,
+    'redemption',
+    order.id,
+    `Order ${order.referenceCode} (${order.shopperEmail}, ${order.rewardName} ${order.size}) -> ${status}${order.rejectionReason ? `: ${order.rejectionReason}` : ''}`
+  );
+  db.save();
+
+  res.json({
+    success: true,
+    order,
+    totals: computeAdminLoyaltyTotals(data),
+  });
+});
+
+// Admin: CSV exports for each loyalty metric & orders queue
+app.get('/api/admin/redemptions/export-csv', requireAuth, requireRole(['admin']), (req, res) => {
+  const adminUser = (req as any).user as User;
+  const data = db.getRaw();
+  ensureLoyaltyContainers(data);
+  const type = ((req.query.type as string) || 'orders').toLowerCase();
+  const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+
+  let csv = '';
+  let filename = 'loyalty_orders.csv';
+
+  if (type === 'issued') {
+    filename = 'loyalty_points_issued.csv';
+    const rows = data.loyaltyLedger.filter((e) => e.type === 'earn' || e.type === 'reversal' || e.type === 'adjustment');
+    csv =
+      'entry_id,user_id,type,points_amount,balance_after,cart_code,supermarket,branch,reason,created_at\n' +
+      rows
+        .map((e) =>
+          [e.id, e.userId, e.type, e.amount, e.balanceAfter, e.cartShortCode || '', e.supermarketName || '', e.branchName || '', e.reason, e.createdAt]
+            .map(esc)
+            .join(',')
+        )
+        .join('\n');
+  } else if (type === 'redeemed') {
+    filename = 'loyalty_points_redeemed.csv';
+    const rows = data.rewardRedemptions.filter((o) => o.status !== 'cancelled');
+    csv =
+      'reference_code,shopper_name,shopper_email,reward_name,size,color,points_cost,fulfillment_method,status,created_at\n' +
+      rows
+        .map((o) =>
+          [o.referenceCode, o.shopperName, o.shopperEmail, o.rewardName, o.size, o.color, o.pointsCost, o.fulfillmentMethod, o.status, o.createdAt]
+            .map(esc)
+            .join(',')
+        )
+        .join('\n');
+  } else if (type === 'outstanding') {
+    filename = 'loyalty_points_outstanding.csv';
+    const shoppers = data.users.filter((u) => u.role === 'shopper');
+    csv =
+      'user_id,name,email,status,stored_balance,ledger_balance,lifetime_earned\n' +
+      shoppers
+        .map((u) =>
+          [
+            u.id,
+            u.name,
+            u.email,
+            u.status,
+            getStoredBalance(data, u.id),
+            getLedgerBalance(data, u.id),
+            getLifetimeEarnedPoints(data, u.id),
+          ]
+            .map(esc)
+            .join(',')
+        )
+        .join('\n');
+  } else if (type === 'fulfilled_cost') {
+    filename = 'loyalty_fulfilled_cost_this_month.csv';
+    const monthPrefix = new Date().toISOString().slice(0, 7);
+    const rows = data.rewardRedemptions.filter(
+      (o) => o.status === 'completed' && (o.updatedAt || o.createdAt).startsWith(monthPrefix)
+    );
+    csv =
+      'reference_code,reward_name,size,color,unit_cost_kes,points_cost,shopper_email,completed_at\n' +
+      rows
+        .map((o) =>
+          [o.referenceCode, o.rewardName, o.size, o.color, o.unitCostKes, o.pointsCost, o.shopperEmail, o.updatedAt]
+            .map(esc)
+            .join(',')
+        )
+        .join('\n');
+  } else {
+    filename = 'loyalty_redemption_orders.csv';
+    csv =
+      'reference_code,shopper_name,shopper_email,contact_phone,reward_name,size,color,points_cost,unit_cost_kes,fulfillment,branch,delivery_address,status,rejection_reason,created_at,updated_at\n' +
+      data.rewardRedemptions
+        .map((o) =>
+          [
+            o.referenceCode,
+            o.shopperName,
+            o.shopperEmail,
+            o.contactPhone,
+            o.rewardName,
+            o.size,
+            o.color,
+            o.pointsCost,
+            o.unitCostKes,
+            o.fulfillmentMethod,
+            o.branchName || '',
+            o.deliveryAddress || '',
+            o.status,
+            o.rejectionReason || '',
+            o.createdAt,
+            o.updatedAt,
+          ]
+            .map(esc)
+            .join(',')
+        )
+        .join('\n');
+  }
+
+  logAudit(adminUser, 'LOYALTY_CSV_EXPORTED', 'loyalty', type, `Exported loyalty CSV report: ${type}`);
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.send(csv);
 });
 
 // ==========================================
@@ -4449,7 +5537,7 @@ async function startServer() {
     const indexFile = path.resolve(distDir, 'index.html');
     app.use(express.static(distDir));
     app.get(
-      ['/login', '/store/login', '/staff/login', '/admin/login', '/admin/dashboard', '*'],
+      ['/login', '/store/login', '/staff/login', '/admin/login', '/admin/dashboard', '/about', '/receipts', '*'],
       (req, res, next) => {
         if (req.path.startsWith('/api/')) {
           return next();

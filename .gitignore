@@ -11,4 +11,4 @@ smartcart_db.json
 *.db.json.*.tmp
 smartcart_db.json.*.tmp
 data/
-
+.data/

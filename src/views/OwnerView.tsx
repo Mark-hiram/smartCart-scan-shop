@@ -1,6 +1,9 @@
+// Copyright (c) 2026 SmartCart Owner. All rights reserved.
+
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useTranslation } from '../utils/i18n';
+import { PortalBackgroundImage } from '../components/PortalBackgroundImage';
 import {
   Branch,
   User,
@@ -447,22 +450,23 @@ export const OwnerView: React.FC = () => {
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6">
       {/* Supermarket Banner */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-6 rounded-3xl bg-slate-900 text-white shadow-xl">
-        <div>
-          <span className="text-xs font-semibold text-emerald-400 uppercase tracking-widest">
+      <div className="portal-banner-surface relative overflow-hidden flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-6 rounded-3xl shadow-xl">
+        <PortalBackgroundImage portal="management" variant="banner" priority />
+        <div className="relative z-10">
+          <span className="text-xs font-bold text-amber-300 uppercase tracking-widest">
             {t.chainOverview}
           </span>
-          <h1 className="text-2xl font-black mt-0.5">
+          <h1 className="text-2xl font-black text-white mt-0.5">
             {supermarket?.name}
           </h1>
-          <p className="text-xs text-slate-400 mt-1">
+          <p className="text-xs text-blue-100 mt-1">
             {branches.length} Branches · {staff.length} Staff Accounts · {products.length} Registered Products
           </p>
         </div>
 
         {/* Low Stock Badge */}
         {lowStockCount > 0 && (
-          <div className="flex items-center gap-2.5 p-3 rounded-2xl bg-amber-500/20 border border-amber-500/30 text-amber-300">
+          <div className="relative z-10 flex items-center gap-2.5 p-3 rounded-2xl bg-amber-500/20 border border-amber-500/30 text-amber-300">
             <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0" />
             <div>
               <p className="text-xs font-bold leading-tight">
@@ -1772,7 +1776,7 @@ export const OwnerView: React.FC = () => {
                 rows={8}
                 value={csvContent}
                 onChange={(e) => setCsvContent(e.target.value)}
-                placeholder={`barcode,name,category,base_price,aisle,shelf,branch_price,stock,low_stock_threshold\n6161101234566,"Brookside Fresh Whole Milk 500ml",Dairy,65,1,A,60,45,10`}
+                placeholder={`barcode,name,category,base_price,aisle,shelf,branch_price,stock,low_stock_threshold\n1234567890123,"Sample Product",Category,100,1,A,95,50,10`}
                 className="w-full p-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 font-mono text-xs focus:outline-emerald-500"
               />
 

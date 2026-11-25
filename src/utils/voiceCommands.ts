@@ -1,3 +1,5 @@
+// Copyright (c) 2026 SmartCart Owner. All rights reserved.
+
 import { EnrichedProduct } from '../types';
 
 export type VoiceActionType = 'add' | 'remove' | 'price_check';

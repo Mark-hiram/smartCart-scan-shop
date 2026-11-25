@@ -1,3 +1,5 @@
+// Copyright (c) 2026 SmartCart Owner. All rights reserved.
+
 import React, { useState, useEffect } from 'react';
 import { BatteryCharging, BatteryFull, BatteryMedium, BatteryLow, BatteryWarning, Zap } from 'lucide-react';
 import { useTranslation } from '../utils/i18n';

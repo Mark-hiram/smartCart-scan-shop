@@ -1,7 +1,13 @@
+// Copyright (c) 2026 SmartCart Owner. All rights reserved.
+
 import React, { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useTranslation } from '../utils/i18n';
 import { PortalType } from '../types';
+import { ShopperHeroIllustration } from './Illustrations';
+import { SmartCartSignInLogo } from './SmartCartLogo';
+import { CopyrightBadge } from './CopyrightBadge';
+import { PortalBackgroundImage, usePreloadPortalSignInImage } from './PortalBackgroundImage';
 import {
   ShoppingCart,
   Store,
@@ -35,6 +41,8 @@ export const PortalLoginView: React.FC<PortalLoginViewProps> = ({
 }) => {
   const { login, register } = useAuth();
   const { t } = useTranslation();
+
+  usePreloadPortalSignInImage(portal);
 
   const [mode, setMode] = useState<'login' | 'register' | 'forgot' | 'apply'>('login');
   const [identifier, setIdentifier] = useState('');
@@ -202,24 +210,34 @@ export const PortalLoginView: React.FC<PortalLoginViewProps> = ({
   };
 
   return (
-    <div className="min-h-[85vh] flex items-center justify-center p-4">
-      <div className="w-full max-w-lg bg-white dark:bg-slate-900 rounded-3xl shadow-xl border border-slate-200 dark:border-slate-800 overflow-hidden">
-        {/* Portal Header Hero */}
-        <div className={`p-6 border-b ${portalMeta.themeBorder} ${portalMeta.themeBg} transition-colors`}>
-          <div className="flex items-center justify-between mb-3">
-            <span className={`text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full ${portalMeta.badgeColor}`}>
+    <div className="portal-login-canvas min-h-[82vh] flex items-center justify-center p-4 sm:py-8">
+      <PortalBackgroundImage portal={portal} variant="backdrop" priority />
+
+      <div className="relative z-10 w-full max-w-lg portal-surface-card bg-white dark:bg-slate-900 shadow-xl overflow-hidden">
+        {/* Portal Header Hero Banner */}
+        <div className="portal-banner-surface relative overflow-hidden p-5 sm:p-6 border-b border-white/10 transition-colors">
+          <PortalBackgroundImage portal={portal} variant="banner" />
+          <div className="relative z-10">
+          <div className="flex items-center justify-between mb-3 gap-2">
+            <span
+              className={`text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-lg border ${
+                portal === 'shopper'
+                  ? 'bg-white/20 text-white border-white/25'
+                  : 'bg-amber-400/20 text-amber-200 border-amber-300/35'
+              }`}
+            >
               {portalMeta.badge}
             </span>
 
             {/* Portal Switcher Tabs */}
-            <div className="flex items-center gap-1 bg-white/70 dark:bg-slate-800/80 p-1 rounded-xl border border-slate-200/60 dark:border-slate-700/60">
+            <div className="flex items-center gap-1 bg-slate-950/35 p-1 rounded-xl border border-white/15">
               <button
                 type="button"
                 onClick={() => onSwitchPortal('shopper')}
                 className={`p-1.5 rounded-lg text-xs transition ${
                   portal === 'shopper'
-                    ? 'bg-emerald-600 text-white shadow-xs'
-                    : 'text-slate-500 hover:text-slate-900'
+                    ? 'bg-emerald-500 text-white shadow-xs'
+                    : 'text-white/75 hover:text-white'
                 }`}
                 title={t.portalShopper}
               >
@@ -230,8 +248,8 @@ export const PortalLoginView: React.FC<PortalLoginViewProps> = ({
                 onClick={() => onSwitchPortal('staff')}
                 className={`p-1.5 rounded-lg text-xs transition ${
                   portal === 'staff'
-                    ? 'bg-blue-600 text-white shadow-xs'
-                    : 'text-slate-500 hover:text-slate-900'
+                    ? 'bg-amber-500 text-slate-950 shadow-xs'
+                    : 'text-white/75 hover:text-white'
                 }`}
                 title={t.portalStaff}
               >
@@ -242,8 +260,8 @@ export const PortalLoginView: React.FC<PortalLoginViewProps> = ({
                 onClick={() => onSwitchPortal('management')}
                 className={`p-1.5 rounded-lg text-xs transition ${
                   portal === 'management'
-                    ? 'bg-indigo-600 text-white shadow-xs'
-                    : 'text-slate-500 hover:text-slate-900'
+                    ? 'bg-amber-500 text-slate-950 shadow-xs'
+                    : 'text-white/75 hover:text-white'
                 }`}
                 title={t.portalManagement}
               >
@@ -252,26 +270,40 @@ export const PortalLoginView: React.FC<PortalLoginViewProps> = ({
             </div>
           </div>
 
-          <div className="flex items-center gap-3">
-            <div className="p-3 bg-white dark:bg-slate-900 rounded-2xl shadow-xs border border-slate-200/60 dark:border-slate-800">
-              {portalMeta.icon}
-            </div>
-            <div>
-              <h1 className="text-xl font-black text-slate-900 dark:text-white">
-                {portalMeta.title}
-              </h1>
-              <p className="text-xs text-slate-600 dark:text-slate-300 font-medium">
-                {portalMeta.subtitle}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="min-w-0">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 bg-white dark:bg-slate-900 rounded-2xl shadow-sm border border-white/20 shrink-0">
+                  {portalMeta.icon}
+                </div>
+                <div className="min-w-0">
+                  <h1 className="text-xl font-black text-white tracking-tight">
+                    {portalMeta.title}
+                  </h1>
+                  <p className="text-xs text-white/85 font-medium">
+                    {portalMeta.subtitle}
+                  </p>
+                </div>
+              </div>
+
+              <p className="text-xs text-white/80 mt-2.5 leading-relaxed">
+                {portalMeta.description}
               </p>
             </div>
-          </div>
 
-          <p className="text-xs text-slate-500 dark:text-slate-400 mt-2.5 leading-relaxed">
-            {portalMeta.description}
-          </p>
+            {portal === 'shopper' && (
+              <div className="self-center sm:self-auto shrink-0">
+                <ShopperHeroIllustration className="w-32 h-24 sm:w-40 sm:h-28" />
+              </div>
+            )}
+          </div>
+          </div>
         </div>
 
-        <div className="p-6 space-y-4">
+        <div className="p-6 space-y-4 bg-white dark:bg-slate-900">
+          {/* Centred Brand Logo Above Sign-In Form */}
+          <SmartCartSignInLogo />
+
           {/* Feedback Alerts */}
           {errorMsg && (
             <div className="p-3.5 rounded-2xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-xs text-rose-700 dark:text-rose-300 flex items-start gap-2">
@@ -803,6 +835,10 @@ export const PortalLoginView: React.FC<PortalLoginViewProps> = ({
                 <p className="text-[9px] text-slate-400">Owners</p>
               </button>
             </div>
+          </div>
+
+          <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex justify-center text-slate-600 dark:text-slate-400">
+            <CopyrightBadge />
           </div>
         </div>
       </div>

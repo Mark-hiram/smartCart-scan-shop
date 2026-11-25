@@ -1,3 +1,5 @@
+// Copyright (c) 2026 SmartCart Owner. All rights reserved.
+
 import React, { useState, useEffect, useMemo } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useTranslation } from '../utils/i18n';
@@ -6,21 +8,26 @@ import { ManualBarcodeModal } from '../components/ManualBarcodeModal';
 import { PriceCheckModal } from '../components/PriceCheckModal';
 import { CartCodeModal } from '../components/CartCodeModal';
 import { BudgetAlert } from '../components/BudgetAlert';
-import { LoyaltyQRScannerModal } from '../components/LoyaltyQRScannerModal';
+import { LoyaltyPointsModal } from '../components/LoyaltyPointsModal';
 import { BatteryStatus } from '../components/BatteryStatus';
 import { ShopperTab, BottomNav } from '../components/BottomNav';
 import { VoiceCartControl, VoiceCommandExecutionResult } from '../components/VoiceCartControl';
+import { CartSummaryCardModal } from '../components/CartSummaryCardModal';
+import { EmptyCartIllustration, EmptySearchIllustration } from '../components/Illustrations';
+import { PortalBackgroundImage } from '../components/PortalBackgroundImage';
+import { ShopperRewardsView } from '../components/ShopperRewardsView';
 import { ParsedVoiceCommand } from '../utils/voiceCommands';
 import { triggerPriceCheckHaptic, triggerScanSuccessHaptic } from '../utils/haptics';
 import {
   EnrichedProduct,
   Cart,
+  TransactionReceipt,
   CartItem,
   Product,
   Promotion,
   ShoppingList,
   ShoppingListItem,
-  LoyaltyCard,
+  LoyaltyPointsSummary,
   ProductHistoryEntry,
 } from '../types';
 import {
@@ -51,17 +58,29 @@ import {
   Lock,
   Unlock,
   X,
+  ReceiptText,
+  Search,
+  ChevronDown,
+  ChevronUp,
+  UserCheck,
+  Award,
 } from 'lucide-react';
 
 interface ShopperViewProps {
   onOpenStoreModal: () => void;
+  onRequestSignIn?: () => void;
+  initialTab?: ShopperTab;
 }
 
-export const ShopperView: React.FC<ShopperViewProps> = ({ onOpenStoreModal }) => {
+export const ShopperView: React.FC<ShopperViewProps> = ({
+  onOpenStoreModal,
+  onRequestSignIn,
+  initialTab = 'scan',
+}) => {
   const { branch, user, token } = useAuth();
   const { t, language } = useTranslation();
 
-  const [activeTab, setActiveTab] = useState<ShopperTab>('scan');
+  const [activeTab, setActiveTab] = useState<ShopperTab>(initialTab);
   const [products, setProducts] = useState<EnrichedProduct[]>([]);
   const [cart, setCart] = useState<Cart | null>(null);
   const [favourites, setFavourites] = useState<string[]>([]);
@@ -70,8 +89,9 @@ export const ShopperView: React.FC<ShopperViewProps> = ({ onOpenStoreModal }) =>
   const [isManualModalOpen, setIsManualModalOpen] = useState(false);
   const [isPriceCheckModalOpen, setIsPriceCheckModalOpen] = useState(false);
   const [isCartCodeModalOpen, setIsCartCodeModalOpen] = useState(false);
+  const [summaryCardCart, setSummaryCardCart] = useState<Cart | null>(null);
   const [isLoyaltyModalOpen, setIsLoyaltyModalOpen] = useState(false);
-  const [loyaltyCards, setLoyaltyCards] = useState<LoyaltyCard[]>([]);
+  const [loyaltySummary, setLoyaltySummary] = useState<LoyaltyPointsSummary | null>(null);
   const [priceCheckData, setPriceCheckData] = useState<{
     product: Product;
     effectivePrice: number;
@@ -84,8 +104,12 @@ export const ShopperView: React.FC<ShopperViewProps> = ({ onOpenStoreModal }) =>
   const [budgetInput, setBudgetInput] = useState<string>('');
   const [isEditingBudget, setIsEditingBudget] = useState(false);
 
-  // Shopper history & lists (Phase 2 + Shared Lists)
+  // Shopper history, receipts & lists
   const [history, setHistory] = useState<Cart[]>([]);
+  const [receipts, setReceipts] = useState<TransactionReceipt[]>([]);
+  const [isLoadingReceipts, setIsLoadingReceipts] = useState(false);
+  const [receiptSearch, setReceiptSearch] = useState('');
+  const [expandedReceiptIds, setExpandedReceiptIds] = useState<Record<string, boolean>>({});
   const [productHistory, setProductHistory] = useState<ProductHistoryEntry[]>([]);
   const [shoppingLists, setShoppingLists] = useState<ShoppingList[]>([]);
   const [selectedList, setSelectedList] = useState<ShoppingList | null>(null);
@@ -165,11 +189,14 @@ export const ShopperView: React.FC<ShopperViewProps> = ({ onOpenStoreModal }) =>
     return headers;
   };
 
-  // Fetch or initialize cart
-  const loadCart = async () => {
+  // Fetch or initialize cart (optionally preserving a specific cartId during checkout status polling)
+  const loadCart = async (specificCartId?: string) => {
     if (!branch) return;
     try {
-      const res = await fetch(`/api/shopper/cart?branchId=${branch.id}`, {
+      const query = specificCartId
+        ? `/api/shopper/cart?branchId=${branch.id}&cartId=${encodeURIComponent(specificCartId)}`
+        : `/api/shopper/cart?branchId=${branch.id}`;
+      const res = await fetch(query, {
         headers: getGuestHeaders(),
       });
       if (res.ok) {
@@ -208,15 +235,15 @@ export const ShopperView: React.FC<ShopperViewProps> = ({ onOpenStoreModal }) =>
     } catch (e) {}
   };
 
-  // Load linked loyalty cards
-  const loadLoyaltyCards = async () => {
+  // Load shopper loyalty points balance & history
+  const loadLoyaltyPoints = async () => {
     try {
-      const res = await fetch('/api/shopper/loyalty', {
+      const res = await fetch('/api/shopper/loyalty-points', {
         headers: getGuestHeaders(),
       });
       if (res.ok) {
-        const data = await res.json();
-        setLoyaltyCards(Array.isArray(data) ? data : []);
+        const data: LoyaltyPointsSummary = await res.json();
+        setLoyaltySummary(data);
       }
     } catch (e) {}
   };
@@ -257,6 +284,27 @@ export const ShopperView: React.FC<ShopperViewProps> = ({ onOpenStoreModal }) =>
         });
       }
     } catch (e) {}
+  };
+
+  // Fetch completed/verified transaction receipts for logged-in shopper
+  const loadReceipts = async () => {
+    if (!user || !token) {
+      setReceipts([]);
+      return;
+    }
+    setIsLoadingReceipts(true);
+    try {
+      const res = await fetch('/api/shopper/receipts', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setReceipts(Array.isArray(data?.receipts) ? data.receipts : []);
+      }
+    } catch (e) {
+    } finally {
+      setIsLoadingReceipts(false);
+    }
   };
 
   // Fetch shopper past purchases (supports both signed-in and guest shoppers)
@@ -339,6 +387,20 @@ export const ShopperView: React.FC<ShopperViewProps> = ({ onOpenStoreModal }) =>
   }, [branch]);
 
   useEffect(() => {
+    setActiveTab(initialTab);
+  }, [initialTab]);
+
+  useEffect(() => {
+    if (user && token) {
+      loadReceipts();
+      loadHistory();
+      loadProductHistory();
+    } else {
+      setReceipts([]);
+    }
+  }, [user?.id, token]);
+
+  useEffect(() => {
     if (branch) {
       loadBranchProducts();
       loadCart();
@@ -346,12 +408,13 @@ export const ShopperView: React.FC<ShopperViewProps> = ({ onOpenStoreModal }) =>
       loadShoppingLists();
       loadHistory();
       loadProductHistory();
-      loadLoyaltyCards();
+      loadLoyaltyPoints();
     }
   }, [branch, user?.id, token]);
 
   useEffect(() => {
     if (activeTab === 'history') {
+      loadReceipts();
       loadHistory();
       loadProductHistory();
     } else if (activeTab === 'lists') {
@@ -359,6 +422,8 @@ export const ShopperView: React.FC<ShopperViewProps> = ({ onOpenStoreModal }) =>
       loadFavourites();
       loadHistory();
       loadProductHistory();
+    } else if (activeTab === 'rewards') {
+      loadLoyaltyPoints();
     }
   }, [activeTab]);
 
@@ -1161,23 +1226,55 @@ export const ShopperView: React.FC<ShopperViewProps> = ({ onOpenStoreModal }) =>
         </div>
       )}
 
-      {/* Store Prompt if no branch selected */}
-      {!branch && (
-        <div className="p-6 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-md text-center mb-4">
-          <div className="w-14 h-14 rounded-2xl bg-emerald-100 dark:bg-emerald-950/60 text-emerald-600 flex items-center justify-center mx-auto mb-3">
-            <Store className="w-7 h-7" />
+      {/* Store Prompt Banner if no branch selected (except while viewing Past Receipts or Rewards) */}
+      {!branch && activeTab !== 'history' && activeTab !== 'rewards' && (
+        <div className="rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-md overflow-hidden mb-4">
+          <div className="portal-banner-surface relative overflow-hidden p-5 text-center text-white">
+            <PortalBackgroundImage portal="shopper" variant="banner" priority />
+            <div className="relative z-10">
+              <div className="w-12 h-12 rounded-2xl bg-white/15 border border-white/25 text-white flex items-center justify-center mx-auto mb-2.5">
+                <Store className="w-6 h-6" />
+              </div>
+              <h2 className="text-base font-extrabold text-white">
+                {t.selectSupermarket} &amp; {t.selectBranch}
+              </h2>
+              <p className="text-xs text-emerald-100 mt-1 max-w-xs mx-auto">
+                Choose your supermarket chain and branch to view local prices and start scanning items.
+              </p>
+            </div>
           </div>
-          <h2 className="text-base font-bold text-slate-900 dark:text-white mb-1">
-            {t.selectSupermarket} &amp; {t.selectBranch}
-          </h2>
-          <p className="text-xs text-slate-500 mb-4 max-w-xs mx-auto">
-            Choose your supermarket chain and branch to view local prices and start scanning items.
-          </p>
+          <div className="p-4 bg-white dark:bg-slate-900">
+            <button
+              onClick={onOpenStoreModal}
+              className="w-full py-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs transition shadow-sm"
+            >
+              {t.nearestBranch}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Shopper Active Store Hero Banner */}
+      {branch && activeTab !== 'history' && activeTab !== 'rewards' && (
+        <div className="portal-banner-surface relative overflow-hidden rounded-3xl p-4 sm:p-5 shadow-md mb-4 flex items-center justify-between gap-3">
+          <PortalBackgroundImage portal="shopper" variant="banner" priority />
+          <div className="relative z-10 min-w-0">
+            <span className="text-[11px] font-semibold text-emerald-100 uppercase tracking-wider block">
+              {t.activeStore}
+            </span>
+            <h2 className="text-base sm:text-lg font-extrabold text-white truncate">
+              {branch.name}
+            </h2>
+            <p className="text-[11px] text-emerald-50/90 truncate">
+              {branch.address}, {branch.city}
+            </p>
+          </div>
           <button
+            type="button"
             onClick={onOpenStoreModal}
-            className="w-full py-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs transition shadow-sm"
+            className="relative z-10 px-3 py-2 rounded-xl bg-white/15 hover:bg-white/25 border border-white/25 text-white text-xs font-semibold shrink-0 transition"
           >
-            {t.nearestBranch}
+            {t.changeBranch}
           </button>
         </div>
       )}
@@ -1194,43 +1291,43 @@ export const ShopperView: React.FC<ShopperViewProps> = ({ onOpenStoreModal }) =>
         </div>
       )}
 
-      {/* Store Loyalty Card QR Banner */}
+      {/* Loyalty Points Summary Banner */}
       {branch && (() => {
-        const activeLoyalty = loyaltyCards.find((c) => c.supermarketId === branch.supermarketId);
+        const totalPts = loyaltySummary?.totalPoints ?? 0;
+        const storePts =
+          loyaltySummary?.bySupermarket.find((s) => s.supermarketId === branch.supermarketId)?.points ?? 0;
+        const tierName =
+          loyaltySummary?.tier === 'Gold'
+            ? t.loyaltyTierGold
+            : loyaltySummary?.tier === 'Silver'
+            ? t.loyaltyTierSilver
+            : t.loyaltyTierBronze;
+
         return (
           <button
             type="button"
-            onClick={() => setIsLoyaltyModalOpen(true)}
-            className="w-full mb-4 p-3 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:border-emerald-400 transition flex items-center justify-between text-left shadow-xs"
+            onClick={() => {
+              void loadLoyaltyPoints();
+              setIsLoyaltyModalOpen(true);
+            }}
+            className="w-full mb-4 p-3 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:border-emerald-400 transition flex items-center justify-between gap-2 text-left shadow-xs"
           >
             <div className="flex items-center gap-2.5 min-w-0">
-              <div className="w-9 h-9 rounded-xl bg-amber-100 dark:bg-amber-950/60 text-amber-600 flex items-center justify-center shrink-0">
-                <QrCode className="w-4 h-4" />
+              <div className="w-9 h-9 rounded-xl bg-amber-100 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400 flex items-center justify-center shrink-0">
+                <Award className="w-4 h-4" />
               </div>
               <div className="min-w-0">
-                {activeLoyalty ? (
-                  <>
-                    <p className="text-xs font-bold text-slate-900 dark:text-white truncate">
-                      {activeLoyalty.supermarketName} · {activeLoyalty.tier}
-                    </p>
-                    <p className="text-[11px] text-emerald-600 dark:text-emerald-400 font-mono truncate">
-                      {activeLoyalty.cardNumber} · {activeLoyalty.points.toLocaleString()} pts
-                    </p>
-                  </>
-                ) : (
-                  <>
-                    <p className="text-xs font-bold text-slate-900 dark:text-white truncate">
-                      {t.loyaltyQrTitle}
-                    </p>
-                    <p className="text-[11px] text-slate-500 truncate">
-                      {t.loyaltyQrScanBtn}
-                    </p>
-                  </>
-                )}
+                <p className="text-xs font-bold text-slate-900 dark:text-white truncate">
+                  {t.loyaltyPointsTitle} · {tierName}
+                </p>
+                <p className="text-[11px] text-emerald-700 dark:text-emerald-400 font-mono truncate">
+                  {totalPts.toLocaleString()} {t.loyaltyPointsUnit}
+                  {storePts > 0 ? ` (${storePts.toLocaleString()} @ ${branch.name})` : ''}
+                </p>
               </div>
             </div>
             <span className="px-2.5 py-1 rounded-xl bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 text-[11px] font-bold shrink-0">
-              {activeLoyalty ? t.loyaltyLinkedBadge : t.loyaltyQrScanBtn}
+              {t.loyaltyViewDetailsBtn}
             </span>
           </button>
         );
@@ -1432,17 +1529,17 @@ export const ShopperView: React.FC<ShopperViewProps> = ({ onOpenStoreModal }) =>
               </div>
             </div>
           ) : (
-            <div className="p-8 text-center bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800">
-              <ShoppingBag className="w-12 h-12 text-slate-300 mx-auto mb-2" />
-              <h3 className="text-sm font-bold text-slate-900 dark:text-white mb-1">
+            <div className="p-8 text-center bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 space-y-3">
+              <EmptyCartIllustration className="w-32 h-24" />
+              <h3 className="text-sm font-bold text-slate-900 dark:text-white">
                 {t.emptyCartTitle}
               </h3>
-              <p className="text-xs text-slate-500 max-w-xs mx-auto mb-4">
+              <p className="text-xs text-slate-500 dark:text-slate-400 max-w-xs mx-auto">
                 {t.emptyCartDesc}
               </p>
               <button
                 onClick={() => setActiveTab('scan')}
-                className="px-4 py-2.5 rounded-xl bg-emerald-600 text-white font-semibold text-xs transition"
+                className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs transition"
               >
                 Start Scanning
               </button>
@@ -1990,18 +2087,27 @@ export const ShopperView: React.FC<ShopperViewProps> = ({ onOpenStoreModal }) =>
         </div>
       )}
 
-      {/* TAB 5: PAST HISTORY VIEW (PHASE 2 + PRODUCT HISTORY LIST BUILDER) */}
-      {branch && activeTab === 'history' && (
+      {/* TAB 5: PAST RECEIPTS & HISTORY VIEW (Accessible to logged-in shoppers even before branch picker) */}
+      {activeTab === 'history' && (
         <div className="space-y-5">
-          <div className="flex items-center justify-between">
-            <h2 className="text-lg font-bold text-slate-900 dark:text-white">
-              {t.navHistory}
-            </h2>
-            {history.length > 0 && (
+          <div className="portal-banner-surface relative overflow-hidden p-5 rounded-3xl shadow-md flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <PortalBackgroundImage portal="shopper" variant="banner" />
+            <div className="relative z-10">
+              <div className="flex items-center gap-2">
+                <ReceiptText className="w-5 h-5 text-emerald-200" />
+                <h2 className="text-lg font-extrabold text-white">
+                  {t.pastReceiptsTitle}
+                </h2>
+              </div>
+              <p className="text-xs text-emerald-100 mt-0.5">
+                {t.pastReceiptsSubtitle}
+              </p>
+            </div>
+            {user && (history.length > 0 || receipts.length > 0) && (
               <button
                 type="button"
-                onClick={() => openCreateListModal('previous_purchase', history[0]?.id)}
-                className="py-2 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold flex items-center gap-1.5 transition"
+                onClick={() => openCreateListModal('previous_purchase', (receipts[0] || history[0])?.id)}
+                className="relative z-10 self-start sm:self-auto py-2 px-3 rounded-xl bg-white/15 hover:bg-white/25 border border-white/25 text-white text-xs font-semibold flex items-center gap-1.5 transition"
               >
                 <ListChecks className="w-3.5 h-3.5" />
                 <span>{t.createList}</span>
@@ -2009,172 +2115,323 @@ export const ShopperView: React.FC<ShopperViewProps> = ({ onOpenStoreModal }) =>
             )}
           </div>
 
-          {/* Product History Quick Shared-List Builder */}
-          {productHistory.length > 0 && (
-            <div className="p-4 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-3">
-              <div className="flex items-center justify-between gap-2">
-                <div>
-                  <h3 className="text-xs font-bold text-slate-900 dark:text-white flex items-center gap-1.5">
-                    <History className="w-4 h-4 text-emerald-600" />
-                    <span>{t.createFromProductHistory}</span>
-                  </h3>
-                  <p className="text-[11px] text-slate-400 mt-0.5">{t.selectHistoryProducts}</p>
-                </div>
-                <div className="flex items-center gap-2 text-[11px] font-semibold">
+          {!user ? (
+            <div className="p-8 text-center bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-xs space-y-3">
+              <EmptySearchIllustration className="w-28 h-20" />
+              <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                {t.pastReceiptsTitle}
+              </h3>
+              <p className="text-xs text-slate-500 dark:text-slate-400 max-w-sm mx-auto leading-relaxed">
+                {t.receiptsSignInRequired}
+              </p>
+              {onRequestSignIn && (
+                <button
+                  type="button"
+                  onClick={onRequestSignIn}
+                  className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold transition shadow-sm"
+                >
+                  {t.receiptSignInBtn}
+                </button>
+              )}
+            </div>
+          ) : (
+            <>
+              {/* Search Past Receipts */}
+              <div className="relative">
+                <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-3" />
+                <input
+                  type="text"
+                  value={receiptSearch}
+                  onChange={(e) => setReceiptSearch(e.target.value)}
+                  placeholder={t.receiptSearchPlaceholder}
+                  className="w-full h-10 pl-10 pr-3 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-xs text-slate-900 dark:text-white focus:outline-emerald-500 shadow-xs"
+                />
+              </div>
+
+              {/* Completed Transaction Summaries */}
+              <div className="space-y-3">
+                {isLoadingReceipts && receipts.length === 0 ? (
+                  <div className="p-8 text-center bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 text-xs text-slate-500">
+                    Loading receipts...
+                  </div>
+                ) : (() => {
+                  const q = receiptSearch.trim().toLowerCase();
+                  const filteredReceipts = receipts.filter((r) => {
+                    if (!q) return true;
+                    return (
+                      r.shortCode.toLowerCase().includes(q) ||
+                      r.supermarketName.toLowerCase().includes(q) ||
+                      r.branchName.toLowerCase().includes(q) ||
+                      r.items.some((it) => it.name.toLowerCase().includes(q))
+                    );
+                  });
+
+                  if (filteredReceipts.length === 0) {
+                    return (
+                      <div className="p-8 text-center bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 space-y-2.5">
+                        <EmptySearchIllustration className="w-28 h-20" />
+                        <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                          {t.receiptEmptyTitle}
+                        </h3>
+                        <p className="text-xs text-slate-500 dark:text-slate-400 max-w-xs mx-auto">
+                          {t.receiptEmptyDesc}
+                        </p>
+                      </div>
+                    );
+                  }
+
+                  return filteredReceipts.map((r) => {
+                    const isExpanded = !!expandedReceiptIds[r.id];
+                    const timestamp = r.verifiedAt || r.updatedAt || r.createdAt;
+                    return (
+                      <article
+                        key={r.id}
+                        className="p-4 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-3"
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span className="text-xs font-mono font-bold text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/60 px-2 py-0.5 rounded-md">
+                                {r.shortCode}
+                              </span>
+                              <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded-md bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
+                                {r.status}
+                              </span>
+                            </div>
+                            <h3 className="text-sm font-bold text-slate-900 dark:text-white mt-1 truncate">
+                              {r.supermarketName} — {r.branchName}
+                            </h3>
+                            <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                              {new Date(timestamp).toLocaleDateString()} ·{' '}
+                              {new Date(timestamp).toLocaleTimeString([], {
+                                hour: '2-digit',
+                                minute: '2-digit',
+                              })}{' '}
+                              · {r.itemCount} {t.itemsCount}
+                            </p>
+                          </div>
+
+                          <div className="text-right shrink-0">
+                            <p className="text-[10px] text-slate-500 dark:text-slate-400">
+                              {t.totalSpent}
+                            </p>
+                            <p className="text-base font-black text-slate-900 dark:text-white tabular-nums">
+                              KES {r.finalTotal.toLocaleString()}
+                            </p>
+                            {r.totalDiscount > 0 && (
+                              <p className="text-[10px] font-semibold text-emerald-600 dark:text-emerald-400 tabular-nums">
+                                - KES {r.totalDiscount.toLocaleString()} saved
+                              </p>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-800/60 px-3 py-2 rounded-xl border border-slate-100 dark:border-slate-800">
+                          <span>{t.receiptNoPaymentNote}</span>
+                          {r.verifiedByName && (
+                            <span className="inline-flex items-center gap-1 font-medium text-slate-700 dark:text-slate-300">
+                              <UserCheck className="w-3 h-3 text-emerald-600" />
+                              {t.receiptVerifiedBy}: {r.verifiedByName}
+                            </span>
+                          )}
+                        </div>
+
+                        {/* Collapsible Line Items */}
+                        <div>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setExpandedReceiptIds((prev) => ({
+                                ...prev,
+                                [r.id]: !prev[r.id],
+                              }))
+                            }
+                            className="w-full py-1.5 px-3 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center justify-between transition"
+                          >
+                            <span>
+                              {isExpanded ? t.receiptHideItems : t.receiptShowItems} ({r.items.length})
+                            </span>
+                            {isExpanded ? (
+                              <ChevronUp className="w-4 h-4" />
+                            ) : (
+                              <ChevronDown className="w-4 h-4" />
+                            )}
+                          </button>
+
+                          {isExpanded && (
+                            <div className="mt-2 text-xs text-slate-700 dark:text-slate-300 divide-y divide-slate-100 dark:divide-slate-800 bg-slate-50 dark:bg-slate-800/40 p-3 rounded-2xl border border-slate-100 dark:border-slate-800">
+                              {r.items.map((it, idx) => (
+                                <div key={idx} className="py-1.5 flex justify-between gap-2 text-[11px]">
+                                  <span className="truncate">
+                                    {it.quantity}x {it.name}
+                                  </span>
+                                  <span className="font-mono font-semibold text-slate-600 dark:text-slate-300 shrink-0 tabular-nums">
+                                    KES {it.effectiveTotal.toLocaleString()}
+                                  </span>
+                                </div>
+                              ))}
+                              <div className="pt-2 mt-1 flex justify-between text-xs font-bold text-slate-900 dark:text-white">
+                                <span>{t.subtotal}</span>
+                                <span className="font-mono tabular-nums">
+                                  KES {r.subtotal.toLocaleString()}
+                                </span>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Actions */}
+                        <div className="pt-1 flex flex-wrap justify-end gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setSummaryCardCart(r)}
+                            className="py-2 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-50 text-slate-700 dark:text-slate-200 text-xs font-semibold flex items-center gap-1.5 transition active:scale-95"
+                          >
+                            <Share2 className="w-3.5 h-3.5 text-emerald-600" />
+                            <span>{t.summaryCardBtn}</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() =>
+                              openCreateListModal(
+                                'previous_purchase',
+                                r.id,
+                                undefined,
+                                `Restock (${r.shortCode})`
+                              )
+                            }
+                            className="py-2 px-3 rounded-xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 text-xs font-semibold flex items-center gap-1.5 transition active:scale-95"
+                          >
+                            <ListChecks className="w-3.5 h-3.5" />
+                            <span>{t.savePurchaseAsList}</span>
+                          </button>
+
+                          {branch && (
+                            <button
+                              type="button"
+                              onClick={() => handleReAddPastCart(r.id)}
+                              className="py-2 px-3.5 rounded-xl bg-slate-900 dark:bg-slate-800 hover:bg-slate-800 text-white text-xs font-semibold flex items-center gap-1.5 transition active:scale-95"
+                            >
+                              <RotateCcw className="w-3.5 h-3.5 text-emerald-400" />
+                              <span>{t.reAddCart}</span>
+                            </button>
+                          )}
+                        </div>
+                      </article>
+                    );
+                  });
+                })()}
+              </div>
+
+              {/* Product History Quick Shared-List Builder */}
+              {productHistory.length > 0 && (
+                <div className="p-4 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <div>
+                      <h3 className="text-xs font-bold text-slate-900 dark:text-white flex items-center gap-1.5">
+                        <History className="w-4 h-4 text-emerald-600" />
+                        <span>{t.createFromProductHistory}</span>
+                      </h3>
+                      <p className="text-[11px] text-slate-400 mt-0.5">{t.selectHistoryProducts}</p>
+                    </div>
+                    <div className="flex items-center gap-2 text-[11px] font-semibold">
+                      <button
+                        type="button"
+                        onClick={() => setQuickHistorySelection(productHistory.map((p) => p.barcode))}
+                        className="text-emerald-600 hover:underline"
+                      >
+                        {t.selectAllItems}
+                      </button>
+                      {quickHistorySelection.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setQuickHistorySelection([])}
+                          className="text-slate-400 hover:text-slate-600"
+                        >
+                          {t.clearSelection}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="max-h-52 overflow-y-auto space-y-1.5 pr-1">
+                    {productHistory.map((ph) => {
+                      const selected = quickHistorySelection.includes(ph.barcode);
+                      return (
+                        <label
+                          key={ph.barcode}
+                          className={`p-2.5 rounded-2xl border flex items-center justify-between gap-2 cursor-pointer transition ${
+                            selected
+                              ? 'border-emerald-400 bg-emerald-50/70 dark:bg-emerald-950/30'
+                              : 'border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-800/40'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <input
+                              type="checkbox"
+                              checked={selected}
+                              onChange={() => {
+                                setQuickHistorySelection((prev) =>
+                                  prev.includes(ph.barcode)
+                                    ? prev.filter((b) => b !== ph.barcode)
+                                    : [...prev, ph.barcode]
+                                );
+                              }}
+                              className="w-4 h-4 rounded text-emerald-600 shrink-0"
+                            />
+                            <div className="min-w-0">
+                              <p className="text-xs font-bold text-slate-900 dark:text-white truncate">
+                                {ph.name}
+                              </p>
+                              <p className="text-[10px] text-slate-400">
+                                {t.boughtTimes} {ph.purchaseCount}x · Aisle {ph.aisle}
+                              </p>
+                            </div>
+                          </div>
+                          <span className="text-xs font-mono font-bold text-emerald-600 shrink-0 tabular-nums">
+                            KES {ph.currentBranchPrice.toLocaleString()}
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+
                   <button
                     type="button"
-                    onClick={() => setQuickHistorySelection(productHistory.map((p) => p.barcode))}
-                    className="text-emerald-600 hover:underline"
+                    disabled={quickHistorySelection.length === 0}
+                    onClick={() =>
+                      openCreateListModal(
+                        'product_history',
+                        undefined,
+                        quickHistorySelection,
+                        `My Restock (${quickHistorySelection.length} items)`
+                      )
+                    }
+                    className="w-full py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition"
                   >
-                    {t.selectAllItems}
+                    <Share2 className="w-3.5 h-3.5" />
+                    <span>
+                      {t.savePurchaseAsList} ({quickHistorySelection.length})
+                    </span>
                   </button>
-                  {quickHistorySelection.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => setQuickHistorySelection([])}
-                      className="text-slate-400 hover:text-slate-600"
-                    >
-                      {t.clearSelection}
-                    </button>
-                  )}
                 </div>
-              </div>
-
-              <div className="max-h-52 overflow-y-auto space-y-1.5 pr-1">
-                {productHistory.map((ph) => {
-                  const selected = quickHistorySelection.includes(ph.barcode);
-                  return (
-                    <label
-                      key={ph.barcode}
-                      className={`p-2.5 rounded-2xl border flex items-center justify-between gap-2 cursor-pointer transition ${
-                        selected
-                          ? 'border-emerald-400 bg-emerald-50/70 dark:bg-emerald-950/30'
-                          : 'border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-800/40'
-                      }`}
-                    >
-                      <div className="flex items-center gap-2.5 min-w-0">
-                        <input
-                          type="checkbox"
-                          checked={selected}
-                          onChange={() => {
-                            setQuickHistorySelection((prev) =>
-                              prev.includes(ph.barcode)
-                                ? prev.filter((b) => b !== ph.barcode)
-                                : [...prev, ph.barcode]
-                            );
-                          }}
-                          className="w-4 h-4 rounded text-emerald-600 shrink-0"
-                        />
-                        <div className="min-w-0">
-                          <p className="text-xs font-bold text-slate-900 dark:text-white truncate">
-                            {ph.name}
-                          </p>
-                          <p className="text-[10px] text-slate-400">
-                            {t.boughtTimes} {ph.purchaseCount}x · Aisle {ph.aisle}
-                          </p>
-                        </div>
-                      </div>
-                      <span className="text-xs font-mono font-bold text-emerald-600 shrink-0 tabular-nums">
-                        KES {ph.currentBranchPrice.toLocaleString()}
-                      </span>
-                    </label>
-                  );
-                })}
-              </div>
-
-              <button
-                type="button"
-                disabled={quickHistorySelection.length === 0}
-                onClick={() =>
-                  openCreateListModal(
-                    'product_history',
-                    undefined,
-                    quickHistorySelection,
-                    `My Restock (${quickHistorySelection.length} items)`
-                  )
-                }
-                className="w-full py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition"
-              >
-                <Share2 className="w-3.5 h-3.5" />
-                <span>
-                  {t.savePurchaseAsList} ({quickHistorySelection.length})
-                </span>
-              </button>
-            </div>
+              )}
+            </>
           )}
-
-          <div className="space-y-3">
-            {history.length > 0 ? (
-              history.map((h) => (
-                <div
-                  key={h.id}
-                  className="p-4 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-2.5"
-                >
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <span className="text-xs font-mono font-bold text-emerald-600 bg-emerald-50 dark:bg-emerald-950/60 px-2 py-0.5 rounded-md">
-                        {h.shortCode}
-                      </span>
-                      <p className="text-[11px] text-slate-400 mt-1">
-                        {new Date(h.createdAt).toLocaleDateString()} at {new Date(h.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                      </p>
-                    </div>
-
-                    <div className="text-right">
-                      <p className="text-xs text-slate-400">{t.totalSpent}</p>
-                      <p className="text-sm font-black text-slate-900 dark:text-white tabular-nums">
-                        KES {h.finalTotal.toLocaleString()}
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* List of items in that past cart */}
-                  <div className="text-xs text-slate-600 dark:text-slate-300 divide-y divide-slate-100 dark:divide-slate-800 bg-slate-50 dark:bg-slate-800/40 p-2.5 rounded-2xl">
-                    {h.items.map((it, idx) => (
-                      <div key={idx} className="py-1 flex justify-between text-[11px]">
-                        <span>{it.quantity}x {it.name}</span>
-                        <span className="font-mono text-slate-400">KES {it.effectiveTotal}</span>
-                      </div>
-                    ))}
-                  </div>
-
-                  {/* Save as Shared List + Re-add all items to active cart */}
-                  <div className="pt-1 flex flex-wrap justify-end gap-2">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        openCreateListModal(
-                          'previous_purchase',
-                          h.id,
-                          undefined,
-                          `Restock (${h.shortCode})`
-                        )
-                      }
-                      className="py-2 px-3 rounded-xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 text-xs font-semibold flex items-center gap-1.5 transition active:scale-95"
-                    >
-                      <Share2 className="w-3.5 h-3.5" />
-                      <span>{t.savePurchaseAsList}</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => handleReAddPastCart(h.id)}
-                      className="py-2 px-3.5 rounded-xl bg-slate-900 dark:bg-slate-800 hover:bg-slate-800 text-white text-xs font-semibold flex items-center gap-1.5 transition active:scale-95"
-                    >
-                      <RotateCcw className="w-3.5 h-3.5 text-emerald-400" />
-                      <span>{t.reAddCart}</span>
-                    </button>
-                  </div>
-                </div>
-              ))
-            ) : (
-              <div className="p-8 text-center bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800">
-                <Clock className="w-10 h-10 text-slate-300 mx-auto mb-2" />
-                <p className="text-xs text-slate-400">{t.noPastCarts}</p>
-              </div>
-            )}
-          </div>
         </div>
+      )}
+
+      {/* TAB 6: MERCHANDISE REWARDS & POINTS LEDGER */}
+      {activeTab === 'rewards' && (
+        <ShopperRewardsView
+          user={user}
+          token={token}
+          activeBranch={branch}
+          loyaltySummary={loyaltySummary}
+          onRefreshLoyalty={loadLoyaltyPoints}
+          onRequestSignIn={onRequestSignIn}
+        />
       )}
 
       {/* ShopperView Footer: Device Battery Charge Status & Mobile Bottom Nav */}
@@ -2565,28 +2822,57 @@ export const ShopperView: React.FC<ShopperViewProps> = ({ onOpenStoreModal }) =>
       {/* Cart Till Checkout Code & QR Modal */}
       <CartCodeModal
         isOpen={isCartCodeModalOpen}
-        onClose={() => setIsCartCodeModalOpen(false)}
+        onClose={() => {
+          const finishedCart = cart && (cart.status === 'completed' || cart.status === 'verified');
+          setIsCartCodeModalOpen(false);
+          if (finishedCart) {
+            void loadCart();
+            if (user && token) {
+              void loadReceipts();
+            }
+            void loadHistory();
+            void loadProductHistory();
+            void loadLoyaltyPoints();
+          }
+        }}
         cart={cart}
         onRefreshCart={loadCart}
+        onOpenSummaryCard={(finishedCart) => {
+          setIsCartCodeModalOpen(false);
+          setSummaryCardCart(finishedCart);
+          void loadLoyaltyPoints();
+        }}
       />
 
-      {/* Store-Specific Loyalty QR Scanner Modal */}
-      <LoyaltyQRScannerModal
+      {/* Post-Checkout Visual & Shareable Cart Summary Card Modal */}
+      <CartSummaryCardModal
+        isOpen={Boolean(summaryCardCart)}
+        onClose={() => {
+          const shouldRefreshFreshCart =
+            cart && (cart.status === 'completed' || cart.status === 'verified');
+          setSummaryCardCart(null);
+          if (shouldRefreshFreshCart) {
+            void loadCart();
+            if (user && token) {
+              void loadReceipts();
+            }
+            void loadHistory();
+            void loadProductHistory();
+            void loadLoyaltyPoints();
+          }
+        }}
+        cart={summaryCardCart}
+        branchName={branch?.name}
+        branchLocation={branch ? `${branch.address}, ${branch.city}` : undefined}
+      />
+
+      {/* Shopper Loyalty Points Breakdown Modal */}
+      <LoyaltyPointsModal
         isOpen={isLoyaltyModalOpen}
         onClose={() => setIsLoyaltyModalOpen(false)}
-        branchId={branch?.id}
+        summary={loyaltySummary}
         activeSupermarketId={branch?.supermarketId}
-        loyaltyCards={loyaltyCards}
-        onCardLinked={(card) => {
-          setLoyaltyCards((prev) => {
-            const exists = prev.some((c) => c.id === card.id);
-            return exists ? prev.map((c) => (c.id === card.id ? card : c)) : [card, ...prev];
-          });
-        }}
-        onCardRemoved={(cardId) => {
-          setLoyaltyCards((prev) => prev.filter((c) => c.id !== cardId));
-        }}
-        getHeaders={getGuestHeaders}
+        onOpenRewards={() => setActiveTab('rewards')}
       />
     </div>
   );

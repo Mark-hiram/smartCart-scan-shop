@@ -1,3 +1,5 @@
+// Copyright (c) 2026 SmartCart Owner. All rights reserved.
+
 import React from 'react';
 import { X, ShoppingBag, MapPin, Tag, AlertTriangle, CheckCircle } from 'lucide-react';
 import { Product, Promotion } from '../types';

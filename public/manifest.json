@@ -1,13 +1,13 @@
 {
   "id": "/",
-  "name": "Smart Cart - Supermarket Scanner",
+  "name": "Smart Cart",
   "short_name": "SmartCart",
   "description": "Scan product barcodes in supermarkets and track your running cart total in real time.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
-  "theme_color": "#10b981",
-  "background_color": "#ffffff",
+  "theme_color": "#0f766e",
+  "background_color": "#ecfdf5",
   "icons": [
     {
       "src": "/pwa-192x192.png",

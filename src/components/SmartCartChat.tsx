@@ -1,3 +1,5 @@
+// Copyright (c) 2026 SmartCart Owner. All rights reserved.
+
 import React, { useState, useRef, useEffect } from 'react';
 import { MessageSquare, X, Send, Sparkles, MapPin, Zap, Trash2, ExternalLink } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';

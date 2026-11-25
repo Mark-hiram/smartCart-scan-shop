@@ -1,3 +1,5 @@
+// Copyright (c) 2026 SmartCart Owner. All rights reserved.
+
 export type UserRole = 'admin' | 'owner' | 'staff' | 'shopper';
 export type PortalType = 'shopper' | 'staff' | 'management';
 
@@ -173,19 +175,151 @@ export interface CartItem {
 
 export type CartStatus = 'active' | 'locked' | 'verified' | 'flagged' | 'completed' | 'cancelled';
 
-export interface LoyaltyCard {
+export interface LoyaltySettings {
+  pointsPerKesAmount: number;
+  bonusPointsPerVerifiedCart: number;
+  minCartValueKes: number;
+  dailyCapPoints: number;
+  monthlyCapPoints: number;
+  maxOpenRedemptionsPerShopper: number;
+  pointsExpiryEnabled: boolean;
+  pointsExpiryDays: number;
+  tierThresholds: {
+    silver: number;
+    gold: number;
+  };
+  tierBonuses: {
+    bronze: number;
+    silver: number;
+    gold: number;
+  };
+}
+
+export type LoyaltyLedgerEntryType =
+  | 'earn'
+  | 'redemption_reserve'
+  | 'redemption_refund'
+  | 'reversal'
+  | 'adjustment'
+  | 'expiry';
+
+export interface LoyaltyLedgerEntry {
+  id: string;
+  userId: string;
+  type: LoyaltyLedgerEntryType;
+  amount: number;
+  balanceAfter: number;
+  reason: string;
+  cartId?: string | null;
+  cartShortCode?: string | null;
+  redemptionId?: string | null;
+  supermarketId?: string | null;
+  supermarketName?: string | null;
+  branchId?: string | null;
+  branchName?: string | null;
+  amountSpent?: number | null;
+  createdByUserId?: string | null;
+  createdAt: string;
+}
+
+export interface LoyaltyTransaction {
   id: string;
   ownerKey: string;
   userId?: string | null;
   supermarketId: string;
   supermarketName: string;
-  supermarketCode: string;
-  cardNumber: string;
-  memberName: string;
-  tier: string;
-  points: number;
-  rawPayload: string;
-  linkedAt: string;
+  branchId: string;
+  branchName: string;
+  cartId: string;
+  cartShortCode: string;
+  amountSpent: number;
+  pointsEarned: number;
+  createdAt: string;
+}
+
+export interface LoyaltyPointsSummary {
+  totalPoints: number;
+  storedBalance: number;
+  ledgerBalance: number;
+  lifetimePoints: number;
+  earnedToday: number;
+  earnedThisMonth: number;
+  tier: 'Bronze' | 'Silver' | 'Gold';
+  nextTier: 'Silver' | 'Gold' | null;
+  pointsToNextTier: number;
+  tierBonusPerCart: number;
+  earnRateKes: number;
+  bonusPointsPerVerifiedCart: number;
+  minCartValueKes: number;
+  dailyCapPoints: number;
+  monthlyCapPoints: number;
+  maxOpenRedemptionsPerShopper: number;
+  isFrozen?: boolean;
+  bySupermarket: Array<{
+    supermarketId: string;
+    supermarketName: string;
+    points: number;
+    completedCheckouts: number;
+  }>;
+  history: LoyaltyTransaction[];
+  ledger: LoyaltyLedgerEntry[];
+}
+
+export type RewardStatus = 'active' | 'hidden';
+
+export interface RewardItem {
+  id: string;
+  name: string;
+  nameSw?: string;
+  description: string;
+  descriptionSw?: string;
+  imageUrl: string;
+  pointsCost: number;
+  unitCostKes: number;
+  colors: string[];
+  sizes: string[];
+  stockBySize: Record<string, number>;
+  status: RewardStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type RedemptionStatus =
+  | 'requested'
+  | 'approved'
+  | 'ready'
+  | 'dispatched'
+  | 'completed'
+  | 'cancelled';
+
+export type FulfillmentMethod = 'collection' | 'delivery';
+
+export interface RewardRedemptionOrder {
+  id: string;
+  referenceCode: string;
+  shopperId: string;
+  shopperName: string;
+  shopperEmail: string;
+  rewardId: string;
+  rewardName: string;
+  rewardImageUrl: string;
+  pointsCost: number;
+  unitCostKes: number;
+  size: string;
+  color: string;
+  fulfillmentMethod: FulfillmentMethod;
+  branchId?: string | null;
+  branchName?: string | null;
+  supermarketName?: string | null;
+  contactPhone: string;
+  deliveryAddress?: string | null;
+  status: RedemptionStatus;
+  rejectionReason?: string | null;
+  stockDecreased?: boolean;
+  pointsRefunded?: boolean;
+  notificationMessage?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface Cart {
@@ -202,6 +336,8 @@ export interface Cart {
   totalDiscount: number;
   finalTotal: number;
   budgetLimit?: number | null;
+  loyaltyPointsEarned?: number;
+  loyaltyEvaluated?: boolean;
   isOfflineCreated?: boolean;
   syncedAt?: string;
   verifiedByStaffId?: string;
@@ -209,6 +345,16 @@ export interface Cart {
   mismatchNotes?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface TransactionReceipt extends Cart {
+  supermarketName: string;
+  branchName: string;
+  branchAddress?: string;
+  branchCity?: string;
+  verifiedByName?: string;
+  itemCount: number;
+  noPaymentInApp?: boolean;
 }
 
 export interface AuditLog {
@@ -219,7 +365,19 @@ export interface AuditLog {
   userName: string;
   userRole: UserRole;
   action: string;
-  entityType: 'product' | 'price' | 'stock' | 'staff' | 'supermarket' | 'branch' | 'promotion' | 'cart';
+  entityType:
+    | 'product'
+    | 'price'
+    | 'stock'
+    | 'staff'
+    | 'supermarket'
+    | 'branch'
+    | 'promotion'
+    | 'cart'
+    | 'user'
+    | 'loyalty'
+    | 'reward'
+    | 'redemption';
   entityId: string;
   details: string;
   timestamp: string;

@@ -1,5 +1,5 @@
 // Smart Cart Service Worker — Offline & Flaky-Network Caching for Critical Assets, Images, and Fonts
-const CACHE_VERSION = 'v3';
+const CACHE_VERSION = 'v7';
 const STATIC_CACHE = `smartcart-static-${CACHE_VERSION}`;
 const FONTS_CACHE = `smartcart-fonts-${CACHE_VERSION}`;
 const IMAGES_CACHE = `smartcart-images-${CACHE_VERSION}`;
@@ -16,17 +16,28 @@ const MAX_FONT_ENTRIES = 30;
 const MAX_IMAGE_ENTRIES = 100;
 const MAX_CATALOG_ENTRIES = 40;
 
-// Critical shell assets & PWA icons pre-cached during install
+// Critical shell assets, PWA icons & mobile-sized portal WebP backdrops pre-cached during install
 const CORE_ASSETS = [
   '/',
+  '/about',
   '/index.html',
   '/offline.html',
   '/manifest.json',
+  '/favicon.ico',
   '/icon.svg',
   '/apple-touch-icon.png',
   '/pwa-192x192.png',
   '/pwa-512x512.png',
   '/pwa-maskable-512x512.png',
+  '/images/portals/shopper-bg-800.webp',
+  '/images/portals/shopper-banner-800.webp',
+  '/images/portals/supermarket-bg-800.webp',
+  '/images/portals/supermarket-banner-800.webp',
+  '/images/portals/admin-bg-800.webp',
+  '/images/portals/admin-banner-800.webp',
+  '/images/rewards/smartcart-tshirt.svg',
+  '/images/rewards/smartcart-hoodie.svg',
+  '/images/rewards/smartcart-cap.svg',
 ];
 
 const PUBLIC_CATALOG_PREFIXES = [

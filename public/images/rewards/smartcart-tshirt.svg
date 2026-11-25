@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 360" fill="none">
+  <rect width="480" height="360" rx="24" fill="#ECFDF5"/>
+  <circle cx="240" cy="180" r="132" fill="#D1FAE5"/>
+  <!-- T-shirt silhouette -->
+  <path d="M168 82L120 112L142 162L166 150V278H314V150L338 162L360 112L312 82C298 96 270 104 240 104C210 104 182 96 168 82Z" fill="#047857" stroke="#064E3B" stroke-width="5" stroke-linejoin="round"/>
+  <path d="M196 86C207 104 222 112 240 112C258 112 273 104 284 86" stroke="#064E3B" stroke-width="4" stroke-linecap="round"/>
+  <!-- Smart Cart chest emblem -->
+  <g transform="translate(208, 136)">
+    <rect width="64" height="64" rx="14" fill="#FFFFFF" fill-opacity="0.96"/>
+    <path d="M15 20h7l5 22h21l5-15H24" stroke="#047857" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M30 30v7M35 28v9M40 31v6M45 28v9" stroke="#0F766E" stroke-width="2.4" stroke-linecap="round"/>
+    <circle cx="29" cy="48" r="3" fill="#047857"/>
+    <circle cx="45" cy="48" r="3" fill="#047857"/>
+  </g>
+  <text x="240" y="232" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="18" font-weight="800" fill="#ECFDF5" letter-spacing="0.5">SMART CART</text>
+  <text x="240" y="324" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="13" font-weight="600" fill="#065F46">Official Cotton T-Shirt</text>
+</svg>

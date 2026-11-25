@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none" role="img" aria-label="Smart Cart mark">
+  <defs>
+    <linearGradient id="scMarkBg" x1="4" y1="4" x2="60" y2="60" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#059669" />
+      <stop offset="100%" stop-color="#0F766E" />
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="16" fill="url(#scMarkBg)" />
+  <!-- Minimal cart handle and basket frame -->
+  <path d="M13 18H19.5L23.5 39.5H45.5L50 24.5H21.5" stroke="#FFFFFF" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round" />
+  <!-- Three barcode bars seated inside basket -->
+  <rect x="27" y="27.5" width="2.8" height="8.5" rx="1.2" fill="#D1FAE5" />
+  <rect x="32.2" y="27.5" width="4.4" height="8.5" rx="1.2" fill="#FFFFFF" />
+  <rect x="39" y="27.5" width="2.6" height="8.5" rx="1.2" fill="#D1FAE5" />
+  <!-- Crisp horizontal scanner beam -->
+  <path d="M23.5 31.8H44.5" stroke="#FBBF24" stroke-width="2.2" stroke-linecap="round" />
+  <!-- Two balanced cart wheels -->
+  <circle cx="26.5" cy="46.5" r="3.4" fill="#FFFFFF" />
+  <circle cx="42.5" cy="46.5" r="3.4" fill="#FFFFFF" />
+</svg>

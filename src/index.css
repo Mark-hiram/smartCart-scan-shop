@@ -1,31 +1,51 @@
+/* Copyright (c) 2026 SmartCart Owner. All rights reserved. */
 @import "tailwindcss";
 @custom-variant dark (&:where(.dark, .dark *));
+@import "./styles/themes.css";
 
 @layer base {
   :root {
-    --font-sans: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+    --font-sans: var(--font-body);
   }
-  
+
+  html,
+  body {
+    overflow-x: hidden;
+  }
+
   body {
     font-family: var(--font-sans);
     -webkit-tap-highlight-color: transparent;
     user-select: none;
     overscroll-behavior-y: none;
   }
-  
-  input, textarea, select {
+
+  input,
+  textarea,
+  select {
     user-select: text;
   }
 }
 
 /* Custom smooth transitions for scan reticle & scanner beam */
 @keyframes scanline {
-  0% { transform: translateY(0%); }
-  50% { transform: translateY(180px); }
-  100% { transform: translateY(0%); }
+  0% {
+    transform: translateY(0%);
+  }
+  50% {
+    transform: translateY(180px);
+  }
+  100% {
+    transform: translateY(0%);
+  }
 }
 
 .animate-scanline {
   animation: scanline 2.2s ease-in-out infinite;
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .animate-scanline {
+    animation: none;
+  }
+}

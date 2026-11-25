@@ -1,24 +1,33 @@
+// Copyright (c) 2026 SmartCart Owner. All rights reserved.
+
 import React from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useTranslation } from '../utils/i18n';
 import { PWAInstallButton } from './PWAInstallButton';
-import { ShoppingCart, Store, LogOut, User as UserIcon, Globe, MapPin, Building2 } from 'lucide-react';
+import { SmartCartHeaderLogo } from './SmartCartLogo';
+import { ShoppingCart, Store, LogOut, User as UserIcon, Globe, MapPin, Building2, Sun, Moon } from 'lucide-react';
 import { PortalType } from '../types';
 
 interface HeaderProps {
   activePortal: PortalType;
   onSwitchPortal: (portal: PortalType) => void;
+  onNavigateHome?: () => void;
   onOpenStoreModal?: () => void;
   onOpenAuthModal?: () => void;
   onOpenSupportModal?: () => void;
+  isDarkMode?: boolean;
+  onToggleDarkMode?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
   activePortal,
   onSwitchPortal,
+  onNavigateHome,
   onOpenStoreModal,
   onOpenAuthModal,
   onOpenSupportModal,
+  isDarkMode = false,
+  onToggleDarkMode,
 }) => {
   const { user, branch, supermarket, logout } = useAuth();
   const { language, setLanguage, t } = useTranslation();
@@ -27,39 +36,40 @@ export const Header: React.FC<HeaderProps> = ({
     setLanguage(language === 'en' ? 'sw' : 'en');
   };
 
+  const portalOrRoleSubtitle = user
+    ? user.role === 'admin'
+      ? t.roleAdmin
+      : user.role === 'owner'
+      ? t.roleOwner
+      : user.role === 'staff'
+      ? t.roleStaff
+      : t.roleShopper
+    : activePortal === 'shopper'
+    ? t.portalShopper.split(' ')[0]
+    : activePortal === 'staff'
+    ? t.portalStaff.split(' ')[0]
+    : t.portalManagement.split(' ')[0];
+
+  const subtitleClassName = user
+    ? 'text-[10px] sm:text-[11px] text-slate-500 dark:text-slate-400 capitalize -mt-0.5 font-medium'
+    : 'text-[10px] text-emerald-600 dark:text-emerald-400 font-semibold -mt-0.5';
+
   return (
     <header className="sticky top-0 z-40 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 transition-colors">
       <div className="max-w-7xl mx-auto px-3 sm:px-6 h-14 flex items-center justify-between gap-2 sm:gap-4">
-        {/* Zone 1: Brand Wordmark & Active Role/Portal */}
-        <div className="flex items-center gap-2 sm:gap-3 shrink-0">
-          <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-emerald-600 flex items-center justify-center text-white shadow-xs shadow-emerald-600/20">
-            <ShoppingCart className="w-4 h-4 sm:w-5 sm:h-5" />
-          </div>
-          <div className="flex flex-col">
-            <span className="text-sm sm:text-base font-bold tracking-tight text-slate-900 dark:text-white whitespace-nowrap">
-              Smart Cart
-            </span>
-            {user ? (
-              <span className="text-[10px] sm:text-[11px] text-slate-500 dark:text-slate-400 capitalize -mt-0.5 font-medium">
-                {user.role === 'admin'
-                  ? t.roleAdmin
-                  : user.role === 'owner'
-                  ? t.roleOwner
-                  : user.role === 'staff'
-                  ? t.roleStaff
-                  : t.roleShopper}
-              </span>
-            ) : (
-              <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-semibold -mt-0.5">
-                {activePortal === 'shopper'
-                  ? t.portalShopper.split(' ')[0]
-                  : activePortal === 'staff'
-                  ? t.portalStaff.split(' ')[0]
-                  : t.portalManagement.split(' ')[0]}
-              </span>
-            )}
-          </div>
-        </div>
+        {/* Zone 1: Clickable Responsive Brand Logo (mark-only on mobile, full logo on sm+) */}
+        <button
+          type="button"
+          onClick={onNavigateHome}
+          aria-label={t.logoHomeAria}
+          title={t.logoAlt}
+          className="flex items-center shrink-0 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/70 transition active:scale-95"
+        >
+          <SmartCartHeaderLogo
+            subtitle={portalOrRoleSubtitle}
+            subtitleClassName={subtitleClassName}
+          />
+        </button>
 
         {/* Zone 2: Three Portals Segmented Control & Store Selector */}
         <div className="flex items-center gap-2 sm:gap-3 overflow-x-auto no-scrollbar py-1">
@@ -141,6 +151,19 @@ export const Header: React.FC<HeaderProps> = ({
         <div className="flex items-center gap-1.5 sm:gap-2.5 shrink-0">
           {/* PWA Install Button */}
           <PWAInstallButton />
+
+          {/* Light / Dark Mode Toggle */}
+          {onToggleDarkMode && (
+            <button
+              type="button"
+              onClick={onToggleDarkMode}
+              className="flex items-center justify-center w-8 h-8 rounded-lg border border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600 bg-white dark:bg-slate-800 text-slate-700 dark:text-amber-300 active:scale-95 transition"
+              title={isDarkMode ? t.lightMode : t.darkMode}
+              aria-label={t.themeToggleLabel}
+            >
+              {isDarkMode ? <Sun className="w-3.5 h-3.5" /> : <Moon className="w-3.5 h-3.5" />}
+            </button>
+          )}
 
           {/* Bilingual Language Switcher Button */}
           <button

@@ -1,3 +1,5 @@
+// Copyright (c) 2026 SmartCart Owner. All rights reserved.
+
 import { useEffect, useState } from 'react';
 
 interface BeforeInstallPromptEvent extends Event {

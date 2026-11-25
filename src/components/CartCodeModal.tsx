@@ -1,6 +1,8 @@
+// Copyright (c) 2026 SmartCart Owner. All rights reserved.
+
 import React, { useEffect, useState } from 'react';
 import QRCode from 'qrcode';
-import { X, CheckCircle2, AlertTriangle, ShoppingCart, RefreshCw } from 'lucide-react';
+import { X, CheckCircle2, AlertTriangle, ShoppingCart, RefreshCw, Image as ImageIcon, Share2 } from 'lucide-react';
 import { Cart } from '../types';
 import { useTranslation } from '../utils/i18n';
 
@@ -8,7 +10,8 @@ interface CartCodeModalProps {
   isOpen: boolean;
   onClose: () => void;
   cart: Cart | null;
-  onRefreshCart: () => Promise<void>;
+  onRefreshCart: (cartId?: string) => Promise<void>;
+  onOpenSummaryCard?: (cart: Cart) => void;
 }
 
 export const CartCodeModal: React.FC<CartCodeModalProps> = ({
@@ -16,6 +19,7 @@ export const CartCodeModal: React.FC<CartCodeModalProps> = ({
   onClose,
   cart,
   onRefreshCart,
+  onOpenSummaryCard,
 }) => {
   const { t } = useTranslation();
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
@@ -36,11 +40,11 @@ export const CartCodeModal: React.FC<CartCodeModalProps> = ({
     }
   }, [cart]);
 
-  // Periodic polling every 3 seconds to see if cashier verified the cart
+  // Periodic polling every 3 seconds to see if cashier verified/completed the cart
   useEffect(() => {
     if (!isOpen || !cart) return;
     const interval = setInterval(() => {
-      onRefreshCart();
+      onRefreshCart(cart.id);
     }, 3000);
 
     return () => clearInterval(interval);
@@ -48,12 +52,13 @@ export const CartCodeModal: React.FC<CartCodeModalProps> = ({
 
   if (!isOpen || !cart) return null;
 
-  const isVerified = cart.status === 'verified' || cart.status === 'completed';
+  const isCompleted = cart.status === 'completed';
+  const isVerified = cart.status === 'verified' || isCompleted;
   const isFlagged = cart.status === 'flagged';
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in">
-      <div className="w-full max-w-sm bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden">
+      <div className="w-full max-w-sm bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden max-h-[92vh] overflow-y-auto">
         {/* Header */}
         <div className="p-4 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -73,16 +78,32 @@ export const CartCodeModal: React.FC<CartCodeModalProps> = ({
         <div className="p-5 flex flex-col items-center text-center space-y-4">
           {/* Verification Status Banner */}
           {isVerified ? (
-            <div className="w-full p-3 rounded-2xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 flex items-center gap-2.5 text-left">
-              <CheckCircle2 className="w-6 h-6 text-emerald-600 shrink-0" />
-              <div>
-                <p className="text-xs font-bold text-emerald-900 dark:text-emerald-300">
-                  {t.cartVerifiedSuccess}
-                </p>
-                <p className="text-[10px] text-emerald-700 dark:text-emerald-400">
-                  Cashier checked your items. Proceed to pay at the register.
-                </p>
+            <div className="w-full p-3.5 rounded-2xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 space-y-2.5 text-left">
+              <div className="flex items-center gap-2.5">
+                <CheckCircle2 className="w-6 h-6 text-emerald-600 shrink-0" />
+                <div>
+                  <p className="text-xs font-bold text-emerald-900 dark:text-emerald-300">
+                    {isCompleted ? t.summaryCardCheckoutDone : t.cartVerifiedSuccess}
+                  </p>
+                  <p className="text-[10px] text-emerald-700 dark:text-emerald-400">
+                    {isCompleted
+                      ? t.summaryCardReadyDesc
+                      : 'Cashier checked your items. Complete payment at the register.'}
+                  </p>
+                </div>
               </div>
+
+              {onOpenSummaryCard && (
+                <button
+                  type="button"
+                  onClick={() => onOpenSummaryCard(cart)}
+                  className="w-full py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-sm transition active:scale-95"
+                >
+                  <ImageIcon className="w-4 h-4" />
+                  <span>{t.summaryCardTitle}</span>
+                  <Share2 className="w-3.5 h-3.5 opacity-90" />
+                </button>
+              )}
             </div>
           ) : isFlagged ? (
             <div className="w-full p-3 rounded-2xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 flex items-center gap-2.5 text-left">
@@ -143,7 +164,7 @@ export const CartCodeModal: React.FC<CartCodeModalProps> = ({
             <button
               onClick={async () => {
                 setIsChecking(true);
-                await onRefreshCart();
+                await onRefreshCart(cart.id);
                 setIsChecking(false);
               }}
               className="flex-1 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-50 transition flex items-center justify-center gap-1.5"

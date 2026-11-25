@@ -1,3 +1,5 @@
+// Copyright (c) 2026 SmartCart Owner. All rights reserved.
+
 import React, { useState } from 'react';
 import { useTranslation } from '../utils/i18n';
 import {

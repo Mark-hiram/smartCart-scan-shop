@@ -1,3 +1,5 @@
+// Copyright (c) 2026 SmartCart Owner. All rights reserved.
+
 import {createRoot} from 'react-dom/client';
 import App from './App.tsx';
 import './index.css';

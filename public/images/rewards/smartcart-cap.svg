@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 360" fill="none">
+  <rect width="480" height="360" rx="24" fill="#F0FDF4"/>
+  <circle cx="240" cy="176" r="126" fill="#DCFCE7"/>
+  <!-- Cap crown -->
+  <path d="M148 200C148 134 188 94 246 94C302 94 336 132 336 196H148Z" fill="#065F46" stroke="#064E3B" stroke-width="5" stroke-linejoin="round"/>
+  <!-- Cap top button & panel seams -->
+  <circle cx="246" cy="92" r="7" fill="#047857" stroke="#064E3B" stroke-width="3"/>
+  <path d="M246 99C230 130 226 164 226 196M246 99C268 130 276 164 276 196" stroke="#047857" stroke-width="3" stroke-linecap="round"/>
+  <!-- Cap brim -->
+  <path d="M144 196C198 188 274 190 366 214C348 234 294 240 226 232C176 226 144 214 144 196Z" fill="#047857" stroke="#064E3B" stroke-width="5" stroke-linejoin="round"/>
+  <!-- Embroidered Smart Cart patch -->
+  <g transform="translate(216, 126)">
+    <rect width="52" height="52" rx="12" fill="#FFFFFF"/>
+    <path d="M11 17h6l4 16h16l4-11H18" stroke="#047857" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M23 24v5M28 22v7M33 24v5" stroke="#0F766E" stroke-width="2" stroke-linecap="round"/>
+    <circle cx="22" cy="39" r="2.5" fill="#047857"/>
+    <circle cx="36" cy="39" r="2.5" fill="#047857"/>
+  </g>
+  <text x="240" y="324" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="13" font-weight="600" fill="#065F46">Smart Cart Twill Cap</text>
+</svg>

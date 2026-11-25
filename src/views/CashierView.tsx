@@ -1,3 +1,5 @@
+// Copyright (c) 2026 SmartCart Owner. All rights reserved.
+
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useTranslation } from '../utils/i18n';
@@ -17,7 +19,10 @@ import {
   Tag,
   Download,
   Plus,
+  Image as ImageIcon,
 } from 'lucide-react';
+import { CartSummaryCardModal } from '../components/CartSummaryCardModal';
+import { PortalBackgroundImage } from '../components/PortalBackgroundImage';
 
 export const CashierView: React.FC = () => {
   const { user, branch, token } = useAuth();
@@ -50,11 +55,13 @@ export const CashierView: React.FC = () => {
   const [cartBranch, setCartBranch] = useState<Branch | null>(null);
   const [cartSupermarket, setCartSupermarket] = useState<Supermarket | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
   // Flag mismatch modal
   const [showFlagModal, setShowFlagModal] = useState(false);
   const [flagReason, setFlagReason] = useState('');
+  const [summaryCardCart, setSummaryCardCart] = useState<Cart | null>(null);
 
   // Stock / Catalogue State
   const [branchProducts, setBranchProducts] = useState<any[]>([]);
@@ -174,6 +181,7 @@ export const CashierView: React.FC = () => {
   // Flag mismatch
   const handleConfirmFlag = async () => {
     if (!activeCart || !flagReason.trim()) return;
+    setErrorMsg(null);
     try {
       const res = await fetch('/api/cashier/flag', {
         method: 'POST',
@@ -186,11 +194,18 @@ export const CashierView: React.FC = () => {
           reason: flagReason.trim(),
         }),
       });
+      const data = await res.json();
       if (res.ok) {
-        const data = await res.json();
         setActiveCart(data.cart);
         setShowFlagModal(false);
         setFlagReason('');
+        setActionNotice(
+          data.reversedPoints > 0
+            ? `Cart flagged and ${data.reversedPoints} loyalty points reversed.`
+            : 'Cart flagged for store audit review.'
+        );
+      } else {
+        setErrorMsg(data.error || 'Could not flag cart.');
       }
     } catch (e) {}
   };
@@ -198,6 +213,8 @@ export const CashierView: React.FC = () => {
   // Mark Cart as Verified
   const handleVerifyCart = async () => {
     if (!activeCart) return;
+    setErrorMsg(null);
+    setActionNotice(null);
     try {
       const res = await fetch('/api/cashier/verify', {
         method: 'POST',
@@ -207,9 +224,16 @@ export const CashierView: React.FC = () => {
         },
         body: JSON.stringify({ cartId: activeCart.id }),
       });
+      const data = await res.json();
       if (res.ok) {
-        const data = await res.json();
         setActiveCart(data.cart);
+        setActionNotice(
+          data.loyaltyPointsEarned > 0
+            ? `Cart verified! Awarded ${data.loyaltyPointsEarned} loyalty points.`
+            : 'Cart verified! Ready to complete checkout.'
+        );
+      } else {
+        setErrorMsg(data.error || 'Could not verify cart.');
       }
     } catch (e) {}
   };
@@ -217,6 +241,7 @@ export const CashierView: React.FC = () => {
   // Complete Checkout at Till
   const handleCompleteCheckout = async () => {
     if (!activeCart) return;
+    setErrorMsg(null);
     try {
       const res = await fetch('/api/cashier/complete', {
         method: 'POST',
@@ -226,9 +251,12 @@ export const CashierView: React.FC = () => {
         },
         body: JSON.stringify({ cartId: activeCart.id }),
       });
+      const data = await res.json();
       if (res.ok) {
-        const data = await res.json();
         setActiveCart(data.cart);
+        setSummaryCardCart(data.cart);
+      } else {
+        setErrorMsg(data.error || 'Verify the cart before completing checkout.');
       }
     } catch (e) {}
   };
@@ -271,21 +299,23 @@ export const CashierView: React.FC = () => {
   return (
     <div className="max-w-4xl mx-auto px-4 py-6 space-y-6">
       {/* Title & Station Banner */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-200 dark:border-slate-800">
-        <div>
-          <div className="flex items-center gap-2">
-            <h1 className="text-xl font-bold text-slate-900 dark:text-white">
+      <div className="portal-banner-surface relative overflow-hidden p-5 sm:p-6 rounded-3xl shadow-lg flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <PortalBackgroundImage portal="staff" variant="banner" priority />
+        <div className="relative z-10">
+          <div className="flex flex-wrap items-center gap-2">
+            <h1 className="text-xl font-bold text-white">
               Branch Staff Station
             </h1>
-            <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300">
-              {branch?.name}
-            </span>
+            {branch?.name && (
+              <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-lg bg-amber-400/20 text-amber-200 border border-amber-300/35">
+                {branch.name}
+              </span>
+            )}
           </div>
-          <p className="text-xs text-slate-500 mt-0.5">
-            Logged in as <strong>{user?.name}</strong> ({user?.email})
+          <p className="text-xs text-blue-100 mt-1">
+            Logged in as <strong className="text-white">{user?.name}</strong> ({user?.email})
           </p>
         </div>
-
       </div>
 
       {/* Staff Segmented Navigation based on active permissions */}
@@ -377,6 +407,13 @@ export const CashierView: React.FC = () => {
             <div className="p-3.5 rounded-2xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-xs text-rose-700 dark:text-rose-300 flex items-center gap-2">
               <AlertTriangle className="w-4 h-4 shrink-0" />
               <span>{errorMsg}</span>
+            </div>
+          )}
+
+          {actionNotice && (
+            <div className="p-3.5 rounded-2xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-xs text-emerald-700 dark:text-emerald-300 flex items-center gap-2 font-semibold">
+              <CheckCircle2 className="w-4 h-4 shrink-0" />
+              <span>{actionNotice}</span>
             </div>
           )}
 
@@ -532,10 +569,22 @@ export const CashierView: React.FC = () => {
                     </button>
                   )}
 
+                  {activeCart.status === 'completed' && (
+                    <button
+                      type="button"
+                      onClick={() => setSummaryCardCart(activeCart)}
+                      className="py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs flex items-center gap-1.5 transition active:scale-95"
+                    >
+                      <ImageIcon className="w-4 h-4" />
+                      <span>{t.summaryCardTitle}</span>
+                    </button>
+                  )}
+
                   <button
                     onClick={handleCompleteCheckout}
-                    disabled={activeCart.status === 'completed'}
-                    className="py-2.5 px-4 rounded-xl bg-slate-900 hover:bg-slate-800 dark:bg-slate-700 disabled:opacity-50 text-white font-semibold text-xs flex items-center gap-1.5 transition active:scale-95"
+                    disabled={activeCart.status !== 'verified'}
+                    title={activeCart.status !== 'verified' ? 'Verify the cart before completing checkout' : undefined}
+                    className="py-2.5 px-4 rounded-xl bg-slate-900 hover:bg-slate-800 dark:bg-slate-700 disabled:opacity-45 disabled:cursor-not-allowed text-white font-semibold text-xs flex items-center gap-1.5 transition active:scale-95"
                   >
                     <span>{t.markCompleted}</span>
                     <ArrowRight className="w-4 h-4" />
@@ -823,6 +872,21 @@ export const CashierView: React.FC = () => {
           </div>
         </div>
       )}
+      {/* Post-Checkout Visual Summary Card Modal */}
+      <CartSummaryCardModal
+        isOpen={Boolean(summaryCardCart)}
+        onClose={() => setSummaryCardCart(null)}
+        cart={summaryCardCart}
+        storeName={cartSupermarket?.name}
+        branchName={cartBranch?.name || branch?.name}
+        branchLocation={
+          cartBranch
+            ? `${cartBranch.address}, ${cartBranch.city}`
+            : branch
+            ? `${branch.address}, ${branch.city}`
+            : undefined
+        }
+      />
     </div>
   );
 };

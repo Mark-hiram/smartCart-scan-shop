@@ -1,6 +1,11 @@
+// Copyright (c) 2026 SmartCart Owner. All rights reserved.
+
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useTranslation } from '../utils/i18n';
+import { SmartCartSignInLogo } from './SmartCartLogo';
+import { CopyrightBadge } from './CopyrightBadge';
+import { PortalBackgroundImage, usePreloadPortalSignInImage } from './PortalBackgroundImage';
 import {
   Shield,
   ShieldCheck,
@@ -27,6 +32,8 @@ interface AdminLoginViewProps {
 export const AdminLoginView: React.FC<AdminLoginViewProps> = ({ onSuccess, initialMode }) => {
   const { user, login, setupAdmin, changeFirstPassword, setupStatus, checkSetupStatus, adminSetupKeyRequired } = useAuth();
   const { t } = useTranslation();
+
+  usePreloadPortalSignInImage('admin');
 
   const [mode, setMode] = useState<'setup' | 'login' | 'forgot' | 'reset-token'>('login');
   const [email, setEmail] = useState('');
@@ -250,31 +257,31 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({ onSuccess, initi
   };
 
   return (
-    <div className="min-h-[85vh] flex items-center justify-center p-4">
-      <div className="w-full max-w-lg bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden">
-        {/* Top Header Hero */}
-        <div className="p-6 bg-slate-900 text-white border-b border-slate-800 relative overflow-hidden">
-          <div className="absolute right-0 top-0 translate-x-4 -translate-y-4 opacity-10 pointer-events-none">
-            <Shield className="w-48 h-48" />
-          </div>
+    <div className="portal-login-canvas min-h-[82vh] flex items-center justify-center p-4 sm:py-8">
+      <PortalBackgroundImage portal="admin" variant="backdrop" priority />
 
+      <div className="relative z-10 w-full max-w-lg portal-surface-card bg-white dark:bg-slate-900 shadow-2xl overflow-hidden">
+        {/* Top Header Hero */}
+        <div className="portal-banner-surface p-6 border-b border-indigo-900/40 relative overflow-hidden">
+          <PortalBackgroundImage portal="admin" variant="banner" />
+          <div className="relative z-10">
           <div className="flex items-center justify-between mb-3">
-            <span className="text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+            <span className="text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-lg bg-indigo-400/20 text-indigo-100 border border-indigo-300/30">
               System Administration
             </span>
 
-            <span className="text-[11px] font-mono text-slate-400 flex items-center gap-1">
-              <Lock className="w-3.5 h-3.5 text-emerald-400" />
+            <span className="text-[11px] font-mono text-indigo-200 flex items-center gap-1">
+              <Lock className="w-3.5 h-3.5 text-indigo-300" />
               <span>/admin/login</span>
             </span>
           </div>
 
           <div className="flex items-center gap-3">
-            <div className="p-3 bg-white/10 rounded-2xl shadow-inner border border-white/10">
-              <ShieldCheck className="w-7 h-7 text-emerald-400" />
+            <div className="p-3 bg-white/10 rounded-2xl shadow-inner border border-white/15">
+              <ShieldCheck className="w-7 h-7 text-indigo-200" />
             </div>
             <div>
-              <h1 className="text-xl font-black tracking-tight">
+              <h1 className="text-xl font-black tracking-tight text-white">
                 {mode === 'setup'
                   ? t.firstTimeAdminSetup
                   : mode === 'forgot'
@@ -283,16 +290,20 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({ onSuccess, initi
                   ? t.resetPasswordWithLink
                   : t.adminLoginTitle}
               </h1>
-              <p className="text-xs text-slate-300 font-medium">
+              <p className="text-xs text-indigo-100/90 font-medium">
                 {mode === 'setup'
                   ? t.singleAdminRule
                   : t.adminLoginSubtitle}
               </p>
             </div>
           </div>
+          </div>
         </div>
 
-        <div className="p-6 space-y-4">
+        <div className="p-6 space-y-4 bg-white dark:bg-slate-900">
+          {/* Centred Brand Logo Above Sign-In Form */}
+          <SmartCartSignInLogo />
+
           {/* Feedback Alerts */}
           {errorMsg && (
             <div className="p-3.5 rounded-2xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-xs text-rose-700 dark:text-rose-300 flex items-start gap-2">
@@ -697,6 +708,10 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({ onSuccess, initi
               </button>
             </form>
           )}
+
+          <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex justify-center text-slate-600 dark:text-slate-400">
+            <CopyrightBadge />
+          </div>
         </div>
       </div>
 

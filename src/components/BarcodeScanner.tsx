@@ -1,3 +1,5 @@
+// Copyright (c) 2026 SmartCart Owner. All rights reserved.
+
 import React, { useRef, useEffect, useState } from 'react';
 import { Camera, Flashlight, FlashlightOff, Search, AlertCircle, CheckCircle2, RotateCw } from 'lucide-react';
 import { validateBarcode } from '../utils/barcode';
@@ -236,7 +238,7 @@ export const BarcodeScanner: React.FC<BarcodeScannerProps> = ({
           </div>
         )}
 
-        {/* Camera Fallback State (when camera is disabled or in mock desktop environment) */}
+        {/* Camera Fallback State (when camera access is unavailable) */}
         {!hasCamera && (
           <div className="p-6 text-center text-slate-300 flex flex-col items-center">
             <div className="w-12 h-12 rounded-full bg-slate-800 flex items-center justify-center mb-3">
@@ -302,7 +304,7 @@ export const BarcodeScanner: React.FC<BarcodeScannerProps> = ({
         </button>
       </div>
 
-      {/* Quick Test Demo Shelf: Tap-to-Scan Realistic Barcodes */}
+      {/* Branch Quick-Tap Shelf: Tap-to-Scan Active Store Products */}
       {sampleBarcodes.length > 0 && (
         <div className="w-full mt-4 p-3 rounded-xl bg-slate-100 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-800">
           <div className="flex items-center justify-between mb-2">
