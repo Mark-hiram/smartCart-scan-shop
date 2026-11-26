@@ -1,6 +1,6 @@
 // Copyright (c) 2026 SmartCart Owner. All rights reserved.
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useTranslation } from '../utils/i18n';
 import { BarcodeScanner } from '../components/BarcodeScanner';
@@ -18,6 +18,18 @@ import { PortalBackgroundImage } from '../components/PortalBackgroundImage';
 import { ShopperRewardsView } from '../components/ShopperRewardsView';
 import { ParsedVoiceCommand } from '../utils/voiceCommands';
 import { triggerPriceCheckHaptic, triggerScanSuccessHaptic } from '../utils/haptics';
+import {
+  OfflineQueueOperation,
+  enqueueOfflineOperation,
+  getOfflineQueue,
+  removeOfflineQueueItem,
+  clearOfflineQueueForBranch,
+  saveOfflineCartSnapshot,
+  loadOfflineCartSnapshot,
+  saveOfflineBranchProducts,
+  loadOfflineBranchProducts,
+  isNetworkOfflineError,
+} from '../utils/offlineQueue';
 import {
   EnrichedProduct,
   Cart,
@@ -136,32 +148,47 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
   // Lists Subtab: 'lists' | 'favourites'
   const [listsSubTab, setListsSubTab] = useState<'lists' | 'favourites'>('lists');
 
-  // Offline detection & local cart sync
+  // Offline detection & IndexedDB state queue sync
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
   const [isSyncingCart, setIsSyncingCart] = useState(false);
   const [syncNotice, setSyncNotice] = useState<string | null>(null);
+  const [scanErrorNotice, setScanErrorNotice] = useState<string | null>(null);
+  const [queuedOps, setQueuedOps] = useState<OfflineQueueOperation[]>([]);
+  const [syncStatus, setSyncStatus] = useState<'idle' | 'queued' | 'syncing' | 'synced' | 'error'>('idle');
+  const [syncProgress, setSyncProgress] = useState<{ completed: number; total: number } | null>(null);
+  const cartRef = useRef<Cart | null>(null);
+  const syncInFlightRef = useRef<Promise<void> | null>(null);
 
-  // Fetch branch products catalogue (with local caching for offline capability)
+  useEffect(() => {
+    cartRef.current = cart;
+  }, [cart]);
+
+  const showScanError = (msg: string) => {
+    setScanErrorNotice(msg);
+    setTimeout(() => setScanErrorNotice(null), 4000);
+  };
+
+  // Fetch branch products catalogue (with IndexedDB caching for offline capability)
   const loadBranchProducts = async () => {
     if (!branch) return;
+    const cachedProducts = await loadOfflineBranchProducts(branch.id);
+    if (cachedProducts && cachedProducts.length > 0) {
+      setProducts((prev) => (prev.length === 0 ? cachedProducts : prev));
+    }
+    if (!navigator.onLine) return;
+
     try {
       const res = await fetch(`/api/shopper/branch-products/${branch.id}`);
       if (res.ok) {
         const data = await res.json();
-        setProducts(data.products || []);
-        // Save to offline cache
-        try {
-          localStorage.setItem(`offline_products_${branch.id}`, JSON.stringify(data.products || []));
-        } catch (e) {}
-      } else {
-        // Fallback to local storage if offline
-        const cached = localStorage.getItem(`offline_products_${branch.id}`);
-        if (cached) setProducts(JSON.parse(cached));
+        const nextProducts: EnrichedProduct[] = data.products || [];
+        setProducts(nextProducts);
+        await saveOfflineBranchProducts(branch.id, nextProducts);
+      } else if (cachedProducts) {
+        setProducts(cachedProducts);
       }
-    } catch (e) {
-      // Network failed: fallback to offline cache
-      const cached = localStorage.getItem(`offline_products_${branch.id}`);
-      if (cached) setProducts(JSON.parse(cached));
+    } catch {
+      if (cachedProducts) setProducts(cachedProducts);
     }
   };
 
@@ -189,9 +216,28 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
     return headers;
   };
 
-  // Fetch or initialize cart (optionally preserving a specific cartId during checkout status polling)
+  // Fetch or initialize cart (hydrating IndexedDB snapshot & respecting queued offline mutations)
   const loadCart = async (specificCartId?: string) => {
     if (!branch) return;
+    const snapshot = await loadOfflineCartSnapshot(branch.id, currentCallerId);
+    const pending = await getOfflineQueue(branch.id, currentCallerId);
+    setQueuedOps(pending);
+    if (pending.length > 0 && !syncInFlightRef.current) {
+      setSyncStatus('queued');
+    }
+
+    if (snapshot && (!cartRef.current || pending.length > 0 || !navigator.onLine)) {
+      setCart(snapshot);
+      if (snapshot.budgetLimit) {
+        setBudgetInput(snapshot.budgetLimit.toString());
+      }
+    }
+
+    // Do not clobber local cart with server state while offline mutations are queued
+    if (!navigator.onLine || pending.length > 0) {
+      return;
+    }
+
     try {
       const query = specificCartId
         ? `/api/shopper/cart?branchId=${branch.id}&cartId=${encodeURIComponent(specificCartId)}`
@@ -205,13 +251,12 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
         if (data?.budgetLimit) {
           setBudgetInput(data.budgetLimit.toString());
         }
-        // Save cart to local storage for offline continuity
-        localStorage.setItem(`offline_cart_${branch.id}`, JSON.stringify(data));
+        if (data) {
+          await saveOfflineCartSnapshot(branch.id, currentCallerId, data);
+        }
       }
-    } catch (e) {
-      // Offline fallback: load cached cart
-      const cached = localStorage.getItem(`offline_cart_${branch.id}`);
-      if (cached) setCart(JSON.parse(cached));
+    } catch {
+      if (snapshot) setCart(snapshot);
     }
   };
 
@@ -337,54 +382,232 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
     } catch (e) {}
   };
 
-  // Sync offline cart to server
-  const syncOfflineCartToServer = async () => {
+  // Flush IndexedDB scan queue sequentially to server when connectivity returns
+  const syncOfflineCartToServer = useCallback(async () => {
     if (!branch) return;
-    const cached = localStorage.getItem(`offline_cart_${branch.id}`);
-    if (!cached) return;
-    const localCart: Cart = JSON.parse(cached);
-    if (!localCart.items || localCart.items.length === 0) return;
-
-    setIsSyncingCart(true);
-    try {
-      const res = await fetch('/api/shopper/cart/sync', {
-        method: 'POST',
-        headers: getGuestHeaders(),
-        body: JSON.stringify({
-          branchId: branch.id,
-          cartId: localCart.id,
-          items: localCart.items,
-          budgetLimit: localCart.budgetLimit,
-        }),
-      });
-      if (res.ok) {
-        const synced = await res.json();
-        setCart(synced);
-        localStorage.setItem(`offline_cart_${branch.id}`, JSON.stringify(synced));
-        setSyncNotice(t.cartSyncSuccess);
-        setTimeout(() => setSyncNotice(null), 4000);
-      }
-    } catch (e) {
-      console.warn('Sync failed:', e);
-    } finally {
-      setIsSyncingCart(false);
+    if (syncInFlightRef.current) {
+      return syncInFlightRef.current;
     }
-  };
 
-  // Offline / Online listeners & auto-sync
+    const activeBranchId = branch.id;
+    const callerIdSnapshot = currentCallerId;
+
+    const runSync = async () => {
+      const queue = await getOfflineQueue(activeBranchId, callerIdSnapshot);
+      setQueuedOps(queue);
+
+      if (queue.length === 0) {
+        // Legacy offline snapshot sync fallback if needed
+        const snapshot = await loadOfflineCartSnapshot(activeBranchId, callerIdSnapshot);
+        if (!snapshot || !snapshot.isOfflineCreated || !snapshot.items || snapshot.items.length === 0) {
+          return;
+        }
+        setIsSyncingCart(true);
+        setSyncStatus('syncing');
+        setSyncProgress({ completed: 0, total: 1 });
+        try {
+          const res = await fetch('/api/shopper/cart/sync', {
+            method: 'POST',
+            headers: getGuestHeaders(),
+            body: JSON.stringify({
+              branchId: activeBranchId,
+              cartId: snapshot.id,
+              items: snapshot.items,
+              budgetLimit: snapshot.budgetLimit,
+            }),
+          });
+          if (res.ok) {
+            const synced = await res.json();
+            setCart(synced);
+            await saveOfflineCartSnapshot(activeBranchId, callerIdSnapshot, synced);
+            setSyncProgress({ completed: 1, total: 1 });
+            setSyncStatus('synced');
+            setSyncNotice(t.cartSyncSuccess);
+            setTimeout(() => {
+              setSyncNotice(null);
+              setSyncStatus((prev) => (prev === 'synced' ? 'idle' : prev));
+            }, 4000);
+          } else {
+            setSyncStatus('error');
+          }
+        } catch {
+          setSyncStatus(navigator.onLine ? 'error' : 'queued');
+        } finally {
+          setIsSyncingCart(false);
+          setSyncProgress(null);
+        }
+        return;
+      }
+
+      setIsSyncingCart(true);
+      setSyncStatus('syncing');
+      setSyncProgress({ completed: 0, total: queue.length });
+
+      let workingCart: Cart | null =
+        cartRef.current && !cartRef.current.id.startsWith('offline-cart-')
+          ? cartRef.current
+          : null;
+      let completedCount = 0;
+
+      const ensureServerCart = async (): Promise<Cart | null> => {
+        if (workingCart && !workingCart.id.startsWith('offline-cart-')) {
+          return workingCart;
+        }
+        const res = await fetch(`/api/shopper/cart?branchId=${activeBranchId}`, {
+          headers: getGuestHeaders(),
+        });
+        if (!res.ok) return null;
+        const serverCart: Cart = await res.json();
+        workingCart = serverCart;
+        return serverCart;
+      };
+
+      try {
+        for (const op of queue) {
+          if (!navigator.onLine) {
+            throw new TypeError('Offline while syncing queue');
+          }
+
+          let res: Response | null = null;
+
+          if (op.action === 'scan_add' && op.barcode) {
+            const serverCart = workingCart && !workingCart.id.startsWith('offline-cart-') ? workingCart : null;
+            res = await fetch('/api/shopper/cart/add', {
+              method: 'POST',
+              headers: getGuestHeaders(),
+              body: JSON.stringify({
+                branchId: activeBranchId,
+                barcode: op.barcode,
+                quantity: op.quantity ?? 1,
+                cartId: serverCart?.id,
+              }),
+            });
+          } else if (op.action === 'update_qty') {
+            const serverCart = await ensureServerCart();
+            if (serverCart) {
+              const matchedItem = serverCart.items.find(
+                (it) => it.id === op.itemId || (op.barcode && it.barcode === op.barcode)
+              );
+              if (matchedItem) {
+                res = await fetch('/api/shopper/cart/quantity', {
+                  method: 'PUT',
+                  headers: getGuestHeaders(),
+                  body: JSON.stringify({
+                    cartId: serverCart.id,
+                    itemId: matchedItem.id,
+                    quantity: op.quantity ?? 0,
+                  }),
+                });
+              } else {
+                // Item no longer exists on server; mark op resolved
+                await removeOfflineQueueItem(op.id);
+              }
+            }
+          } else if (op.action === 'set_budget') {
+            const serverCart = await ensureServerCart();
+            if (serverCart) {
+              res = await fetch('/api/shopper/cart/budget', {
+                method: 'POST',
+                headers: getGuestHeaders(),
+                body: JSON.stringify({
+                  cartId: serverCart.id,
+                  budgetLimit: op.budgetLimit ?? null,
+                }),
+              });
+            }
+          } else if (op.action === 'clear_cart') {
+            const serverCart = await ensureServerCart();
+            if (serverCart) {
+              res = await fetch(`/api/shopper/cart/${serverCart.id}`, {
+                method: 'DELETE',
+                headers: getGuestHeaders(),
+              });
+            }
+          } else if (op.action === 'lock_cart') {
+            const serverCart = await ensureServerCart();
+            if (serverCart) {
+              res = await fetch('/api/shopper/cart/lock', {
+                method: 'POST',
+                headers: getGuestHeaders(),
+                body: JSON.stringify({ cartId: serverCart.id }),
+              });
+            }
+          }
+
+          if (res) {
+            if (res.ok) {
+              const updatedCart: Cart = await res.json();
+              workingCart = updatedCart;
+              setCart(updatedCart);
+              await saveOfflineCartSnapshot(activeBranchId, callerIdSnapshot, updatedCart);
+              await removeOfflineQueueItem(op.id);
+            } else if (res.status >= 400 && res.status < 500) {
+              // Remove permanently invalid queued operation so queue does not stall
+              await removeOfflineQueueItem(op.id);
+            } else {
+              throw new Error(`Server error ${res.status}`);
+            }
+          }
+
+          completedCount += 1;
+          setSyncProgress({ completed: completedCount, total: queue.length });
+          const remaining = await getOfflineQueue(activeBranchId, callerIdSnapshot);
+          setQueuedOps(remaining);
+        }
+
+        const remainingAfter = await getOfflineQueue(activeBranchId, callerIdSnapshot);
+        setQueuedOps(remainingAfter);
+
+        if (remainingAfter.length === 0) {
+          if (workingCart) {
+            setCart(workingCart);
+            await saveOfflineCartSnapshot(activeBranchId, callerIdSnapshot, workingCart);
+          } else {
+            await loadCart();
+          }
+          setSyncStatus('synced');
+          setSyncNotice(t.cartSyncSuccess);
+          setTimeout(() => {
+            setSyncNotice(null);
+            setSyncStatus((prev) => (prev === 'synced' ? 'idle' : prev));
+          }, 4000);
+        } else {
+          setSyncStatus(navigator.onLine ? 'error' : 'queued');
+        }
+      } catch (err) {
+        console.warn('Offline queue sync interrupted:', err);
+        const remaining = await getOfflineQueue(activeBranchId, callerIdSnapshot);
+        setQueuedOps(remaining);
+        setSyncStatus(!navigator.onLine || isNetworkOfflineError(err) ? 'queued' : 'error');
+      } finally {
+        setIsSyncingCart(false);
+        setSyncProgress(null);
+      }
+    };
+
+    const promise = runSync().finally(() => {
+      syncInFlightRef.current = null;
+    });
+    syncInFlightRef.current = promise;
+    return promise;
+  }, [branch?.id, currentCallerId, token, t.cartSyncSuccess]);
+
+  // Offline / Online listeners & auto-sync when connectivity returns
   useEffect(() => {
     const handleOnline = () => {
       setIsOffline(false);
-      syncOfflineCartToServer();
+      void syncOfflineCartToServer();
     };
-    const handleOffline = () => setIsOffline(true);
+    const handleOffline = () => {
+      setIsOffline(true);
+    };
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
     return () => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
-  }, [branch]);
+  }, [syncOfflineCartToServer]);
 
   useEffect(() => {
     setActiveTab(initialTab);
@@ -401,16 +624,39 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
   }, [user?.id, token]);
 
   useEffect(() => {
-    if (branch) {
-      loadBranchProducts();
-      loadCart();
-      loadFavourites();
-      loadShoppingLists();
-      loadHistory();
-      loadProductHistory();
-      loadLoyaltyPoints();
-    }
-  }, [branch, user?.id, token]);
+    if (!branch) return;
+    let cancelled = false;
+
+    const bootstrapBranchState = async () => {
+      await loadBranchProducts();
+      const pending = await getOfflineQueue(branch.id, currentCallerId);
+      if (cancelled) return;
+      setQueuedOps(pending);
+
+      if (pending.length > 0 && navigator.onLine) {
+        const snapshot = await loadOfflineCartSnapshot(branch.id, currentCallerId);
+        if (!cancelled && snapshot) {
+          setCart(snapshot);
+        }
+        await syncOfflineCartToServer();
+      } else {
+        await loadCart();
+      }
+
+      if (!cancelled) {
+        loadFavourites();
+        loadShoppingLists();
+        loadHistory();
+        loadProductHistory();
+        loadLoyaltyPoints();
+      }
+    };
+
+    void bootstrapBranchState();
+    return () => {
+      cancelled = true;
+    };
+  }, [branch?.id, user?.id, token]);
 
   useEffect(() => {
     if (activeTab === 'history') {
@@ -442,14 +688,93 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
     return () => window.removeEventListener('hashchange', checkHashForSharedList);
   }, [user?.id, token]);
 
-  // Handle scanned barcode (Works seamlessly online and offline)
+  // Local helper: apply offline scanned/voice item to local cart snapshot & IndexedDB queue
+  const queueOfflineProductAdd = async (
+    product: EnrichedProduct,
+    quantityToAdd: number
+  ): Promise<Cart> => {
+    const activeBranch = branch!;
+    const baseCart: Cart = cartRef.current
+      ? { ...cartRef.current, items: cartRef.current.items.map((it) => ({ ...it })) }
+      : {
+          id: `offline-cart-${Date.now()}`,
+          shortCode: `OFF-${Math.floor(1000 + Math.random() * 9000)}`,
+          shopperId: currentCallerId,
+          shopperName: user?.name || 'Shopper',
+          shopperPhone: user?.phone || '',
+          supermarketId: activeBranch.supermarketId,
+          branchId: activeBranch.id,
+          status: 'active',
+          items: [],
+          subtotal: 0,
+          totalDiscount: 0,
+          finalTotal: 0,
+          budgetLimit: budgetInput ? parseFloat(budgetInput) : null,
+          isOfflineCreated: true,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+
+    const existingItem = baseCart.items.find((i) => i.barcode === product.barcode);
+    if (existingItem) {
+      existingItem.quantity += quantityToAdd;
+      existingItem.effectiveTotal = existingItem.quantity * existingItem.lockedPrice;
+    } else {
+      baseCart.items.push({
+        id: `item-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        productId: product.id,
+        barcode: product.barcode,
+        name: product.name,
+        category: product.category,
+        aisle: product.aisle || '',
+        shelf: product.shelf || '',
+        aisleShelf: product.aisleShelf,
+        quantity: quantityToAdd,
+        lockedPrice: product.effectivePrice,
+        originalBasePrice: product.basePrice,
+        discount: Math.max(0, product.basePrice - product.effectivePrice),
+        effectiveTotal: product.effectivePrice * quantityToAdd,
+        promoName: product.activePromotion?.name,
+        scannedAt: new Date().toISOString(),
+      });
+    }
+
+    let subtotal = 0;
+    let finalTotal = 0;
+    for (const it of baseCart.items) {
+      subtotal += it.originalBasePrice * it.quantity;
+      finalTotal += it.effectiveTotal;
+    }
+    baseCart.subtotal = subtotal;
+    baseCart.finalTotal = finalTotal;
+    baseCart.totalDiscount = Math.max(0, subtotal - finalTotal);
+    baseCart.isOfflineCreated = true;
+    baseCart.updatedAt = new Date().toISOString();
+
+    setCart(baseCart);
+    await saveOfflineCartSnapshot(activeBranch.id, currentCallerId, baseCart);
+    await enqueueOfflineOperation({
+      branchId: activeBranch.id,
+      callerId: currentCallerId,
+      action: 'scan_add',
+      barcode: product.barcode,
+      productName: product.name,
+      quantity: quantityToAdd,
+    });
+    const nextQueue = await getOfflineQueue(activeBranch.id, currentCallerId);
+    setQueuedOps(nextQueue);
+    setSyncStatus('queued');
+    triggerScanSuccessHaptic();
+    return baseCart;
+  };
+
+  // Handle scanned barcode (Works seamlessly online and offline via IndexedDB queue)
   const handleBarcodeScanned = async (barcode: string) => {
     if (!branch) {
       onOpenStoreModal();
       return;
     }
 
-    // Try finding product in local product catalogue
     const localProd = products.find((p) => p.barcode === barcode);
 
     if (activeTab === 'price_check') {
@@ -466,8 +791,7 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
         return;
       }
 
-      // Try server lookup if online
-      if (!isOffline) {
+      if (!isOffline && navigator.onLine) {
         try {
           const res = await fetch('/api/shopper/scan-lookup', {
             method: 'POST',
@@ -487,83 +811,25 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
             triggerPriceCheckHaptic();
             return;
           }
-        } catch (e) {}
+        } catch {
+          // Network failure handled below
+        }
       }
-      alert(t.noProductFound);
+      showScanError(t.noProductFound);
       return;
     }
 
-    // NORMAL ADD TO CART (Works both Online & Offline)
-    if (isOffline || !navigator.onLine) {
-      // Offline mode cart handling
+    // Offline or pending queue: persist scanned item into IndexedDB queue immediately
+    if (isOffline || !navigator.onLine || queuedOps.length > 0) {
       if (!localProd) {
-        alert(t.noProductFound);
+        showScanError(t.noProductFound);
         return;
       }
-
-      // Build local item with locked price
-      const existingCart: Cart = cart || {
-        id: `offline-cart-${Date.now()}`,
-        shortCode: `OFF-${Math.floor(1000 + Math.random() * 9000)}`,
-        shopperId: user?.id || 'guest',
-        shopperName: user?.name || 'Shopper',
-        shopperPhone: user?.phone || '',
-        supermarketId: branch.supermarketId,
-        branchId: branch.id,
-        status: 'active',
-        items: [],
-        subtotal: 0,
-        totalDiscount: 0,
-        finalTotal: 0,
-        budgetLimit: budgetInput ? parseFloat(budgetInput) : null,
-        isOfflineCreated: true,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-
-      const existingItem = existingCart.items.find((i) => i.barcode === barcode);
-      if (existingItem) {
-        existingItem.quantity += 1;
-        existingItem.effectiveTotal = existingItem.quantity * existingItem.lockedPrice;
-      } else {
-        existingCart.items.push({
-          id: `item-${Date.now()}`,
-          productId: localProd.id,
-          barcode: localProd.barcode,
-          name: localProd.name,
-          category: localProd.category,
-          aisle: localProd.aisle || '',
-          shelf: localProd.shelf || '',
-          aisleShelf: localProd.aisleShelf,
-          quantity: 1,
-          lockedPrice: localProd.effectivePrice,
-          originalBasePrice: localProd.basePrice,
-          discount: Math.max(0, localProd.basePrice - localProd.effectivePrice),
-          effectiveTotal: localProd.effectivePrice,
-          promoName: localProd.activePromotion?.name,
-          scannedAt: new Date().toISOString(),
-        });
-      }
-
-      // Recompute totals
-      let subtotal = 0;
-      let finalTotal = 0;
-      for (const it of existingCart.items) {
-        subtotal += it.originalBasePrice * it.quantity;
-        finalTotal += it.effectiveTotal;
-      }
-      existingCart.subtotal = subtotal;
-      existingCart.finalTotal = finalTotal;
-      existingCart.totalDiscount = Math.max(0, subtotal - finalTotal);
-      existingCart.isOfflineCreated = true;
-
-      setCart({ ...existingCart });
-      localStorage.setItem(`offline_cart_${branch.id}`, JSON.stringify(existingCart));
-      triggerScanSuccessHaptic();
+      await queueOfflineProductAdd(localProd, 1);
       return;
     }
 
-    // Online Add to Cart
+    // Online Add to Cart (with seamless network-failure fallback to IndexedDB queue)
     try {
       const res = await fetch('/api/shopper/cart/add', {
         method: 'POST',
@@ -573,13 +839,18 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
       const updatedCart = await res.json();
       if (res.ok) {
         setCart(updatedCart);
-        localStorage.setItem(`offline_cart_${branch.id}`, JSON.stringify(updatedCart));
+        await saveOfflineCartSnapshot(branch.id, currentCallerId, updatedCart);
         triggerScanSuccessHaptic();
       } else {
-        alert(updatedCart.error || t.noProductFound);
+        showScanError(updatedCart.error || t.noProductFound);
       }
-    } catch (e: any) {
-      alert(e.message || 'Error processing barcode');
+    } catch (err: any) {
+      if (isNetworkOfflineError(err) && localProd) {
+        setIsOffline(true);
+        await queueOfflineProductAdd(localProd, 1);
+      } else {
+        showScanError(err?.message || t.noProductFound);
+      }
     }
   };
 
@@ -636,67 +907,8 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
       };
     }
 
-    // Add item(s) to cart (works both offline & online)
-    if (isOffline || !navigator.onLine) {
-      const existingCart: Cart = cart
-        ? { ...cart, items: cart.items.map((it) => ({ ...it })) }
-        : {
-            id: `offline-cart-${Date.now()}`,
-            shortCode: `OFF-${Math.floor(1000 + Math.random() * 9000)}`,
-            shopperId: user?.id || 'guest',
-            shopperName: user?.name || 'Shopper',
-            shopperPhone: user?.phone || '',
-            supermarketId: branch.supermarketId,
-            branchId: branch.id,
-            status: 'active',
-            items: [],
-            subtotal: 0,
-            totalDiscount: 0,
-            finalTotal: 0,
-            budgetLimit: budgetInput ? parseFloat(budgetInput) : null,
-            isOfflineCreated: true,
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-          };
-
-      const existingItem = existingCart.items.find((i) => i.barcode === matchedProduct.barcode);
-      if (existingItem) {
-        existingItem.quantity += command.quantity;
-        existingItem.effectiveTotal = existingItem.quantity * existingItem.lockedPrice;
-      } else {
-        existingCart.items.push({
-          id: `item-${Date.now()}`,
-          productId: matchedProduct.id,
-          barcode: matchedProduct.barcode,
-          name: matchedProduct.name,
-          category: matchedProduct.category,
-          aisle: matchedProduct.aisle || '',
-          shelf: matchedProduct.shelf || '',
-          aisleShelf: matchedProduct.aisleShelf,
-          quantity: command.quantity,
-          lockedPrice: matchedProduct.effectivePrice,
-          originalBasePrice: matchedProduct.basePrice,
-          discount: Math.max(0, matchedProduct.basePrice - matchedProduct.effectivePrice),
-          effectiveTotal: matchedProduct.effectivePrice * command.quantity,
-          promoName: matchedProduct.activePromotion?.name,
-          scannedAt: new Date().toISOString(),
-        });
-      }
-
-      let subtotal = 0;
-      let finalTotal = 0;
-      for (const it of existingCart.items) {
-        subtotal += it.originalBasePrice * it.quantity;
-        finalTotal += it.effectiveTotal;
-      }
-      existingCart.subtotal = subtotal;
-      existingCart.finalTotal = finalTotal;
-      existingCart.totalDiscount = Math.max(0, subtotal - finalTotal);
-      existingCart.isOfflineCreated = true;
-
-      setCart({ ...existingCart });
-      localStorage.setItem(`offline_cart_${branch.id}`, JSON.stringify(existingCart));
-      triggerScanSuccessHaptic();
+    if (isOffline || !navigator.onLine || queuedOps.length > 0) {
+      await queueOfflineProductAdd(matchedProduct, command.quantity);
       return {
         ok: true,
         message: `${t.voiceAddedPrefix} ${command.quantity} × ${matchedProduct.name} ${t.voiceToCartSuffix}`,
@@ -717,7 +929,7 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
       const updatedCart = await res.json();
       if (res.ok) {
         setCart(updatedCart);
-        localStorage.setItem(`offline_cart_${branch.id}`, JSON.stringify(updatedCart));
+        await saveOfflineCartSnapshot(branch.id, currentCallerId, updatedCart);
         triggerScanSuccessHaptic();
         return {
           ok: true,
@@ -725,47 +937,77 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
         };
       }
       return { ok: false, message: updatedCart.error || t.noProductFound };
-    } catch (e: any) {
-      return { ok: false, message: e?.message || 'Error adding item to cart' };
+    } catch (err: any) {
+      if (isNetworkOfflineError(err)) {
+        setIsOffline(true);
+        await queueOfflineProductAdd(matchedProduct, command.quantity);
+        return {
+          ok: true,
+          message: `${t.voiceAddedPrefix} ${command.quantity} × ${matchedProduct.name} ${t.voiceToCartSuffix}`,
+        };
+      }
+      return { ok: false, message: err?.message || 'Error adding item to cart' };
     }
   };
 
-  // Quantity adjustments
+  // Helper: offline quantity mutation persisted to IndexedDB queue & snapshot
+  const applyOfflineQuantityUpdate = async (
+    currentCart: Cart,
+    itemId: string,
+    newQty: number
+  ) => {
+    const targetItem = currentCart.items.find((it) => it.id === itemId);
+    const updatedItems = currentCart.items
+      .map((it) => {
+        if (it.id === itemId) {
+          return {
+            ...it,
+            quantity: newQty,
+            effectiveTotal: newQty * it.lockedPrice,
+          };
+        }
+        return it;
+      })
+      .filter((it) => it.quantity > 0);
+
+    let subtotal = 0;
+    let finalTotal = 0;
+    for (const it of updatedItems) {
+      subtotal += it.originalBasePrice * it.quantity;
+      finalTotal += it.effectiveTotal;
+    }
+    const updatedCart: Cart = {
+      ...currentCart,
+      items: updatedItems,
+      subtotal,
+      finalTotal,
+      totalDiscount: Math.max(0, subtotal - finalTotal),
+      isOfflineCreated: true,
+      updatedAt: new Date().toISOString(),
+    };
+    const branchKey = branch?.id || currentCart.branchId;
+    setCart(updatedCart);
+    await saveOfflineCartSnapshot(branchKey, currentCallerId, updatedCart);
+    await enqueueOfflineOperation({
+      branchId: branchKey,
+      callerId: currentCallerId,
+      action: 'update_qty',
+      itemId,
+      barcode: targetItem?.barcode,
+      productName: targetItem?.name,
+      quantity: newQty,
+    });
+    const nextQueue = await getOfflineQueue(branchKey, currentCallerId);
+    setQueuedOps(nextQueue);
+    setSyncStatus('queued');
+  };
+
+  // Quantity adjustments (Online or queued in IndexedDB when offline)
   const handleUpdateQuantity = async (itemId: string, newQty: number) => {
     if (!cart) return;
 
-    if (isOffline) {
-      // Local offline update
-      const updatedItems = cart.items
-        .map((it) => {
-          if (it.id === itemId) {
-            return {
-              ...it,
-              quantity: newQty,
-              effectiveTotal: newQty * it.lockedPrice,
-            };
-          }
-          return it;
-        })
-        .filter((it) => it.quantity > 0);
-
-      let subtotal = 0;
-      let finalTotal = 0;
-      for (const it of updatedItems) {
-        subtotal += it.originalBasePrice * it.quantity;
-        finalTotal += it.effectiveTotal;
-      }
-      const updatedCart: Cart = {
-        ...cart,
-        items: updatedItems,
-        subtotal,
-        finalTotal,
-        totalDiscount: Math.max(0, subtotal - finalTotal),
-        isOfflineCreated: true,
-      };
-      setCart(updatedCart);
-      const branchKey = branch?.id || cart.branchId;
-      localStorage.setItem(`offline_cart_${branchKey}`, JSON.stringify(updatedCart));
+    if (isOffline || !navigator.onLine || queuedOps.length > 0) {
+      await applyOfflineQuantityUpdate(cart, itemId, newQty);
       return;
     }
 
@@ -779,27 +1021,50 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
         const updated = await res.json();
         setCart(updated);
         const branchKey = branch?.id || cart.branchId;
-        localStorage.setItem(`offline_cart_${branchKey}`, JSON.stringify(updated));
+        await saveOfflineCartSnapshot(branchKey, currentCallerId, updated);
       }
-    } catch (e) {}
+    } catch (err) {
+      if (isNetworkOfflineError(err)) {
+        setIsOffline(true);
+        await applyOfflineQuantityUpdate(cart, itemId, newQty);
+      }
+    }
   };
 
   // Update budget limit (Phase 2 Daily Spending Cap) via BudgetAlert component
   const handleUpdateBudgetLimit = async (limit: number | null) => {
-    if (cart) {
-      const updatedCart = { ...cart, budgetLimit: limit };
-      setCart(updatedCart);
-      const branchKey = branch?.id || cart.branchId;
-      localStorage.setItem(`offline_cart_${branchKey}`, JSON.stringify(updatedCart));
+    if (!cart) return;
+    const branchKey = branch?.id || cart.branchId;
+    const updatedCart = { ...cart, budgetLimit: limit };
+    setCart(updatedCart);
+    await saveOfflineCartSnapshot(branchKey, currentCallerId, updatedCart);
 
-      if (!isOffline) {
-        try {
-          await fetch('/api/shopper/cart/budget', {
-            method: 'POST',
-            headers: getGuestHeaders(),
-            body: JSON.stringify({ cartId: cart.id, budgetLimit: limit }),
-          });
-        } catch (e) {}
+    const queueBudget = async () => {
+      await enqueueOfflineOperation({
+        branchId: branchKey,
+        callerId: currentCallerId,
+        action: 'set_budget',
+        budgetLimit: limit,
+      });
+      setQueuedOps(await getOfflineQueue(branchKey, currentCallerId));
+      setSyncStatus('queued');
+    };
+
+    if (isOffline || !navigator.onLine || queuedOps.length > 0) {
+      await queueBudget();
+      return;
+    }
+
+    try {
+      await fetch('/api/shopper/cart/budget', {
+        method: 'POST',
+        headers: getGuestHeaders(),
+        body: JSON.stringify({ cartId: cart.id, budgetLimit: limit }),
+      });
+    } catch (err) {
+      if (isNetworkOfflineError(err)) {
+        setIsOffline(true);
+        await queueBudget();
       }
     }
   };
@@ -807,11 +1072,24 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
   // Finish shopping & generate till checkout code
   const handleFinishShopping = async () => {
     if (!cart || cart.items.length === 0) return;
-    if (isOffline) {
-      // Offline lock: generate till code locally
+    const branchKey = branch?.id || cart.branchId;
+
+    const lockLocally = async () => {
       const lockedCart = { ...cart, status: 'locked' as const };
       setCart(lockedCart);
+      await saveOfflineCartSnapshot(branchKey, currentCallerId, lockedCart);
+      await enqueueOfflineOperation({
+        branchId: branchKey,
+        callerId: currentCallerId,
+        action: 'lock_cart',
+      });
+      setQueuedOps(await getOfflineQueue(branchKey, currentCallerId));
+      setSyncStatus('queued');
       setIsCartCodeModalOpen(true);
+    };
+
+    if (isOffline || !navigator.onLine || queuedOps.length > 0) {
+      await lockLocally();
       return;
     }
 
@@ -824,15 +1102,23 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
       if (res.ok) {
         const lockedCart = await res.json();
         setCart(lockedCart);
+        await saveOfflineCartSnapshot(branchKey, currentCallerId, lockedCart);
         setIsCartCodeModalOpen(true);
       }
-    } catch (e) {}
+    } catch (err) {
+      if (isNetworkOfflineError(err)) {
+        setIsOffline(true);
+        await lockLocally();
+      }
+    }
   };
 
   // Empty cart
   const handleClearCart = async () => {
     if (!cart || !confirm('Are you sure you want to empty your cart?')) return;
-    if (isOffline) {
+    const branchKey = branch?.id || cart.branchId;
+
+    const clearLocally = async () => {
       const emptyCart: Cart = {
         ...cart,
         items: [],
@@ -841,8 +1127,22 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
         finalTotal: 0,
       };
       setCart(emptyCart);
-      const branchKey = branch?.id || cart.branchId;
-      localStorage.setItem(`offline_cart_${branchKey}`, JSON.stringify(emptyCart));
+      await saveOfflineCartSnapshot(branchKey, currentCallerId, emptyCart);
+      await clearOfflineQueueForBranch(branchKey, currentCallerId);
+      if (!cart.id.startsWith('offline-cart-')) {
+        await enqueueOfflineOperation({
+          branchId: branchKey,
+          callerId: currentCallerId,
+          action: 'clear_cart',
+        });
+      }
+      const nextQueue = await getOfflineQueue(branchKey, currentCallerId);
+      setQueuedOps(nextQueue);
+      setSyncStatus(nextQueue.length > 0 ? 'queued' : 'idle');
+    };
+
+    if (isOffline || !navigator.onLine || queuedOps.length > 0) {
+      await clearLocally();
       return;
     }
 
@@ -854,8 +1154,16 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
       if (res.ok) {
         const emptied = await res.json();
         setCart(emptied);
+        await saveOfflineCartSnapshot(branchKey, currentCallerId, emptied);
+        await clearOfflineQueueForBranch(branchKey, currentCallerId);
+        setQueuedOps([]);
       }
-    } catch (e) {}
+    } catch (err) {
+      if (isNetworkOfflineError(err)) {
+        setIsOffline(true);
+        await clearLocally();
+      }
+    }
   };
 
   // Phase 2: Re-add past cart items
@@ -871,7 +1179,7 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
         const data = await res.json();
         const nextCart = data.cart || data;
         setCart(nextCart);
-        localStorage.setItem(`offline_cart_${branch.id}`, JSON.stringify(nextCart));
+        await saveOfflineCartSnapshot(branch.id, currentCallerId, nextCart);
         setReAddSuccessMsg(t.reAddSuccess);
         setActiveTab('cart');
         setTimeout(() => setReAddSuccessMsg(null), 4000);
@@ -1153,7 +1461,7 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
       if (res.ok) {
         const nextCart = data.cart || data;
         setCart(nextCart);
-        localStorage.setItem(`offline_cart_${branch.id}`, JSON.stringify(nextCart));
+        await saveOfflineCartSnapshot(branch.id, currentCallerId, nextCart);
         setActiveTab('cart');
       } else {
         setListError(data.error || 'Could not convert list to cart.');
@@ -1195,18 +1503,92 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
 
   return (
     <div className="pb-28 pt-3 max-w-xl mx-auto px-4">
-      {/* Offline Alert Banner */}
-      {isOffline && (
-        <div className="mb-3 p-3 rounded-2xl bg-amber-500 text-white text-xs font-semibold flex items-center justify-between shadow-sm">
-          <div className="flex items-center gap-2">
-            <WifiOff className="w-4 h-4 shrink-0 animate-pulse" />
-            <span>{t.offlineMode}</span>
+      {/* Live IndexedDB Syncing Indicator Banner when connectivity returns */}
+      {(isSyncingCart || syncStatus === 'syncing') && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="mb-3 p-3 rounded-2xl bg-sky-600 text-white text-xs font-semibold shadow-sm"
+        >
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <RefreshCw className="w-4 h-4 shrink-0 animate-spin" />
+              <span className="truncate">{t.syncingQueuedItems}</span>
+            </div>
+            {syncProgress && (
+              <span className="text-[11px] font-mono tabular-nums shrink-0 bg-sky-700/80 px-2 py-0.5 rounded-md">
+                {syncProgress.completed}/{syncProgress.total}
+              </span>
+            )}
           </div>
-          {cart && cart.isOfflineCreated && (
-            <span className="text-[10px] bg-amber-600 px-2 py-0.5 rounded-full font-mono">
-              Offline Cart Active
+          {syncProgress && syncProgress.total > 0 && (
+            <div className="mt-2 h-1.5 w-full rounded-full bg-sky-800/70 overflow-hidden">
+              <div
+                className="h-full bg-white transition-all duration-200"
+                style={{
+                  width: `${Math.min(100, Math.max(15, Math.round((syncProgress.completed / syncProgress.total) * 100)))}%`,
+                }}
+              />
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Offline Alert Banner with IndexedDB Queue Counter */}
+      {isOffline && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="mb-3 p-3 rounded-2xl bg-amber-500 text-white text-xs font-semibold flex items-center justify-between gap-2 shadow-sm"
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            <WifiOff className="w-4 h-4 shrink-0 animate-pulse" />
+            <span className="truncate">{t.offlineMode}</span>
+          </div>
+          {(queuedOps.length > 0 || (cart && cart.isOfflineCreated)) && (
+            <span className="text-[10px] bg-amber-600 px-2 py-0.5 rounded-md font-mono tabular-nums shrink-0">
+              {queuedOps.length > 0
+                ? `${queuedOps.length} ${t.queuedItemsLabel}`
+                : 'Offline Cart'}
             </span>
           )}
+        </div>
+      )}
+
+      {/* Pending Queue Retry Banner if online and items still waiting */}
+      {!isOffline && !isSyncingCart && syncStatus !== 'syncing' && queuedOps.length > 0 && (
+        <div className="mb-3 p-3 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 text-amber-900 dark:text-amber-200 text-xs font-semibold flex items-center justify-between gap-2 shadow-xs">
+          <div className="flex items-center gap-2 min-w-0">
+            <Clock className="w-4 h-4 shrink-0 text-amber-600 dark:text-amber-400" />
+            <span className="truncate tabular-nums">
+              {queuedOps.length} {t.queuedItemsLabel}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => void syncOfflineCartToServer()}
+            className="px-3 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-[11px] font-bold shrink-0 transition"
+          >
+            {t.retrySyncBtn}
+          </button>
+        </div>
+      )}
+
+      {/* Non-blocking Scan Error Notice */}
+      {scanErrorNotice && (
+        <div className="mb-3 p-3 rounded-2xl bg-rose-600 text-white text-xs font-semibold flex items-center justify-between gap-2 shadow-sm">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            <span>{scanErrorNotice}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setScanErrorNotice(null)}
+            className="p-1 hover:bg-rose-700 rounded-lg"
+            aria-label="Close alert"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
         </div>
       )}
 
@@ -1392,14 +1774,15 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
               {t.yourCart}
             </h2>
             <div className="flex items-center gap-2">
-              {isOffline && cart && cart.isOfflineCreated && (
+              {(isSyncingCart || queuedOps.length > 0 || (cart && cart.isOfflineCreated)) && (
                 <button
-                  onClick={syncOfflineCartToServer}
-                  disabled={isSyncingCart}
-                  className="text-xs text-emerald-600 font-semibold flex items-center gap-1 p-1"
+                  type="button"
+                  onClick={() => void syncOfflineCartToServer()}
+                  disabled={isSyncingCart || isOffline}
+                  className="text-xs text-sky-600 dark:text-sky-400 font-semibold flex items-center gap-1 p-1 disabled:opacity-60"
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${isSyncingCart ? 'animate-spin' : ''}`} />
-                  <span>{t.syncCartNow}</span>
+                  <span>{isSyncingCart ? t.syncingCartStatus : t.syncCartNow}</span>
                 </button>
               )}
               {cart && cart.items.length > 0 && (

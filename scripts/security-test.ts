@@ -1315,6 +1315,570 @@ async function runTests() {
       );
     });
 
+    // Shared state for Loyalty & Rewards Checks 19-22
+    let activeCashierToken = '';
+    let loyShopperTok = '';
+    let loyShopperId = '';
+    let capShopperTok = '';
+    let testRewardId = '';
+
+    await check('19. Loyalty earning is strictly cashier-verified, blocks forged claims/sync, is idempotent per cart, and reverses cleanly', async () => {
+      // Restore Cashier X (suspended in check 13) and log back in
+      const usersRes = await api('/api/admin/users', { token: updatedAdminToken });
+      assert.equal(usersRes.status, 200);
+      const cashierUser = usersRes.data.find((u: any) => u.email === cashierXEmail);
+      assert.ok(cashierUser);
+      const reactivateCashier = await api(`/api/admin/users/${cashierUser.id}/status`, {
+        method: 'PUT',
+        token: updatedAdminToken,
+        body: JSON.stringify({ status: 'active' }),
+      });
+      assert.equal(reactivateCashier.status, 200);
+
+      const cashierLogin = await api('/api/auth/login', {
+        method: 'POST',
+        headers: { 'x-forwarded-for': '198.51.100.101' },
+        body: JSON.stringify({ identifier: cashierXEmail, password: cashierXPass, portal: 'staff' }),
+      });
+      assert.equal(cashierLogin.status, 200);
+      activeCashierToken = cashierLogin.data.token;
+
+      // Replenish Branch X stock and set clean unit price
+      const stockUp = await api('/api/owner/branch-product-override', {
+        method: 'POST',
+        token: ownerAToken,
+        body: JSON.stringify({ branchId: branchXId, productId: prodAId, stock: 250, priceOverride: 100 }),
+      });
+      assert.equal(stockUp.status, 200);
+
+      // Register fresh shopper starting at 0 points
+      const regLoy = await api('/api/auth/register', {
+        method: 'POST',
+        headers: { 'x-forwarded-for': '198.51.100.102' },
+        body: JSON.stringify({
+          name: 'Loyalty Tester',
+          email: 'loyalty-tester@example.com',
+          phone: '+254700000019',
+          password: makeTestSecret('LoyTest'),
+        }),
+      });
+      assert.equal(regLoy.status, 200);
+      loyShopperTok = regLoy.data.token;
+      loyShopperId = regLoy.data.user.id;
+
+      // Forged claims / receipt imports / QR scans are blocked
+      assert.equal((await api('/api/shopper/loyalty/claim', { method: 'POST', token: loyShopperTok, body: JSON.stringify({ points: 999 }) })).status, 403);
+      assert.equal((await api('/api/shopper/receipts/import', { method: 'POST', token: loyShopperTok, body: JSON.stringify({ total: 5000 }) })).status, 403);
+      assert.equal((await api('/api/shopper/loyalty/scan', { method: 'POST', token: loyShopperTok, body: JSON.stringify({ qrPayload: 'FAKE' }) })).status, 404);
+
+      // Offline cart sync cannot forge verified status or award points
+      const syncRes = await api('/api/shopper/cart/sync', {
+        method: 'POST',
+        token: loyShopperTok,
+        body: JSON.stringify({
+          branchId: branchXId,
+          status: 'verified',
+          items: [{ productId: prodAId, barcode: prodABarcode, name: 'Milk', quantity: 5, lockedPrice: 100, originalBasePrice: 100, discount: 0, effectiveTotal: 500 }],
+        }),
+      });
+      assert.equal(syncRes.status, 200);
+      assert.notEqual(syncRes.data.status, 'verified');
+      const loySumAfterSync = await api('/api/shopper/loyalty-points', { token: loyShopperTok });
+      assert.equal(loySumAfterSync.data.totalPoints, 0);
+
+      // Unverified cart cannot be completed (400) and awards 0 points
+      const uCartId = syncRes.data.id;
+      const compUnverified = await api('/api/cashier/complete', {
+        method: 'POST',
+        token: activeCashierToken,
+        body: JSON.stringify({ cartId: uCartId }),
+      });
+      assert.equal(compUnverified.status, 400);
+      assert.equal((await api('/api/shopper/loyalty-points', { token: loyShopperTok })).data.totalPoints, 0);
+
+      // Cashier verifies cart -> awards points ONCE; second verify -> 400; complete -> 0 extra pts
+      const verRes1 = await api('/api/cashier/verify', {
+        method: 'POST',
+        token: activeCashierToken,
+        body: JSON.stringify({ cartId: uCartId }),
+      });
+      assert.equal(verRes1.status, 200);
+      const earned1 = verRes1.data.loyaltyPointsEarned;
+      assert.ok(earned1 > 0);
+
+      const verRes2 = await api('/api/cashier/verify', {
+        method: 'POST',
+        token: activeCashierToken,
+        body: JSON.stringify({ cartId: uCartId }),
+      });
+      assert.equal(verRes2.status, 400);
+
+      const compRes = await api('/api/cashier/complete', {
+        method: 'POST',
+        token: activeCashierToken,
+        body: JSON.stringify({ cartId: uCartId }),
+      });
+      assert.equal(compRes.status, 200);
+      assert.equal(compRes.data.loyaltyPointsEarned, earned1);
+
+      const sumAfterComp = await api('/api/shopper/loyalty-points', { token: loyShopperTok });
+      assert.equal(sumAfterComp.data.totalPoints, earned1);
+      assert.equal(sumAfterComp.data.storedBalance, sumAfterComp.data.ledgerBalance);
+      assert.equal(
+        sumAfterComp.data.ledger.filter((e: any) => e.cartId === uCartId && e.type === 'earn').length,
+        1
+      );
+
+      // Verify a second cart, then reverse its points via admin reversal
+      const c2 = await api(`/api/shopper/cart?branchId=${branchXId}`, { token: loyShopperTok });
+      assert.equal(c2.status, 200);
+      const add2 = await api('/api/shopper/cart/add', {
+        method: 'POST',
+        token: loyShopperTok,
+        body: JSON.stringify({ branchId: branchXId, barcode: prodABarcode, quantity: 5, cartId: c2.data.id }),
+      });
+      assert.equal(add2.status, 200);
+      const verC2 = await api('/api/cashier/verify', {
+        method: 'POST',
+        token: activeCashierToken,
+        body: JSON.stringify({ cartId: c2.data.id }),
+      });
+      assert.equal(verC2.status, 200);
+      const earned2 = verC2.data.loyaltyPointsEarned;
+      assert.ok(earned2 > 0);
+
+      // Non-admin blocked from admin points reversal
+      assert.equal(
+        (await api(`/api/admin/carts/${c2.data.id}/reverse-points`, { method: 'POST', token: ownerAToken, body: JSON.stringify({ reason: 'test' }) })).status,
+        403
+      );
+
+      // Admin reverses points on c2 cleanly and idempotently
+      const revRes = await api(`/api/admin/carts/${c2.data.id}/reverse-points`, {
+        method: 'POST',
+        token: updatedAdminToken,
+        body: JSON.stringify({ reason: 'Audit mismatch reversal' }),
+      });
+      assert.equal(revRes.status, 200);
+      assert.equal(revRes.data.reversedPoints, earned2);
+
+      const sumAfterRev = await api('/api/shopper/loyalty-points', { token: loyShopperTok });
+      assert.equal(sumAfterRev.data.totalPoints, earned1);
+      assert.equal(sumAfterRev.data.storedBalance, sumAfterRev.data.ledgerBalance);
+    });
+
+    await check('20. Admin-configurable min cart value, daily cap, monthly cap & settings RBAC work accurately', async () => {
+      // Non-admins blocked from loyalty settings
+      for (const tok of [loyShopperTok, ownerAToken, clerkXToken]) {
+        assert.equal((await api('/api/admin/loyalty/settings', { token: tok })).status, 403);
+        assert.equal(
+          (await api('/api/admin/loyalty/settings', { method: 'PUT', token: tok, body: JSON.stringify({ dailyCapPoints: 9999 }) })).status,
+          403
+        );
+      }
+
+      // Set strict rules: minCartValueKes=300, dailyCapPoints=20
+      const setRules = await api('/api/admin/loyalty/settings', {
+        method: 'PUT',
+        token: updatedAdminToken,
+        body: JSON.stringify({
+          pointsPerKesAmount: 25,
+          bonusPointsPerVerifiedCart: 5,
+          minCartValueKes: 300,
+          dailyCapPoints: 20,
+          monthlyCapPoints: 100,
+          maxOpenRedemptionsPerShopper: 3,
+        }),
+      });
+      assert.equal(setRules.status, 200);
+      assert.equal(setRules.data.minCartValueKes, 300);
+      assert.equal(setRules.data.dailyCapPoints, 20);
+
+      const regCap = await api('/api/auth/register', {
+        method: 'POST',
+        headers: { 'x-forwarded-for': '198.51.100.103' },
+        body: JSON.stringify({
+          name: 'Cap Tester',
+          email: 'cap-tester@example.com',
+          phone: '+254700000020',
+          password: makeTestSecret('CapTest'),
+        }),
+      });
+      assert.equal(regCap.status, 200);
+      capShopperTok = regCap.data.token;
+
+      // Small cart (2 units = 180 KES < 300 min) earns 0 pts
+      const smallCart = await api(`/api/shopper/cart?branchId=${branchXId}`, { token: capShopperTok });
+      await api('/api/shopper/cart/add', {
+        method: 'POST',
+        token: capShopperTok,
+        body: JSON.stringify({ branchId: branchXId, barcode: prodABarcode, quantity: 2, cartId: smallCart.data.id }),
+      });
+      const verSmall = await api('/api/cashier/verify', {
+        method: 'POST',
+        token: activeCashierToken,
+        body: JSON.stringify({ cartId: smallCart.data.id }),
+      });
+      assert.equal(verSmall.status, 200);
+      assert.equal(verSmall.data.loyaltyPointsEarned, 0);
+
+      // Large cart (10 units = 900 KES) capped at dailyCapPoints = 20
+      const bigCart = await api(`/api/shopper/cart?branchId=${branchXId}`, { token: capShopperTok });
+      await api('/api/shopper/cart/add', {
+        method: 'POST',
+        token: capShopperTok,
+        body: JSON.stringify({ branchId: branchXId, barcode: prodABarcode, quantity: 10, cartId: bigCart.data.id }),
+      });
+      const verBig = await api('/api/cashier/verify', {
+        method: 'POST',
+        token: activeCashierToken,
+        body: JSON.stringify({ cartId: bigCart.data.id }),
+      });
+      assert.equal(verBig.status, 200);
+      assert.equal(verBig.data.loyaltyPointsEarned, 20);
+
+      // Restore standard defaults for rewards tests
+      const restoreRules = await api('/api/admin/loyalty/settings', {
+        method: 'PUT',
+        token: updatedAdminToken,
+        body: JSON.stringify({
+          pointsPerKesAmount: 25,
+          bonusPointsPerVerifiedCart: 5,
+          minCartValueKes: 100,
+          dailyCapPoints: 500,
+          monthlyCapPoints: 5000,
+          maxOpenRedemptionsPerShopper: 3,
+        }),
+      });
+      assert.equal(restoreRules.status, 200);
+    });
+
+    await check('21. Rewards catalogue RBAC, atomic balance/stock enforcement, double-spend guard & cancellation refund', async () => {
+      // Seed rewards exist (Smart Cart T-shirt, Hoodie, Cap)
+      const pubRewards = await api('/api/rewards');
+      assert.equal(pubRewards.status, 200);
+      assert.ok(pubRewards.data.length >= 3);
+      assert.ok(pubRewards.data.some((r: any) => r.name === 'Smart Cart T-shirt'));
+
+      // Owners, staff, shoppers blocked from managing rewards catalogue
+      for (const tok of [ownerAToken, clerkXToken, loyShopperTok]) {
+        assert.equal((await api('/api/admin/rewards', { token: tok })).status, 403);
+        assert.equal(
+          (await api('/api/admin/rewards', { method: 'POST', token: tok, body: JSON.stringify({ name: 'Rogue', pointsCost: 1 }) })).status,
+          403
+        );
+      }
+
+      // Admin creates a hidden reward item with size S=2, M=0
+      const createRew = await api('/api/admin/rewards', {
+        method: 'POST',
+        token: updatedAdminToken,
+        body: JSON.stringify({
+          name: 'Smart Cart Bottle',
+          description: 'Insulated steel bottle',
+          pointsCost: 40,
+          unitCostKes: 650,
+          colors: ['Emerald Green'],
+          sizes: ['S', 'M'],
+          stockBySize: { S: 2, M: 0 },
+          status: 'hidden',
+        }),
+      });
+      assert.equal(createRew.status, 200);
+      testRewardId = createRew.data.id;
+
+      // Hidden item is absent from public catalogue & cannot be redeemed
+      const pubBefore = await api('/api/rewards');
+      assert.equal(pubBefore.data.some((r: any) => r.id === testRewardId), false);
+      const redeemHidden = await api('/api/shopper/rewards/redeem', {
+        method: 'POST',
+        token: capShopperTok,
+        headers: { 'x-forwarded-for': '198.51.100.110' },
+        body: JSON.stringify({
+          rewardId: testRewardId,
+          size: 'S',
+          color: 'Emerald Green',
+          fulfillmentMethod: 'collection',
+          branchId: branchXId,
+          contactPhone: '+254700000020',
+        }),
+      });
+      assert.equal(redeemHidden.status, 404);
+
+      // Admin activates reward
+      const actRew = await api(`/api/admin/rewards/${testRewardId}`, {
+        method: 'PUT',
+        token: updatedAdminToken,
+        body: JSON.stringify({ status: 'active' }),
+      });
+      assert.equal(actRew.status, 200);
+
+      // Out-of-stock size M rejected (400)
+      const oosRes = await api('/api/shopper/rewards/redeem', {
+        method: 'POST',
+        token: capShopperTok,
+        headers: { 'x-forwarded-for': '198.51.100.111' },
+        body: JSON.stringify({
+          rewardId: testRewardId,
+          size: 'M',
+          color: 'Emerald Green',
+          fulfillmentMethod: 'collection',
+          branchId: branchXId,
+          contactPhone: '+254700000020',
+        }),
+      });
+      assert.equal(oosRes.status, 400);
+
+      // capShopper has 20 pts < 40 pts -> insufficient points (400)
+      const lowBalRes = await api('/api/shopper/rewards/redeem', {
+        method: 'POST',
+        token: capShopperTok,
+        headers: { 'x-forwarded-for': '198.51.100.112' },
+        body: JSON.stringify({
+          rewardId: testRewardId,
+          size: 'S',
+          color: 'Emerald Green',
+          fulfillmentMethod: 'collection',
+          branchId: branchXId,
+          contactPhone: '+254700000020',
+        }),
+      });
+      assert.equal(lowBalRes.status, 400);
+
+      // Register double-spend shopper and give ~50 pts (enough for 1x 40pt item, NOT 2x)
+      const regDbl = await api('/api/auth/register', {
+        method: 'POST',
+        headers: { 'x-forwarded-for': '198.51.100.113' },
+        body: JSON.stringify({
+          name: 'Double Spend Tester',
+          email: 'double-spend@example.com',
+          phone: '+254700000021',
+          password: makeTestSecret('DblSpend'),
+        }),
+      });
+      assert.equal(regDbl.status, 200);
+      const dblTok = regDbl.data.token;
+
+      const dblCart = await api(`/api/shopper/cart?branchId=${branchXId}`, { token: dblTok });
+      await api('/api/shopper/cart/add', {
+        method: 'POST',
+        token: dblTok,
+        body: JSON.stringify({ branchId: branchXId, barcode: prodABarcode, quantity: 13, cartId: dblCart.data.id }),
+      });
+      const verDbl = await api('/api/cashier/verify', {
+        method: 'POST',
+        token: activeCashierToken,
+        body: JSON.stringify({ cartId: dblCart.data.id }),
+      });
+      assert.equal(verDbl.status, 200);
+      const startBal = verDbl.data.loyaltyPointsEarned;
+      assert.ok(startBal >= 40 && startBal < 80, `Expected 40..79 pts, got ${startBal}`);
+
+      // Concurrent double-spend: strictly 1 succeeds, 1 fails
+      const [r1, r2] = await Promise.all([
+        api('/api/shopper/rewards/redeem', {
+          method: 'POST',
+          token: dblTok,
+          headers: { 'x-forwarded-for': '198.51.100.121' },
+          body: JSON.stringify({
+            rewardId: testRewardId,
+            size: 'S',
+            color: 'Emerald Green',
+            fulfillmentMethod: 'collection',
+            branchId: branchXId,
+            contactPhone: '+254700000021',
+          }),
+        }),
+        api('/api/shopper/rewards/redeem', {
+          method: 'POST',
+          token: dblTok,
+          headers: { 'x-forwarded-for': '198.51.100.122' },
+          body: JSON.stringify({
+            rewardId: testRewardId,
+            size: 'S',
+            color: 'Emerald Green',
+            fulfillmentMethod: 'collection',
+            branchId: branchXId,
+            contactPhone: '+254700000021',
+          }),
+        }),
+      ]);
+      const statuses = [r1.status, r2.status].sort();
+      assert.deepEqual(statuses, [200, 400]);
+      const okOrder = r1.status === 200 ? r1.data.order : r2.data.order;
+
+      const dblSumAfter = await api('/api/shopper/loyalty-points', { token: dblTok });
+      assert.equal(dblSumAfter.data.totalPoints, startBal - 40);
+      assert.equal(dblSumAfter.data.storedBalance, dblSumAfter.data.ledgerBalance);
+
+      // Other shopper never sees dbl's redemption order
+      const capOrders = await api('/api/shopper/rewards/redemptions', { token: capShopperTok });
+      assert.equal(capOrders.data.some((o: any) => o.id === okOrder.id), false);
+
+      // Admin approves order -> stockBySize.S drops 2 -> 1
+      const appOrd = await api(`/api/admin/redemptions/${okOrder.id}/status`, {
+        method: 'PUT',
+        token: updatedAdminToken,
+        body: JSON.stringify({ status: 'approved' }),
+      });
+      assert.equal(appOrd.status, 200);
+      const adminRews1 = await api('/api/admin/rewards', { token: updatedAdminToken });
+      assert.equal(adminRews1.data.find((r: any) => r.id === testRewardId).stockBySize.S, 1);
+
+      // Admin cancels/rejects approved order -> refunds 40 pts AND restores stockBySize.S back to 2
+      const canOrd = await api(`/api/admin/redemptions/${okOrder.id}/status`, {
+        method: 'PUT',
+        token: updatedAdminToken,
+        body: JSON.stringify({ status: 'cancelled', reason: 'Supplier stock check' }),
+      });
+      assert.equal(canOrd.status, 200);
+
+      const dblSumRefund = await api('/api/shopper/loyalty-points', { token: dblTok });
+      assert.equal(dblSumRefund.data.totalPoints, startBal);
+      assert.equal(dblSumRefund.data.storedBalance, dblSumRefund.data.ledgerBalance);
+
+      const adminRews2 = await api('/api/admin/rewards', { token: updatedAdminToken });
+      assert.equal(adminRews2.data.find((r: any) => r.id === testRewardId).stockBySize.S, 2);
+    });
+
+    await check('22. Max open redemptions cap, suspended shopper freeze, order lifecycle & admin CSV exports work cleanly', async () => {
+      // Configure maxOpenRedemptionsPerShopper = 2 and top up test reward stock
+      await api('/api/admin/loyalty/settings', {
+        method: 'PUT',
+        token: updatedAdminToken,
+        body: JSON.stringify({ maxOpenRedemptionsPerShopper: 2 }),
+      });
+      await api(`/api/admin/rewards/${testRewardId}`, {
+        method: 'PUT',
+        token: updatedAdminToken,
+        body: JSON.stringify({ stockBySize: { S: 5, M: 2 } }),
+      });
+
+      const regLim = await api('/api/auth/register', {
+        method: 'POST',
+        headers: { 'x-forwarded-for': '198.51.100.130' },
+        body: JSON.stringify({
+          name: 'Limit Shopper',
+          email: 'limit-shopper@example.com',
+          phone: '+254700000022',
+          password: makeTestSecret('LimShop'),
+        }),
+      });
+      assert.equal(regLim.status, 200);
+      const limTok = regLim.data.token;
+      const limId = regLim.data.user.id;
+
+      // Earn >= 160 pts from verified cart (40 units * 90 = 3600 -> 144 + 5 = 149 pts; do 45 units -> 4050 -> 162 + 5 = 167 pts)
+      const limCart = await api(`/api/shopper/cart?branchId=${branchXId}`, { token: limTok });
+      await api('/api/shopper/cart/add', {
+        method: 'POST',
+        token: limTok,
+        body: JSON.stringify({ branchId: branchXId, barcode: prodABarcode, quantity: 45, cartId: limCart.data.id }),
+      });
+      const verLim = await api('/api/cashier/verify', {
+        method: 'POST',
+        token: activeCashierToken,
+        body: JSON.stringify({ cartId: limCart.data.id }),
+      });
+      assert.equal(verLim.status, 200);
+      assert.ok(verLim.data.loyaltyPointsEarned >= 120);
+
+      const o1 = await api('/api/shopper/rewards/redeem', {
+        method: 'POST',
+        token: limTok,
+        headers: { 'x-forwarded-for': '198.51.100.131' },
+        body: JSON.stringify({
+          rewardId: testRewardId,
+          size: 'S',
+          color: 'Emerald Green',
+          fulfillmentMethod: 'delivery',
+          deliveryAddress: 'Kilimani Road 42, Nairobi',
+          contactPhone: '+254700000022',
+        }),
+      });
+      assert.equal(o1.status, 200);
+
+      const o2 = await api('/api/shopper/rewards/redeem', {
+        method: 'POST',
+        token: limTok,
+        headers: { 'x-forwarded-for': '198.51.100.132' },
+        body: JSON.stringify({
+          rewardId: testRewardId,
+          size: 'S',
+          color: 'Emerald Green',
+          fulfillmentMethod: 'collection',
+          branchId: branchXId,
+          contactPhone: '+254700000022',
+        }),
+      });
+      assert.equal(o2.status, 200);
+
+      // 3rd open order hits maxOpenRedemptionsPerShopper = 2 (429)
+      const o3 = await api('/api/shopper/rewards/redeem', {
+        method: 'POST',
+        token: limTok,
+        headers: { 'x-forwarded-for': '198.51.100.133' },
+        body: JSON.stringify({
+          rewardId: testRewardId,
+          size: 'S',
+          color: 'Emerald Green',
+          fulfillmentMethod: 'collection',
+          branchId: branchXId,
+          contactPhone: '+254700000022',
+        }),
+      });
+      assert.equal(o3.status, 429);
+
+      // Complete delivery order lifecycle (requested -> approved -> dispatched -> completed)
+      const o1Id = o1.data.order.id;
+      assert.equal((await api(`/api/admin/redemptions/${o1Id}/status`, { method: 'PUT', token: updatedAdminToken, body: JSON.stringify({ status: 'completed' }) })).status, 400);
+      assert.equal((await api(`/api/admin/redemptions/${o1Id}/status`, { method: 'PUT', token: updatedAdminToken, body: JSON.stringify({ status: 'approved' }) })).status, 200);
+      assert.equal((await api(`/api/admin/redemptions/${o1Id}/status`, { method: 'PUT', token: updatedAdminToken, body: JSON.stringify({ status: 'dispatched' }) })).status, 200);
+      assert.equal((await api(`/api/admin/redemptions/${o1Id}/status`, { method: 'PUT', token: updatedAdminToken, body: JSON.stringify({ status: 'completed' }) })).status, 200);
+
+      // Suspending shopper freezes account & blocks redemption/login immediately
+      const suspShopper = await api(`/api/admin/users/${limId}/status`, {
+        method: 'PUT',
+        token: updatedAdminToken,
+        body: JSON.stringify({ status: 'suspended' }),
+      });
+      assert.equal(suspShopper.status, 200);
+      assert.equal(
+        (await api('/api/shopper/rewards/redeem', {
+          method: 'POST',
+          token: limTok,
+          headers: { 'x-forwarded-for': '198.51.100.134' },
+          body: JSON.stringify({
+            rewardId: testRewardId,
+            size: 'S',
+            color: 'Emerald Green',
+            fulfillmentMethod: 'collection',
+            branchId: branchXId,
+            contactPhone: '+254700000022',
+          }),
+        })).status,
+        401
+      );
+
+      // Admin redemptions list + 5 CSV exports allowed for admin only
+      const qRes = await api('/api/admin/redemptions', { token: updatedAdminToken });
+      assert.equal(qRes.status, 200);
+      assert.ok(qRes.data.totals.pointsIssued > 0);
+      assert.ok(qRes.data.totals.fulfilledCostThisMonthKes >= 650);
+
+      for (const nonAdm of [ownerAToken, clerkXToken, loyShopperTok]) {
+        assert.equal((await api('/api/admin/redemptions', { token: nonAdm })).status, 403);
+        assert.equal((await api('/api/admin/redemptions/export-csv?type=issued', { token: nonAdm })).status, 403);
+      }
+
+      for (const csvType of ['issued', 'redeemed', 'outstanding', 'fulfilled_cost', 'orders']) {
+        const csvRes = await api(`/api/admin/redemptions/export-csv?type=${csvType}`, { token: updatedAdminToken });
+        assert.equal(csvRes.status, 200);
+        assert.match(String(csvRes.headers.get('content-type') || ''), /text\/csv/);
+        assert.ok(typeof csvRes.data === 'string' && csvRes.data.length > 10);
+      }
+    });
+
     console.log(`\n[security-test] Summary: ${passed} PASSED, ${failed} FAILED.`);
   } catch (err) {
     console.error('\n[security-test] FAILURE:', err);
