@@ -5,6 +5,8 @@ import { X, Lock, Mail, Phone, User as UserIcon, AlertCircle, CheckCircle, Shiel
 import { useAuth } from '../context/AuthContext';
 import { useTranslation } from '../utils/i18n';
 import { PortalType } from '../types';
+import { useBodyScrollLock } from '../hooks/useBodyScrollLock';
+import { LEGAL_CONFIG } from '../config/legal';
 
 interface AuthModalProps {
   isOpen: boolean;
@@ -16,7 +18,9 @@ interface AuthModalProps {
 
 export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, portal = 'shopper', onSwitchPortal, onOpenAdminLogin }) => {
   const { login, register } = useAuth();
-  const { t } = useTranslation();
+  const { t, language } = useTranslation();
+
+  useBodyScrollLock(isOpen);
 
   const [activePortalTab, setActivePortalTab] = useState<PortalType>(portal);
   const [mode, setMode] = useState<'login' | 'register' | 'forgot'>('login');
@@ -25,8 +29,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, portal = 
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
   const [email, setEmail] = useState('');
-  const [resetCode, setResetCode] = useState('');
-  const [newPassword, setNewPassword] = useState('');
+  const [resetFullName, setResetFullName] = useState('');
+  const [resetNote, setResetNote] = useState('');
 
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
@@ -46,7 +50,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, portal = 
     e.preventDefault();
     setErrorMsg(null);
     setIsSubmitting(true);
-    const res = await login(identifier, password, 'shopper');
+    const res = await login(identifier, password, activePortalTab);
     setIsSubmitting(false);
 
     if (res.success) {
@@ -70,59 +74,42 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, portal = 
     }
   };
 
-  const handleRequestResetCode = async (e: React.FormEvent) => {
+  const handleRequestPasswordReset = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
+    setSuccessMsg(null);
     setIsSubmitting(true);
     try {
-      const res = await fetch('/api/auth/forgot-password', {
+      const res = await fetch('/api/auth/password-reset-request', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ identifier }),
+        body: JSON.stringify({
+          identifier,
+          fullName: resetFullName,
+          note: resetNote,
+          portal: activePortalTab,
+        }),
       });
       const data = await res.json();
       setIsSubmitting(false);
       if (res.ok) {
-        setSuccessMsg(data.message);
+        setSuccessMsg(data.message || 'If we find your account, support will contact you shortly.');
+        setResetFullName('');
+        setResetNote('');
       } else {
-        setErrorMsg(data.error);
+        setErrorMsg(data.error || 'Could not submit password reset request.');
       }
     } catch (e: any) {
       setIsSubmitting(false);
-      setErrorMsg(e.message);
-    }
-  };
-
-  const handleConfirmReset = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setErrorMsg(null);
-    setIsSubmitting(true);
-    try {
-      const res = await fetch('/api/auth/reset-password', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ identifier, code: resetCode, newPassword }),
-      });
-      const data = await res.json();
-      setIsSubmitting(false);
-      if (res.ok) {
-        setSuccessMsg(data.message);
-        setPassword(newPassword);
-        setMode('login');
-      } else {
-        setErrorMsg(data.error);
-      }
-    } catch (e: any) {
-      setIsSubmitting(false);
-      setErrorMsg(e.message);
+      setErrorMsg(e.message || 'Network error.');
     }
   };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in">
-      <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden flex flex-col max-h-[90vh]">
+      <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden flex flex-col max-h-[90dvh]">
         {/* Header with Title and Close Button */}
-        <div className="p-4 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between">
+        <div className="p-4 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between shrink-0">
           <div className="flex items-center gap-2">
             <h3 className="text-base font-bold text-slate-900 dark:text-white">
               {mode === 'login'
@@ -133,8 +120,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, portal = 
             </h3>
           </div>
           <button
+            type="button"
             onClick={onClose}
-            className="p-1 rounded-full text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+            aria-label="Close"
+            className="p-1.5 rounded-full text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
           >
             <X className="w-5 h-5" />
           </button>
@@ -206,7 +195,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, portal = 
           </div>
         </div>
 
-        <div className="p-5 overflow-y-auto space-y-4">
+        <div className="p-5 overflow-y-auto overscroll-y-contain flex-1 min-h-0 space-y-4">
           {/* Feedback messages */}
           {errorMsg && (
             <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-xs text-rose-700 dark:text-rose-300 flex items-start gap-2">
@@ -395,59 +384,58 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, portal = 
             </form>
           )}
 
-          {/* Mode 3: Forgot Password / OTP Reset */}
+          {/* Mode 3: Free Support-Assisted Password Reset Request */}
           {mode === 'forgot' && (
             <div className="space-y-4">
-              <form onSubmit={handleRequestResetCode} className="space-y-3">
+              <div className="p-3 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 space-y-1">
+                <p className="text-xs font-bold text-slate-900 dark:text-white">{t.resetRequestTitle}</p>
+                <p className="text-[11px] text-slate-600 dark:text-slate-300 leading-relaxed">
+                  {t.resetRequestDesc}
+                </p>
+              </div>
+
+              <form onSubmit={handleRequestPasswordReset} className="space-y-3">
                 <div>
                   <label className="text-xs font-semibold text-slate-700 dark:text-slate-300 block mb-1">
-                    Enter Email or Phone to receive OTP
+                    {t.emailOrPhone} *
                   </label>
                   <input
                     type="text"
                     value={identifier}
                     onChange={(e) => setIdentifier(e.target.value)}
-                    placeholder="e.g. shopper@gmail.com"
+                    placeholder={t.emailOrPhonePlaceholder}
                     required
                     className="w-full h-11 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white text-xs focus:outline-emerald-500"
                   />
                 </div>
-                <button
-                  type="submit"
-                  disabled={isSubmitting}
-                  className="w-full h-10 rounded-xl bg-slate-800 text-white font-medium text-xs hover:bg-slate-700 transition"
-                >
-                  {t.sendResetCode}
-                </button>
-              </form>
 
-              {/* Enter verification code & new password */}
-              <form onSubmit={handleConfirmReset} className="space-y-3 pt-3 border-t border-slate-100 dark:border-slate-800">
                 <div>
                   <label className="text-xs font-semibold text-slate-700 dark:text-slate-300 block mb-1">
-                    {t.verificationCode}
+                    {t.fullName} *
                   </label>
                   <input
                     type="text"
-                    value={resetCode}
-                    onChange={(e) => setResetCode(e.target.value)}
-                    placeholder="6-digit code"
+                    value={resetFullName}
+                    onChange={(e) => setResetFullName(e.target.value)}
+                    placeholder="e.g. Jane Wambui"
                     required
-                    className="w-full h-11 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white text-xs font-mono focus:outline-emerald-500"
+                    minLength={2}
+                    maxLength={120}
+                    className="w-full h-11 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white text-xs focus:outline-emerald-500"
                   />
                 </div>
 
                 <div>
                   <label className="text-xs font-semibold text-slate-700 dark:text-slate-300 block mb-1">
-                    {t.newPassword}
+                    {t.optionalNoteLabel}
                   </label>
-                  <input
-                    type="password"
-                    value={newPassword}
-                    onChange={(e) => setNewPassword(e.target.value)}
-                    placeholder="Enter new password"
-                    required
-                    className="w-full h-11 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white text-xs focus:outline-emerald-500"
+                  <textarea
+                    rows={2}
+                    value={resetNote}
+                    onChange={(e) => setResetNote(e.target.value)}
+                    placeholder={t.optionalNotePlaceholder}
+                    maxLength={500}
+                    className="w-full p-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white text-xs focus:outline-emerald-500"
                   />
                 </div>
 
@@ -456,19 +444,41 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, portal = 
                   disabled={isSubmitting}
                   className="w-full h-11 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs transition"
                 >
-                  {t.resetPassword}
+                  {isSubmitting ? t.submittingRequest : t.submitResetRequest}
                 </button>
-
-                <div className="text-center pt-1">
-                  <button
-                    type="button"
-                    onClick={() => setMode('login')}
-                    className="text-xs text-slate-500 hover:underline"
-                  >
-                    Back to Login
-                  </button>
-                </div>
               </form>
+
+              <div className="p-3 rounded-2xl bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-700/80 text-[11px] text-slate-600 dark:text-slate-300 space-y-1">
+                <p className="font-bold text-slate-800 dark:text-slate-200">{t.supportContactLabel}:</p>
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                  <span className="inline-flex items-center gap-1">
+                    <Mail className="w-3.5 h-3.5 text-emerald-600" />
+                    <a href={`mailto:${LEGAL_CONFIG.contactEmail}`} className="underline hover:text-emerald-600">
+                      {LEGAL_CONFIG.contactEmail}
+                    </a>
+                  </span>
+                  <span className="inline-flex items-center gap-1">
+                    <Phone className="w-3.5 h-3.5 text-emerald-600" />
+                    <a href={`tel:${LEGAL_CONFIG.supportPhone.replace(/\s+/g, '')}`} className="underline hover:text-emerald-600">
+                      {LEGAL_CONFIG.supportPhone}
+                    </a>
+                  </span>
+                </div>
+              </div>
+
+              <div className="text-center pt-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMode('login');
+                    setErrorMsg(null);
+                    setSuccessMsg(null);
+                  }}
+                  className="text-xs text-slate-500 hover:underline"
+                >
+                  {t.backLabel}
+                </button>
+              </div>
             </div>
           )}
         </div>

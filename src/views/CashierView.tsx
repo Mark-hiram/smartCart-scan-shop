@@ -20,9 +20,11 @@ import {
   Download,
   Plus,
   Image as ImageIcon,
+  X,
 } from 'lucide-react';
 import { CartSummaryCardModal } from '../components/CartSummaryCardModal';
 import { PortalBackgroundImage } from '../components/PortalBackgroundImage';
+import { useBodyScrollLock } from '../hooks/useBodyScrollLock';
 
 export const CashierView: React.FC = () => {
   const { user, branch, token } = useAuth();
@@ -73,6 +75,8 @@ export const CashierView: React.FC = () => {
 
   // Branch Reports State
   const [reportsData, setReportsData] = useState<any>(null);
+
+  useBodyScrollLock(showFlagModal || Boolean(editProductModal));
 
   // Fetch branch products if staff has viewStock permission
   const loadBranchProducts = async () => {
@@ -615,8 +619,8 @@ export const CashierView: React.FC = () => {
             </div>
           </div>
 
-          <div className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 overflow-hidden shadow-xs">
-            <table className="w-full text-left text-xs">
+          <div className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 overflow-x-auto shadow-xs">
+            <table className="w-full text-left text-xs min-w-[540px]">
               <thead className="bg-slate-50 dark:bg-slate-800/60 text-slate-500 border-b font-semibold">
                 <tr>
                   <th className="p-3">Product</th>
@@ -746,40 +750,54 @@ export const CashierView: React.FC = () => {
       {/* Flag Mismatch Modal */}
       {showFlagModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in">
-          <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 p-5 space-y-4">
-            <div className="flex items-center gap-2 text-rose-600">
-              <ShieldAlert className="w-6 h-6" />
-              <h3 className="text-base font-bold text-slate-900 dark:text-white">
-                {t.flagMismatch}
-              </h3>
+          <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 max-h-[90dvh] flex flex-col overflow-hidden">
+            <div className="p-5 pb-3 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between gap-2 shrink-0">
+              <div className="flex items-center gap-2 text-rose-600">
+                <ShieldAlert className="w-6 h-6" />
+                <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                  {t.flagMismatch}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowFlagModal(false)}
+                aria-label="Close"
+                className="p-1.5 rounded-xl text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+              >
+                <X className="w-4 h-4" />
+              </button>
             </div>
 
-            <p className="text-xs text-slate-600 dark:text-slate-300">
-              Provide details of the discrepancy found during physical trolley inspection. This will be recorded in the audit log for store review.
-            </p>
+            <div className="p-5 pt-4 overflow-y-auto overscroll-y-contain flex-1 min-h-0 space-y-4">
+              <p className="text-xs text-slate-600 dark:text-slate-300">
+                Provide details of the discrepancy found during physical trolley inspection. This will be recorded in the audit log for store review.
+              </p>
 
-            <textarea
-              rows={3}
-              value={flagReason}
-              onChange={(e) => setFlagReason(e.target.value)}
-              placeholder={t.flagReasonPlaceholder}
-              className="w-full p-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs focus:outline-rose-500"
-            />
+              <textarea
+                rows={3}
+                value={flagReason}
+                onChange={(e) => setFlagReason(e.target.value)}
+                placeholder={t.flagReasonPlaceholder}
+                className="w-full p-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs focus:outline-rose-500"
+              />
 
-            <div className="flex gap-2">
-              <button
-                onClick={() => setShowFlagModal(false)}
-                className="flex-1 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-600 hover:bg-slate-50 transition"
-              >
-                {t.cancel}
-              </button>
-              <button
-                onClick={handleConfirmFlag}
-                disabled={!flagReason.trim()}
-                className="flex-1 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white font-semibold text-xs transition"
-              >
-                Submit Flag
-              </button>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowFlagModal(false)}
+                  className="flex-1 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-600 hover:bg-slate-50 transition"
+                >
+                  {t.cancel}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleConfirmFlag}
+                  disabled={!flagReason.trim()}
+                  className="flex-1 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white font-semibold text-xs transition"
+                >
+                  Submit Flag
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -788,87 +806,99 @@ export const CashierView: React.FC = () => {
       {/* Edit Product Modal for Stock Clerk / Branch Manager */}
       {editProductModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in">
-          <div className="w-full max-w-sm bg-white dark:bg-slate-900 rounded-3xl p-5 shadow-2xl border border-slate-200 dark:border-slate-800 space-y-4">
-            <h3 className="text-sm font-bold text-slate-900 dark:text-white">
-              Update Stock &amp; Location: {editProductModal.name}
-            </h3>
+          <div className="w-full max-w-sm bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 max-h-[90dvh] flex flex-col overflow-hidden">
+            <div className="p-5 pb-3 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between gap-2 shrink-0">
+              <h3 className="text-sm font-bold text-slate-900 dark:text-white truncate">
+                Update Stock &amp; Location: {editProductModal.name}
+              </h3>
+              <button
+                type="button"
+                onClick={() => setEditProductModal(null)}
+                aria-label="Close"
+                className="p-1.5 rounded-xl text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
 
-            <form onSubmit={handleSaveStockPrice} className="space-y-3">
-              <div>
-                <label className="text-xs font-semibold block mb-1">Stock Level</label>
-                <input
-                  type="number"
-                  value={editProductModal.newStock}
-                  onChange={(e) =>
-                    setEditProductModal({
-                      ...editProductModal,
-                      newStock: parseInt(e.target.value, 10),
-                    })
-                  }
-                  className="w-full h-10 px-3 rounded-xl border text-xs font-mono"
-                />
-              </div>
-
-              {permissions.editPrices && (
+            <div className="p-5 pt-4 overflow-y-auto overscroll-y-contain flex-1 min-h-0">
+              <form onSubmit={handleSaveStockPrice} className="space-y-3">
                 <div>
-                  <label className="text-xs font-semibold block mb-1">Branch Price (KES)</label>
+                  <label className="text-xs font-semibold block mb-1">Stock Level</label>
                   <input
                     type="number"
-                    value={editProductModal.newPrice || ''}
+                    value={editProductModal.newStock}
                     onChange={(e) =>
                       setEditProductModal({
                         ...editProductModal,
-                        newPrice: e.target.value === '' ? null : parseFloat(e.target.value),
+                        newStock: parseInt(e.target.value, 10),
                       })
                     }
                     className="w-full h-10 px-3 rounded-xl border text-xs font-mono"
                   />
                 </div>
-              )}
 
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="text-xs font-semibold block mb-1">{t.aisle}</label>
-                  <input
-                    type="text"
-                    value={editProductModal.newAisle || ''}
-                    onChange={(e) =>
-                      setEditProductModal({ ...editProductModal, newAisle: e.target.value })
-                    }
-                    placeholder="e.g. 3"
-                    className="w-full h-10 px-3 rounded-xl border text-xs font-mono"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs font-semibold block mb-1">{t.shelf}</label>
-                  <input
-                    type="text"
-                    value={editProductModal.newShelf || ''}
-                    onChange={(e) =>
-                      setEditProductModal({ ...editProductModal, newShelf: e.target.value })
-                    }
-                    placeholder="e.g. B"
-                    className="w-full h-10 px-3 rounded-xl border text-xs font-mono"
-                  />
-                </div>
-              </div>
+                {permissions.editPrices && (
+                  <div>
+                    <label className="text-xs font-semibold block mb-1">Branch Price (KES)</label>
+                    <input
+                      type="number"
+                      value={editProductModal.newPrice || ''}
+                      onChange={(e) =>
+                        setEditProductModal({
+                          ...editProductModal,
+                          newPrice: e.target.value === '' ? null : parseFloat(e.target.value),
+                        })
+                      }
+                      className="w-full h-10 px-3 rounded-xl border text-xs font-mono"
+                    />
+                  </div>
+                )}
 
-              <div className="flex gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setEditProductModal(null)}
-                  className="flex-1 py-2.5 rounded-xl border text-xs font-semibold"
-                >
-                  {t.cancel}
-                </button>
-                <button
-                  type="submit"
-                  className="flex-1 py-2.5 rounded-xl bg-emerald-600 text-white text-xs font-semibold"
-                >
-                  Save
-                </button>
-              </div>
-            </form>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="text-xs font-semibold block mb-1">{t.aisle}</label>
+                    <input
+                      type="text"
+                      value={editProductModal.newAisle || ''}
+                      onChange={(e) =>
+                        setEditProductModal({ ...editProductModal, newAisle: e.target.value })
+                      }
+                      placeholder="e.g. 3"
+                      className="w-full h-10 px-3 rounded-xl border text-xs font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs font-semibold block mb-1">{t.shelf}</label>
+                    <input
+                      type="text"
+                      value={editProductModal.newShelf || ''}
+                      onChange={(e) =>
+                        setEditProductModal({ ...editProductModal, newShelf: e.target.value })
+                      }
+                      placeholder="e.g. B"
+                      className="w-full h-10 px-3 rounded-xl border text-xs font-mono"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex gap-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setEditProductModal(null)}
+                    className="flex-1 py-2.5 rounded-xl border text-xs font-semibold"
+                  >
+                    {t.cancel}
+                  </button>
+                  <button
+                    type="submit"
+                    className="flex-1 py-2.5 rounded-xl bg-emerald-600 text-white text-xs font-semibold"
+                  >
+                    Save
+                  </button>
+                </div>
+              </form>
+            </div>
           </div>
         </div>
       )}

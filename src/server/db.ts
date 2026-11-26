@@ -20,13 +20,16 @@ import {
   LoyaltyLedgerEntry,
   RewardItem,
   RewardRedemptionOrder,
+  AiUsageRecord,
 } from '../types';
 
 const DB_FILE = process.env.DB_PATH ? path.resolve(process.env.DB_PATH) : path.resolve(process.cwd(), 'smartcart_db.json');
 
 export interface ResetCodeRecord {
-  code?: string;
-  token?: string;
+  codeHash?: string;
+  codeSalt?: string;
+  tokenHash?: string;
+  userId?: string;
   identifier?: string;
   email?: string;
   expiresAt: number;
@@ -37,7 +40,8 @@ export interface ResetCodeRecord {
 export interface DatabaseSchema {
   users: User[];
   passwords: Record<string, { hash: string; salt: string }>; // userId -> hash, salt
-  resetCodes: Record<string, ResetCodeRecord>; // identifier/tokenKey -> reset code record
+  resetCodes: Record<string, ResetCodeRecord>; // identifier/tokenHashKey -> hashed reset record
+  aiUsageLogs: AiUsageRecord[];
   supermarkets: Supermarket[];
   branches: Branch[];
   products: Product[];
@@ -149,6 +153,7 @@ export function createInitialDatabase(): DatabaseSchema {
     users: [],
     passwords: {},
     resetCodes: {},
+    aiUsageLogs: [],
     supermarkets: [],
     branches: [],
     products: [],
@@ -234,7 +239,22 @@ export class Database {
           delete parsed.loyaltyCards;
           needsSave = true;
         }
-        if (!parsed.resetCodes) parsed.resetCodes = {};
+        if (!parsed.resetCodes) {
+          parsed.resetCodes = {};
+        } else {
+          // Strip any legacy plaintext reset code/token records on load
+          for (const key of Object.keys(parsed.resetCodes)) {
+            const rec = parsed.resetCodes[key];
+            if (!rec || (!rec.codeHash && !rec.tokenHash) || rec.code !== undefined || rec.token !== undefined) {
+              delete parsed.resetCodes[key];
+              needsSave = true;
+            }
+          }
+        }
+        if (!Array.isArray(parsed.aiUsageLogs)) {
+          parsed.aiUsageLogs = [];
+          needsSave = true;
+        }
         if (!parsed.passwords) parsed.passwords = {};
 
         // Purge legacy demo users & hardcoded seed admin

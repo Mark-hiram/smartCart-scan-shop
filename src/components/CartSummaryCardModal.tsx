@@ -4,6 +4,7 @@ import React, { useEffect, useState } from 'react';
 import { X, Download, Share2, Copy, Check, Image as ImageIcon, Palette } from 'lucide-react';
 import { Cart } from '../types';
 import { useTranslation } from '../utils/i18n';
+import { useBodyScrollLock } from '../hooks/useBodyScrollLock';
 import {
   generateCartSummaryCardImage,
   GeneratedCartSummaryCard,
@@ -33,6 +34,8 @@ export const CartSummaryCardModal: React.FC<CartSummaryCardModalProps> = ({
   const [isGenerating, setIsGenerating] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [noticeMsg, setNoticeMsg] = useState<string | null>(null);
+
+  useBodyScrollLock(Boolean(isOpen && cart));
 
   useEffect(() => {
     if (!isOpen || !cart) return;
@@ -140,9 +143,9 @@ export const CartSummaryCardModal: React.FC<CartSummaryCardModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4 animate-in fade-in">
-      <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden flex flex-col max-h-[92vh]">
+      <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden flex flex-col max-h-[90dvh]">
         {/* Header */}
-        <div className="p-4 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between">
+        <div className="p-4 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between shrink-0">
           <div className="flex items-center gap-2">
             <div className="w-8 h-8 rounded-xl bg-emerald-100 dark:bg-emerald-950/60 text-emerald-600 flex items-center justify-center">
               <ImageIcon className="w-4 h-4" />
@@ -165,7 +168,7 @@ export const CartSummaryCardModal: React.FC<CartSummaryCardModalProps> = ({
         </div>
 
         {/* Body */}
-        <div className="p-4 overflow-y-auto space-y-3.5">
+        <div className="p-4 overflow-y-auto overscroll-y-contain flex-1 min-h-0 space-y-3.5">
           {/* Style Switcher */}
           <div className="flex items-center justify-between gap-2">
             <span className="text-[11px] font-semibold text-slate-500 flex items-center gap-1.5">

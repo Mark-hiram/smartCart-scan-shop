@@ -103,7 +103,6 @@ export const SmartCartSignInLogo: React.FC = () => {
         alt={t.logoAlt}
         width={224}
         height={56}
-        loading="lazy"
         decoding="async"
         className="h-12 sm:h-14 w-auto block dark:hidden"
       />
@@ -112,7 +111,6 @@ export const SmartCartSignInLogo: React.FC = () => {
         alt={t.logoAlt}
         width={224}
         height={56}
-        loading="lazy"
         decoding="async"
         className="h-12 sm:h-14 w-auto hidden dark:block"
       />

@@ -58,6 +58,8 @@ export interface User {
   failedAttempts: number;
   lockedUntil?: number | null;
   mustChangePassword?: boolean;
+  tempPasswordExpiresAt?: number | null;
+  tempPasswordConsumed?: boolean;
   isPermanentAdmin?: boolean;
   createdAt: string;
 }
@@ -68,7 +70,7 @@ export interface Supermarket {
   code: string;
   contactEmail: string;
   contactPhone: string;
-  status: 'active' | 'suspended' | 'pending';
+  status: 'active' | 'suspended' | 'pending' | 'rejected';
   city?: string;
   notes?: string;
   firstBranchName?: string;
@@ -77,6 +79,16 @@ export interface Supermarket {
   logo?: string;
   currency: string;
   createdAt: string;
+}
+
+export interface AiUsageRecord {
+  id: string;
+  userId: string;
+  userRole: UserRole;
+  endpoint: '/api/ai/chat' | '/api/ai/maps-grounding';
+  language: 'en' | 'sw';
+  hasCoords: boolean;
+  createdAt: number;
 }
 
 export interface Branch {
@@ -395,7 +407,50 @@ export interface Announcement {
   authorName: string;
 }
 
-export type SupportCategory = 'scanner' | 'pricing' | 'stock' | 'cashier' | 'app_issue' | 'other';
+export type SupportCategory =
+  | 'password_reset'
+  | 'scanner'
+  | 'pricing'
+  | 'stock'
+  | 'cashier'
+  | 'app_issue'
+  | 'other';
+
+export type SupportTicketStatus =
+  | 'open'
+  | 'verified'
+  | 'completed'
+  | 'rejected'
+  | 'in_progress'
+  | 'resolved';
+
+export interface PasswordResetRequestDetails {
+  requestedIdentifier: string;
+  requestedFullName: string;
+  note?: string;
+  portalRequested: PortalType;
+  matchedAccount: boolean;
+  matchedUserId?: string | null;
+  matchedRole?: Exclude<UserRole, 'admin'> | null;
+  matchedSupermarketId?: string | null;
+  matchedSupermarketName?: string | null;
+  maskedEmail?: string | null;
+  maskedPhone?: string | null;
+  identityHintPointsBalance?: number | null;
+  identityHintLastPurchase?: string | null;
+  identityChecked?: {
+    phoneConfirmed: boolean;
+    lastPurchaseOrPointsConfirmed: boolean;
+    verifiedByUserId?: string;
+    verifiedByName?: string;
+    verifiedAt?: string;
+  } | null;
+  tempPasswordExpiresAt?: number | null;
+  rejectionReason?: string | null;
+  resolvedByUserId?: string | null;
+  resolvedByName?: string | null;
+  resolvedAt?: string | null;
+}
 
 export interface SupportTicket {
   id: string;
@@ -407,8 +462,9 @@ export interface SupportTicket {
   category: SupportCategory;
   subject: string;
   message: string;
-  status: 'open' | 'in_progress' | 'resolved';
+  status: SupportTicketStatus;
   reply?: string;
+  passwordResetDetails?: PasswordResetRequestDetails;
   createdAt: string;
   updatedAt: string;
 }

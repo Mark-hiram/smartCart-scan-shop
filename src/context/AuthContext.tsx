@@ -20,6 +20,7 @@ interface AuthContextType {
   register: (name: string, email: string, phone: string, pass: string) => Promise<{ success: boolean; error?: string }>;
   setupAdmin: (email: string, name?: string, phone?: string, setupKey?: string, password?: string) => Promise<{ success: boolean; tempPassword?: string; requiresPasswordChange?: boolean; error?: string }>;
   changeFirstPassword: (currentPassword: string, newPassword: string) => Promise<{ success: boolean; error?: string; message?: string }>;
+  changeRequiredPassword: (currentPassword: string, newPassword: string) => Promise<{ success: boolean; error?: string; message?: string }>;
   logout: () => void;
   setBranch: (branch: Branch | null) => void;
   setSupermarket: (sm: Supermarket | null) => void;
@@ -211,6 +212,32 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
+  const changeRequiredPassword = async (currentPassword: string, newPassword: string) => {
+    if (!token) return { success: false, error: 'Unauthorized. Not signed in.' };
+    try {
+      const res = await fetch('/api/auth/change-required-password', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ currentPassword, newPassword }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        return { success: false, error: data.error || 'Failed to update password.' };
+      }
+      if (data.user) {
+        setUser(data.user);
+      } else if (user) {
+        setUser({ ...user, mustChangePassword: false });
+      }
+      return { success: true, message: data.message };
+    } catch (e: any) {
+      return { success: false, error: e.message || 'Failed to update password.' };
+    }
+  };
+
   const logout = () => {
     if (token) {
       fetch('/api/auth/logout', {
@@ -239,6 +266,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         register,
         setupAdmin,
         changeFirstPassword,
+        changeRequiredPassword,
         logout,
         setBranch: handleSetBranch,
         setSupermarket,

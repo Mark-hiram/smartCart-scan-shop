@@ -1,11 +1,12 @@
 // Copyright (c) 2026 SmartCart Owner. All rights reserved.
 
 import React, { useState, useEffect } from 'react';
-import { X, MapPin, Navigation, Store, Check, Compass, Search, ExternalLink, Sparkles } from 'lucide-react';
+import { X, MapPin, Navigation, Store, Check, Compass, Search, ExternalLink, Sparkles, Lock } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { Supermarket, Branch } from '../types';
 import { useAuth } from '../context/AuthContext';
 import { useTranslation } from '../utils/i18n';
+import { useBodyScrollLock } from '../hooks/useBodyScrollLock';
 
 interface MapsPlaceResult {
   title: string;
@@ -19,8 +20,10 @@ interface StoreModalProps {
 }
 
 export const StoreModal: React.FC<StoreModalProps> = ({ isOpen, onClose }) => {
-  const { branch: currentBranch, setBranch } = useAuth();
+  const { branch: currentBranch, setBranch, user, token } = useAuth();
   const { t, language } = useTranslation();
+
+  useBodyScrollLock(isOpen);
 
   const [supermarkets, setSupermarkets] = useState<Supermarket[]>([]);
   const [selectedSupermarketId, setSelectedSupermarketId] = useState<string>('');
@@ -78,15 +81,23 @@ export const StoreModal: React.FC<StoreModalProps> = ({ isOpen, onClose }) => {
 
   const handleMapsSearch = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!mapsQuery.trim()) return;
+    const trimmed = mapsQuery.trim();
+    if (!trimmed) return;
+    if (!user || !token) {
+      setMapsError(t.aiSignInRequired);
+      return;
+    }
     setIsSearchingMaps(true);
     setMapsError(null);
     try {
       const res = await fetch('/api/ai/maps-grounding', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
         body: JSON.stringify({
-          query: mapsQuery.trim(),
+          query: trimmed.slice(0, 1000),
           lat: userCoords?.lat,
           lng: userCoords?.lng,
           language,
@@ -132,9 +143,9 @@ export const StoreModal: React.FC<StoreModalProps> = ({ isOpen, onClose }) => {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in">
-      <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden flex flex-col max-h-[85vh]">
+      <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden flex flex-col max-h-[90dvh]">
         {/* Header */}
-        <div className="p-4 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between">
+        <div className="p-4 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between shrink-0">
           <div className="flex items-center gap-2">
             <Store className="w-5 h-5 text-emerald-600" />
             <h3 className="text-base font-bold text-slate-900 dark:text-white">
@@ -142,14 +153,16 @@ export const StoreModal: React.FC<StoreModalProps> = ({ isOpen, onClose }) => {
             </h3>
           </div>
           <button
+            type="button"
             onClick={onClose}
-            className="p-1 rounded-full text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+            aria-label="Close"
+            className="p-1.5 rounded-full text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        <div className="p-4 overflow-y-auto space-y-4">
+        <div className="p-4 overflow-y-auto overscroll-y-contain flex-1 min-h-0 space-y-4">
           {/* GPS Nearest Branch Action Button */}
           <button
             onClick={detectNearestBranch}
@@ -269,23 +282,31 @@ export const StoreModal: React.FC<StoreModalProps> = ({ isOpen, onClose }) => {
               <Sparkles className="w-3.5 h-3.5 text-emerald-600" />
               <span>{t.mapsFinderTitle}</span>
             </label>
-            <form onSubmit={handleMapsSearch} className="flex gap-2">
-              <input
-                type="text"
-                value={mapsQuery}
-                onChange={(e) => setMapsQuery(e.target.value)}
-                placeholder={t.mapsFinderPlaceholder}
-                className="flex-1 h-9 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs text-slate-900 dark:text-white"
-              />
-              <button
-                type="submit"
-                disabled={isSearchingMaps || !mapsQuery.trim()}
-                className="px-3 h-9 rounded-xl bg-slate-900 dark:bg-emerald-600 text-white text-xs font-semibold flex items-center gap-1.5 disabled:opacity-50"
-              >
-                <Search className="w-3.5 h-3.5" />
-                <span>{isSearchingMaps ? '...' : t.mapsSearchBtn}</span>
-              </button>
-            </form>
+            {!user || !token ? (
+              <div className="p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-2">
+                <Lock className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                <span>{t.aiSignInRequired}</span>
+              </div>
+            ) : (
+              <form onSubmit={handleMapsSearch} className="flex gap-2">
+                <input
+                  type="text"
+                  maxLength={1000}
+                  value={mapsQuery}
+                  onChange={(e) => setMapsQuery(e.target.value)}
+                  placeholder={t.mapsFinderPlaceholder}
+                  className="flex-1 h-9 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs text-slate-900 dark:text-white"
+                />
+                <button
+                  type="submit"
+                  disabled={isSearchingMaps || !mapsQuery.trim()}
+                  className="px-3 h-9 rounded-xl bg-slate-900 dark:bg-emerald-600 text-white text-xs font-semibold flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  <Search className="w-3.5 h-3.5" />
+                  <span>{isSearchingMaps ? '...' : t.mapsSearchBtn}</span>
+                </button>
+              </form>
+            )}
 
             {mapsError && (
               <p className="text-[11px] text-rose-600 dark:text-rose-400">{mapsError}</p>

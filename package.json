@@ -12,7 +12,9 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test:security": "tsx scripts/security-test.ts"
+    "test:security": "tsx scripts/security-test.ts",
+    "test:ai-email": "tsx scripts/ai-email-test.ts",
+    "test:support-reset": "tsx scripts/support-reset-test.ts"
   },
   "dependencies": {
     "@google/genai": "^3.6.1",

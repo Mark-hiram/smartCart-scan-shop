@@ -2,7 +2,7 @@
 
 Mobile-first, bilingual (English & Swahili) multi-chain supermarket scan-as-you-shop Progressive Web App (`React + Vite + Express + TypeScript`).
 
-**Zero in-app payments:** Shoppers scan product barcodes, monitor running totals and budget caps, link store loyalty QR cards, and present their cart checkout code to a cashier at the physical till.
+**Zero in-app payments:** Shoppers scan product barcodes, monitor running totals and budget caps, earn loyalty points on verified carts, and present their cart checkout code to a cashier at the physical till.
 
 ---
 
@@ -12,7 +12,7 @@ Mobile-first, bilingual (English & Swahili) multi-chain supermarket scan-as-you-
   - Shopper (`/`), Branch Staff (`/staff` / Staff Portal), Store Owners (`/management` / Management Portal), and single System Administrator (`/admin/login`).
   - Portal bindings are strictly enforced on the server inside session records and route middleware.
 - **Shopper Experience (`ShopperView`):**
-  - Camera barcode scanning + manual product search, locked scan-time prices, daily spending cap (`BudgetAlert`), favourites, shareable shopping lists sorted by aisle, offline queue sync, and **Store-Specific Loyalty QR Card scanning** (camera, QR image upload, or manual loyalty ID).
+  - Camera barcode scanning + manual product search, locked scan-time prices, daily spending cap (`BudgetAlert`), favourites, shareable shopping lists sorted by aisle, offline IndexedDB queue sync, past receipts history, and **Loyalty Points & Merchandise Rewards** redeemed with points only.
 - **Cashier & Branch Management (`CashierView` & `OwnerView`):**
   - Cart verification checklist, mismatch flagging, idempotent till completion (stock deducted once), granular staff permission presets, branch overrides, CSV catalog import/export, promotions, and branch analytics.
 - **Gemini AI Assistant & Google Maps Grounding (`SmartCartChat` & `StoreModal`):**
@@ -36,8 +36,15 @@ Configure these variables in your deployment environment (never commit `.env` or
 | `NODE_ENV` | **Yes (`production`)** | `development` | Set automatically to `"production"` by `npm start`. |
 | `SESSION_HOURS` | No | `12` | Sliding session lifetime in hours for shoppers, staff, and owners (admin sessions are fixed at 2 hours). |
 | `PORT` | No | `3000` | Port bound by the Express server (`0.0.0.0:$PORT`). |
-| `GEMINI_API_KEY` | Optional | _None_ | Server-side API key for `@google/genai` (AI chat assistant and Google Maps Grounding). |
-| `APP_URL` | Optional | _None_ | Public URL of the deployed app. |
+| `GEMINI_API_KEY` | Optional | _None_ | Server-side API key for `@google/genai` (authenticated AI chat assistant and Google Maps Grounding). |
+| `AI_DAILY_CAP` | Optional | `500` | Global UTC daily limit across all `/api/ai/*` requests (`AI_USER_HOURLY_CAP=20`, `AI_USER_DAILY_CAP=50` by default). |
+| `EMAIL_PROVIDER` | Optional (`resend`) | _None_ | Transactional email provider (`"resend"` via HTTP `fetch`). Unset falls back safely without sending external mail. |
+| `EMAIL_API_KEY` | If `EMAIL_PROVIDER` set | _None_ | Server-side Resend API key (never prefix with `VITE_` and never expose to browser). |
+| `EMAIL_FROM` | If `EMAIL_PROVIDER` set | _None_ | Verified sender address (e.g. `Smart Cart <no-reply@yourdomain.com>`). |
+| `EMAIL_DAILY_CAP` | Optional | `200` | Global UTC daily limit on outgoing transactional emails. |
+| `APP_URL` | Optional | _None_ | Public URL of the deployed app (used for email links such as admin recovery). |
+| `VITE_CONTACT_EMAIL` | Optional | `privacy@smartcart.co.ke` | Support & privacy email shown on sign-in reset request and About pages. |
+| `VITE_SUPPORT_PHONE` | Optional | `+254 700 000 000` | Support phone/WhatsApp number shown on the free password reset request form. |
 
 ---
 
@@ -65,7 +72,16 @@ Configure these variables in your deployment environment (never commit `.env` or
    - `DB_PATH=/var/data/smartcart_db.json`
    - `TRUST_PROXY=true`
    - `SESSION_HOURS=12`
-   - `GEMINI_API_KEY` (optional, for AI assistant & Maps store finder)
+   - `GEMINI_API_KEY` (optional, for protected AI assistant & Maps store finder)
+   - `AI_DAILY_CAP=500` (optional daily global AI cap)
+   - **Transactional Email (Resend):**
+     1. Sign in to Resend, add and verify your sending domain (add the required SPF/DKIM DNS records at your domain registrar).
+     2. Create a Resend API key and add these Environment Variables in Render's **Environment** tab:
+        - `EMAIL_PROVIDER=resend`
+        - `EMAIL_API_KEY=re_xxxxxxxxx`
+        - `EMAIL_FROM=Smart Cart <no-reply@yourdomain.com>`
+        - `EMAIL_DAILY_CAP=200`
+        - `APP_URL=https://your-service.onrender.com`
 6. **Health Check Path:** `/healthz`
 7. **First-Time System Admin Setup:**
    - Visit `https://<your-render-url>/admin/login`.
@@ -123,5 +139,11 @@ npm start
 
 # Run automated security test suite
 npm run test:security
+
+# Run AI endpoint & email delivery test suite
+npm run test:ai-email
+
+# Run support-assisted password reset test suite
+npm run test:support-reset
 ```
 

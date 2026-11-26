@@ -4,6 +4,7 @@ import React from 'react';
 import { X, ShoppingBag, MapPin, Tag, AlertTriangle, CheckCircle } from 'lucide-react';
 import { Product, Promotion } from '../types';
 import { useTranslation } from '../utils/i18n';
+import { useBodyScrollLock } from '../hooks/useBodyScrollLock';
 
 interface PriceCheckModalProps {
   product: Product | null;
@@ -25,13 +26,14 @@ export const PriceCheckModal: React.FC<PriceCheckModalProps> = ({
   onAddToCart,
 }) => {
   const { t } = useTranslation();
+  useBodyScrollLock(Boolean(product));
   if (!product) return null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in">
-      <div className="w-full max-w-sm bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden">
+      <div className="w-full max-w-sm bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden max-h-[90dvh] flex flex-col">
         {/* Header */}
-        <div className="p-4 bg-amber-500/10 border-b border-amber-500/20 flex items-center justify-between">
+        <div className="p-4 bg-amber-500/10 border-b border-amber-500/20 flex items-center justify-between shrink-0">
           <div className="flex items-center gap-2">
             <Tag className="w-5 h-5 text-amber-600 dark:text-amber-400" />
             <h3 className="text-sm font-bold text-amber-900 dark:text-amber-200">
@@ -39,14 +41,16 @@ export const PriceCheckModal: React.FC<PriceCheckModalProps> = ({
             </h3>
           </div>
           <button
+            type="button"
             onClick={onClose}
-            className="p-1 rounded-full text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+            aria-label="Close"
+            className="p-1.5 rounded-full text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        <div className="p-5 space-y-4">
+        <div className="p-5 space-y-4 overflow-y-auto overscroll-y-contain flex-1 min-h-0">
           <div>
             <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
               {product.category}

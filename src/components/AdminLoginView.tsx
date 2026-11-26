@@ -6,6 +6,7 @@ import { useTranslation } from '../utils/i18n';
 import { SmartCartSignInLogo } from './SmartCartLogo';
 import { CopyrightBadge } from './CopyrightBadge';
 import { PortalBackgroundImage, usePreloadPortalSignInImage } from './PortalBackgroundImage';
+import { useBodyScrollLock } from '../hooks/useBodyScrollLock';
 import {
   Shield,
   ShieldCheck,
@@ -16,10 +17,10 @@ import {
   Copy,
   Check,
   ArrowRight,
+  ArrowLeft,
   AlertCircle,
   CheckCircle,
   KeyRound,
-  ExternalLink,
   Eye,
   EyeOff,
 } from 'lucide-react';
@@ -31,7 +32,7 @@ interface AdminLoginViewProps {
 
 export const AdminLoginView: React.FC<AdminLoginViewProps> = ({ onSuccess, initialMode }) => {
   const { user, login, setupAdmin, changeFirstPassword, setupStatus, checkSetupStatus, adminSetupKeyRequired } = useAuth();
-  const { t } = useTranslation();
+  const { t, language } = useTranslation();
 
   usePreloadPortalSignInImage('admin');
 
@@ -57,11 +58,12 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({ onSuccess, initi
 
   // Recovery link token state
   const [resetToken, setResetToken] = useState<string>('');
-  const [recoveryLinkGenerated, setRecoveryLinkGenerated] = useState<string | null>(null);
 
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  useBodyScrollLock(showForcePasswordModal);
 
   // Check setup status and resetToken in URL on mount
   useEffect(() => {
@@ -190,16 +192,13 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({ onSuccess, initi
       const res = await fetch('/api/auth/forgot-password', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ identifier: email }),
+        body: JSON.stringify({ identifier: email, language }),
       });
       const data = await res.json();
       setIsSubmitting(false);
 
       if (res.ok) {
         setSuccessMsg(data.message || t.adminRecoveryLinkDispatched);
-        if (data.resetLink) {
-          setRecoveryLinkGenerated(data.resetLink);
-        }
       } else {
         setErrorMsg(data.error || 'Failed to request recovery link');
       }
@@ -230,7 +229,7 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({ onSuccess, initi
       const res = await fetch('/api/admin/reset-password-with-token', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: resetToken, newPassword: newPermanentPassword }),
+        body: JSON.stringify({ token: resetToken, newPassword: newPermanentPassword, language }),
       });
       const data = await res.json();
       setIsSubmitting(false);
@@ -257,7 +256,7 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({ onSuccess, initi
   };
 
   return (
-    <div className="portal-login-canvas min-h-[82vh] flex items-center justify-center p-4 sm:py-8">
+    <div className="portal-login-canvas min-h-dvh flex items-center justify-center p-4 sm:py-8">
       <PortalBackgroundImage portal="admin" variant="backdrop" priority />
 
       <div className="relative z-10 w-full max-w-lg portal-surface-card bg-white dark:bg-slate-900 shadow-2xl overflow-hidden">
@@ -301,6 +300,20 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({ onSuccess, initi
         </div>
 
         <div className="p-6 space-y-4 bg-white dark:bg-slate-900">
+          {(mode === 'forgot' || mode === 'reset-token') && (
+            <button
+              type="button"
+              onClick={() => {
+                setMode('login');
+                setErrorMsg(null);
+                setSuccessMsg(null);
+              }}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 transition"
+            >
+              <ArrowLeft className="w-3.5 h-3.5" />
+              <span>{t.backLabel}</span>
+            </button>
+          )}
           {/* Centred Brand Logo Above Sign-In Form */}
           <SmartCartSignInLogo />
 
@@ -612,29 +625,9 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({ onSuccess, initi
                   disabled={isSubmitting}
                   className="w-full h-11 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs transition"
                 >
-                  {isSubmitting ? 'Generating Recovery Link...' : t.requestAdminResetLink}
+                  {isSubmitting ? 'Sending Recovery Link...' : t.requestAdminResetLink}
                 </button>
               </form>
-
-              {/* Display Generated Recovery Link */}
-              {recoveryLinkGenerated && (
-                <div className="p-3.5 rounded-2xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-300 dark:border-emerald-700 space-y-2">
-                  <span className="text-[11px] font-bold text-emerald-800 dark:text-emerald-300 block">
-                    Simulated Email Dispatch (Expires in 15 Minutes):
-                  </span>
-                  <div className="p-2 bg-white dark:bg-slate-800 rounded-lg border border-emerald-200 dark:border-emerald-800 flex items-center justify-between text-xs font-mono break-all">
-                    <span>{window.location.origin}{recoveryLinkGenerated}</span>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setMode('reset-token')}
-                    className="w-full py-2 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs transition flex items-center justify-center gap-1.5"
-                  >
-                    <ExternalLink className="w-3.5 h-3.5" />
-                    <span>Open Recovery Link Form Now</span>
-                  </button>
-                </div>
-              )}
 
               <div className="text-center pt-1">
                 <button
@@ -720,8 +713,8 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({ onSuccess, initi
       {/* ========================================================================= */}
       {showForcePasswordModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in">
-          <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border-2 border-emerald-500 overflow-hidden">
-            <div className="p-5 bg-emerald-600 text-white">
+          <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border-2 border-emerald-500 overflow-hidden flex flex-col max-h-[90dvh]">
+            <div className="p-5 bg-emerald-600 text-white shrink-0">
               <div className="flex items-center gap-2 mb-1">
                 <KeyRound className="w-5 h-5 text-emerald-200" />
                 <h3 className="text-base font-bold tracking-tight">
@@ -733,7 +726,7 @@ export const AdminLoginView: React.FC<AdminLoginViewProps> = ({ onSuccess, initi
               </p>
             </div>
 
-            <form onSubmit={handleForceChangePassword} className="p-5 space-y-3.5">
+            <form onSubmit={handleForceChangePassword} className="p-5 space-y-3.5 overflow-y-auto overscroll-y-contain flex-1 min-h-0">
               {errorMsg && (
                 <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-xs text-rose-700 dark:text-rose-300 flex items-start gap-2">
                   <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />

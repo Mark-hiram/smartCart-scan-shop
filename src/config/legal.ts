@@ -10,15 +10,17 @@ const readViteEnv = (key: string): string => {
   }
 };
 
-// Single source of truth for owner name and privacy contact email.
-// Override via VITE_COPYRIGHT_OWNER or VITE_CONTACT_EMAIL.
+// Single source of truth for owner name and privacy/support contacts.
+// Override via VITE_COPYRIGHT_OWNER, VITE_CONTACT_EMAIL, or VITE_SUPPORT_PHONE.
 export const DEFAULT_COPYRIGHT_OWNER = 'SmartCart Owner';
 export const DEFAULT_CONTACT_EMAIL = 'support@smartcart.example';
+export const DEFAULT_SUPPORT_PHONE = '+254 700 000 000';
 
 export const LEGAL_CONFIG = {
   appName: 'Smart Cart',
   ownerName: readViteEnv('VITE_COPYRIGHT_OWNER') || DEFAULT_COPYRIGHT_OWNER,
   contactEmail: readViteEnv('VITE_CONTACT_EMAIL') || DEFAULT_CONTACT_EMAIL,
+  supportPhone: readViteEnv('VITE_SUPPORT_PHONE') || DEFAULT_SUPPORT_PHONE,
 };
 
 export function getCurrentCopyrightYear(): number {

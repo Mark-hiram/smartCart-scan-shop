@@ -4,6 +4,7 @@ import React from 'react';
 import { X, Award, Sparkles, Store, ReceiptText, Gift, ShieldAlert } from 'lucide-react';
 import { LoyaltyPointsSummary } from '../types';
 import { useTranslation } from '../utils/i18n';
+import { useBodyScrollLock } from '../hooks/useBodyScrollLock';
 
 interface LoyaltyPointsModalProps {
   isOpen: boolean;
@@ -21,6 +22,8 @@ export const LoyaltyPointsModal: React.FC<LoyaltyPointsModalProps> = ({
   onOpenRewards,
 }) => {
   const { t, language } = useTranslation();
+
+  useBodyScrollLock(isOpen);
 
   if (!isOpen) return null;
 
@@ -53,9 +56,9 @@ export const LoyaltyPointsModal: React.FC<LoyaltyPointsModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4 animate-in fade-in">
-      <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl overflow-hidden shadow-2xl border border-slate-200 dark:border-slate-800 max-h-[90vh] flex flex-col">
+      <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl overflow-hidden shadow-2xl border border-slate-200 dark:border-slate-800 max-h-[90dvh] flex flex-col">
         {/* Header */}
-        <div className="p-4 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between gap-2">
+        <div className="p-4 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between gap-2 shrink-0">
           <div className="flex items-center gap-2.5 min-w-0">
             <div className="w-9 h-9 rounded-xl bg-amber-100 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400 flex items-center justify-center shrink-0">
               <Award className="w-5 h-5" />
@@ -81,7 +84,7 @@ export const LoyaltyPointsModal: React.FC<LoyaltyPointsModalProps> = ({
         </div>
 
         {/* Body */}
-        <div className="p-4 space-y-4 overflow-y-auto flex-1">
+        <div className="p-4 space-y-4 overflow-y-auto overscroll-y-contain flex-1 min-h-0">
           {summary?.isFrozen && (
             <div className="p-3 rounded-2xl bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800 text-xs text-rose-700 dark:text-rose-300 flex items-center gap-2 font-semibold">
               <ShieldAlert className="w-4 h-4 shrink-0" />

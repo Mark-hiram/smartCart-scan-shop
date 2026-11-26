@@ -5,6 +5,7 @@ import QRCode from 'qrcode';
 import { X, CheckCircle2, AlertTriangle, ShoppingCart, RefreshCw, Image as ImageIcon, Share2 } from 'lucide-react';
 import { Cart } from '../types';
 import { useTranslation } from '../utils/i18n';
+import { useBodyScrollLock } from '../hooks/useBodyScrollLock';
 
 interface CartCodeModalProps {
   isOpen: boolean;
@@ -24,6 +25,8 @@ export const CartCodeModal: React.FC<CartCodeModalProps> = ({
   const { t } = useTranslation();
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
   const [isChecking, setIsChecking] = useState(false);
+
+  useBodyScrollLock(Boolean(isOpen && cart));
 
   useEffect(() => {
     if (cart && cart.shortCode) {
@@ -58,9 +61,9 @@ export const CartCodeModal: React.FC<CartCodeModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in">
-      <div className="w-full max-w-sm bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden max-h-[92vh] overflow-y-auto">
+      <div className="w-full max-w-sm bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden max-h-[90dvh] flex flex-col">
         {/* Header */}
-        <div className="p-4 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between">
+        <div className="p-4 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between shrink-0">
           <div className="flex items-center gap-2">
             <ShoppingCart className="w-5 h-5 text-emerald-600" />
             <h3 className="text-base font-bold text-slate-900 dark:text-white">
@@ -68,14 +71,16 @@ export const CartCodeModal: React.FC<CartCodeModalProps> = ({
             </h3>
           </div>
           <button
+            type="button"
             onClick={onClose}
-            className="p-1 rounded-full text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+            aria-label="Close"
+            className="p-1.5 rounded-full text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        <div className="p-5 flex flex-col items-center text-center space-y-4">
+        <div className="p-5 flex flex-col items-center text-center space-y-4 overflow-y-auto overscroll-y-contain flex-1 min-h-0">
           {/* Verification Status Banner */}
           {isVerified ? (
             <div className="w-full p-3.5 rounded-2xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 space-y-2.5 text-left">

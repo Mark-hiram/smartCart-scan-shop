@@ -55,7 +55,7 @@ export const Header: React.FC<HeaderProps> = ({
     : 'text-[10px] text-emerald-600 dark:text-emerald-400 font-semibold -mt-0.5';
 
   return (
-    <header className="sticky top-0 z-40 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 transition-colors">
+    <header className="sticky top-0 z-40 safe-top safe-x bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 transition-colors">
       <div className="max-w-7xl mx-auto px-3 sm:px-6 h-14 flex items-center justify-between gap-2 sm:gap-4">
         {/* Zone 1: Clickable Responsive Brand Logo (mark-only on mobile, full logo on sm+) */}
         <button

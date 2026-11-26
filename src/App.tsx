@@ -1,8 +1,8 @@
 // Copyright (c) 2026 SmartCart Owner. All rights reserved.
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
-import { LanguageProvider } from './utils/i18n';
+import { LanguageProvider, useTranslation } from './utils/i18n';
 import { Header } from './components/Header';
 import { StoreModal } from './components/StoreModal';
 import { AuthModal } from './components/AuthModal';
@@ -14,11 +14,13 @@ import { AdminView } from './views/AdminView';
 import { AboutView } from './views/AboutView';
 import { AdminLoginView } from './components/AdminLoginView';
 import { PortalLoginView } from './components/PortalLoginView';
+import { ForcePasswordChangeModal } from './components/ForcePasswordChangeModal';
 import { SmartCartChat } from './components/SmartCartChat';
 import { PortalType } from './types';
 
 function AppContent() {
   const { user, isLoading } = useAuth();
+  const { t } = useTranslation();
   const [currentPath, setCurrentPath] = useState<string>(() => window.location.pathname);
   const [activePortal, setActivePortal] = useState<PortalType>(() => {
     const p = window.location.pathname;
@@ -42,6 +44,8 @@ function AppContent() {
 
   const [isOnline, setIsOnline] = useState<boolean>(() => (typeof navigator !== 'undefined' ? navigator.onLine : true));
   const [isPowerSave, setIsPowerSave] = useState<boolean>(false);
+  const [waitingWorker, setWaitingWorker] = useState<ServiceWorker | null>(null);
+  const refreshingRef = useRef(false);
 
   const navigateTo = (path: string) => {
     if (window.location.pathname !== path) {
@@ -128,15 +132,45 @@ function AppContent() {
     };
   }, []);
 
-  // Register Service Worker for PWA
+  // Register Service Worker for PWA & listen for waiting updates
   useEffect(() => {
-    if ('serviceWorker' in navigator) {
-      navigator.serviceWorker
-        .register('/sw.js')
-        .then((reg) => console.log('Service Worker registered with scope:', reg.scope))
-        .catch((err) => console.warn('Service Worker registration failed:', err));
-    }
+    if (!('serviceWorker' in navigator)) return;
+
+    const handleControllerChange = () => {
+      if (refreshingRef.current) return;
+      refreshingRef.current = true;
+      window.location.reload();
+    };
+
+    navigator.serviceWorker.addEventListener('controllerchange', handleControllerChange);
+
+    navigator.serviceWorker
+      .register('/sw.js')
+      .then((reg) => {
+        if (reg.waiting && navigator.serviceWorker.controller) {
+          setWaitingWorker(reg.waiting);
+        }
+        reg.addEventListener('updatefound', () => {
+          const newWorker = reg.installing;
+          if (!newWorker) return;
+          newWorker.addEventListener('statechange', () => {
+            if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+              setWaitingWorker(newWorker);
+            }
+          });
+        });
+      })
+      .catch((err) => console.warn('Service Worker registration failed:', err));
+
+    return () => {
+      navigator.serviceWorker.removeEventListener('controllerchange', handleControllerChange);
+    };
   }, []);
+
+  const handleApplySwUpdate = () => {
+    if (!waitingWorker) return;
+    waitingWorker.postMessage({ type: 'SKIP_WAITING' });
+  };
 
   // Automatically align portal & URL when user logs in or logs out
   useEffect(() => {
@@ -202,7 +236,7 @@ function AppContent() {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center portal-shell-bg">
+      <div className="min-h-dvh app-shell-root flex items-center justify-center portal-shell-bg">
         <div className="flex flex-col items-center gap-3">
           <div className="w-10 h-10 border-3 border-emerald-500 border-t-transparent rounded-full animate-spin" />
           <p className="text-xs font-semibold text-slate-600 dark:text-slate-300">Loading Smart Cart...</p>
@@ -219,7 +253,7 @@ function AppContent() {
     activePortal === 'shopper';
 
   return (
-    <div className="min-h-screen portal-shell-bg text-slate-900 dark:text-slate-100 flex flex-col antialiased transition-colors">
+    <div className="min-h-dvh app-shell-root portal-shell-bg text-slate-900 dark:text-slate-100 flex flex-col antialiased transition-colors">
       {/* Top Bar Header with 3-portal switcher, light/dark toggle, and store info */}
       <Header
         activePortal={isAdminRoute ? 'management' : isAboutRoute ? 'shopper' : activePortal}
@@ -366,16 +400,47 @@ function AppContent() {
         onClose={() => setIsAuthModalOpen(false)}
       />
 
+      {/* Forced Password Change for Shopper / Staff / Owner signing in with a temporary password */}
+      <ForcePasswordChangeModal />
+
+      {/* Service Worker Update Prompt */}
+      {waitingWorker && (
+        <div
+          className="fixed left-4 right-4 sm:left-auto sm:right-4 z-50 max-w-sm flex items-center justify-between gap-3 rounded-2xl bg-slate-900 dark:bg-emerald-950 text-white px-4 py-2.5 text-xs shadow-2xl border border-emerald-500/40"
+          style={{
+            bottom: showingShopperShell
+              ? 'calc(5.75rem + env(safe-area-inset-bottom, 0px))'
+              : 'calc(1rem + env(safe-area-inset-bottom, 0px))',
+          }}
+        >
+          <span className="font-medium">{t.updateAvailable}</span>
+          <button
+            type="button"
+            onClick={handleApplySwUpdate}
+            className="px-3 py-1 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold shrink-0 transition"
+          >
+            {t.refreshNow}
+          </button>
+        </div>
+      )}
+
       {/* Real-Time Offline Mode Indicator Banner */}
       {!isOnline && (
-        <div className="fixed bottom-4 left-4 z-50 flex items-center gap-2 rounded-xl bg-amber-500 text-white px-3.5 py-2 text-xs font-semibold shadow-lg shadow-amber-500/20 border border-amber-400">
+        <div
+          className="fixed left-4 z-40 flex items-center gap-2 rounded-xl bg-amber-500 text-white px-3.5 py-2 text-xs font-semibold shadow-lg shadow-amber-500/20 border border-amber-400"
+          style={{
+            bottom: showingShopperShell
+              ? 'calc(5.75rem + env(safe-area-inset-bottom, 0px))'
+              : 'calc(1rem + env(safe-area-inset-bottom, 0px))',
+          }}
+        >
           <span className="w-2 h-2 rounded-full bg-white animate-pulse" />
           <span>Offline Mode — Working from local branch cache</span>
         </div>
       )}
 
       {/* Multi-turn Gemini AI Assistant */}
-      <SmartCartChat />
+      <SmartCartChat hasFixedBottomBar={showingShopperShell} />
     </div>
   );
 }

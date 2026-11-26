@@ -1,5 +1,5 @@
 /* Copyright (c) 2026 SmartCart Owner. All rights reserved. */
-/* Centralized theme tokens, WCAG AA surface pairs, and inline SVG portal backdrops */
+/* Centralized theme tokens and WCAG AA plain gradient surfaces */
 
 :root {
   --font-display: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
@@ -23,9 +23,6 @@
   --border-hairline: rgba(15, 23, 42, 0.1);
   --text-primary: #0f172a;
   --text-secondary: #475569;
-
-  /* Organic produce, woven basket & shopping cart inline SVG pattern (light) */
-  --portal-pattern: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160' viewBox='0 0 160 160' fill='none'%3E%3Cg stroke='%23059669' stroke-opacity='0.11' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M26 36c6-10 18-10 22 0-6 8-16 8-22 0z'/%3E%3Cpath d='M37 28v-5'/%3E%3Crect x='96' y='24' width='26' height='18' rx='4'/%3E%3Cpath d='M102 24l4-8M116 24l-4-8M96 31h26'/%3E%3Ccircle cx='40' cy='112' r='10'/%3E%3Cpath d='M40 102c2-4 6-6 9-4'/%3E%3Cpath d='M98 108h24l-3 14H103z'/%3E%3Ccircle cx='105' cy='127' r='2.5'/%3E%3Ccircle cx='117' cy='127' r='2.5'/%3E%3Ccircle cx='78' cy='72' r='2' fill='%230d9488' fill-opacity='0.14' stroke='none'/%3E%3Ccircle cx='140' cy='78' r='1.8' fill='%23059669' fill-opacity='0.14' stroke='none'/%3E%3C/g%3E%3C/svg%3E");
 }
 
 .dark {
@@ -40,11 +37,9 @@
   --border-hairline: rgba(148, 163, 184, 0.16);
   --text-primary: #f8fafc;
   --text-secondary: #cbd5e1;
-
-  --portal-pattern: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160' viewBox='0 0 160 160' fill='none'%3E%3Cg stroke='%2334d399' stroke-opacity='0.1' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M26 36c6-10 18-10 22 0-6 8-16 8-22 0z'/%3E%3Cpath d='M37 28v-5'/%3E%3Crect x='96' y='24' width='26' height='18' rx='4'/%3E%3Cpath d='M102 24l4-8M116 24l-4-8M96 31h26'/%3E%3Ccircle cx='40' cy='112' r='10'/%3E%3Cpath d='M40 102c2-4 6-6 9-4'/%3E%3Cpath d='M98 108h24l-3 14H103z'/%3E%3Ccircle cx='105' cy='127' r='2.5'/%3E%3Ccircle cx='117' cy='127' r='2.5'/%3E%3Ccircle cx='78' cy='72' r='2' fill='%232dd4bf' fill-opacity='0.14' stroke='none'/%3E%3C/g%3E%3C/svg%3E");
 }
 
-/* Supermarket & Staff Portal: Deep navy-to-blue gradient with fine grid / shelf-line pattern and warm accent */
+/* Supermarket & Staff Portal: Deep navy-to-blue gradient with warm accent */
 [data-portal='staff'],
 [data-portal='management'] {
   --portal-bg-gradient: linear-gradient(155deg, #eff6ff 0%, #e0e7ff 48%, #f8fafc 100%);
@@ -54,7 +49,6 @@
   --portal-accent: #1d4ed8;
   --portal-accent-hover: #1e40af;
   --portal-warm-accent: #d97706;
-  --portal-pattern: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='96' height='96' viewBox='0 0 96 96' fill='none'%3E%3Cg stroke='%231e3a8a' stroke-opacity='0.08' stroke-width='1'%3E%3Cpath d='M0 24h96M0 48h96M0 72h96M24 0v96M48 0v96M72 0v96'/%3E%3Crect x='8' y='14' width='12' height='10' rx='1.5' stroke='%23d97706' stroke-opacity='0.14'/%3E%3Crect x='54' y='38' width='14' height='10' rx='1.5' stroke='%231d4ed8' stroke-opacity='0.12'/%3E%3C/g%3E%3C/svg%3E");
 }
 
 .dark [data-portal='staff'],
@@ -63,10 +57,9 @@
   --portal-banner-gradient: linear-gradient(135deg, #090e1c 0%, #172554 58%, #1e3a8a 100%);
   --portal-banner-text: #f8fafc;
   --portal-banner-muted: #fcd34d;
-  --portal-pattern: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='96' height='96' viewBox='0 0 96 96' fill='none'%3E%3Cg stroke='%2360a5fa' stroke-opacity='0.1' stroke-width='1'%3E%3Cpath d='M0 24h96M0 48h96M0 72h96M24 0v96M48 0v96M72 0v96'/%3E%3Crect x='8' y='14' width='12' height='10' rx='1.5' stroke='%23fbbf24' stroke-opacity='0.15'/%3E%3C/g%3E%3C/svg%3E");
 }
 
-/* Admin Portal: Serious, secure dark slate-to-indigo gradient with hexagon / network lattice */
+/* Admin Portal: Serious, secure dark slate-to-indigo gradient */
 [data-portal='admin'] {
   --portal-bg-gradient: linear-gradient(155deg, #e2e8f0 0%, #e0e7ff 52%, #f1f5f9 100%);
   --portal-banner-gradient: linear-gradient(135deg, #0f172a 0%, #1e1b4b 56%, #312e81 100%);
@@ -74,7 +67,6 @@
   --portal-banner-muted: #c7d2fe;
   --portal-accent: #312e81;
   --portal-accent-hover: #1e1b4b;
-  --portal-pattern: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='112' height='96' viewBox='0 0 112 96' fill='none'%3E%3Cg stroke='%23312e81' stroke-opacity='0.1' stroke-width='1.1'%3E%3Cpolygon points='28,6 50,18 50,42 28,54 6,42 6,18'/%3E%3Cpolygon points='84,38 106,50 106,74 84,86 62,74 62,50'/%3E%3Cline x1='50' y1='30' x2='62' y2='50'/%3E%3Ccircle cx='28' cy='30' r='2' fill='%234338ca' fill-opacity='0.18' stroke='none'/%3E%3Ccircle cx='84' cy='62' r='2' fill='%234338ca' fill-opacity='0.18' stroke='none'/%3E%3C/g%3E%3C/svg%3E");
 }
 
 .dark [data-portal='admin'] {
@@ -82,20 +74,19 @@
   --portal-banner-gradient: linear-gradient(135deg, #060913 0%, #1e1b4b 58%, #312e81 100%);
   --portal-banner-text: #f8fafc;
   --portal-banner-muted: #a5b4fc;
-  --portal-pattern: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='112' height='96' viewBox='0 0 112 96' fill='none'%3E%3Cg stroke='%23818cf8' stroke-opacity='0.13' stroke-width='1.1'%3E%3Cpolygon points='28,6 50,18 50,42 28,54 6,42 6,18'/%3E%3Cpolygon points='84,38 106,50 106,74 84,86 62,74 62,50'/%3E%3Cline x1='50' y1='30' x2='62' y2='50'/%3E%3Ccircle cx='28' cy='30' r='2' fill='%23a5b4fc' fill-opacity='0.22' stroke='none'/%3E%3Ccircle cx='84' cy='62' r='2' fill='%23a5b4fc' fill-opacity='0.22' stroke='none'/%3E%3C/g%3E%3C/svg%3E");
 }
 
 .portal-shell-bg {
   background-color: var(--surface-subtle);
-  background-image: var(--portal-pattern), var(--portal-bg-gradient);
-  background-repeat: repeat, no-repeat;
-  background-size: auto, cover;
+  background-image: var(--portal-bg-gradient);
+  background-repeat: no-repeat;
+  background-size: cover;
 }
 
 .portal-banner-surface {
-  background-image: var(--portal-pattern), var(--portal-banner-gradient);
-  background-repeat: repeat, no-repeat;
-  background-size: auto, cover;
+  background-image: var(--portal-banner-gradient);
+  background-repeat: no-repeat;
+  background-size: cover;
   color: var(--portal-banner-text);
 }
 

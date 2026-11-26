@@ -36,7 +36,11 @@ import {
   TrendingUp,
   DollarSign,
   ShoppingCart,
+  X,
+  KeyRound,
+  Copy,
 } from 'lucide-react';
+import { useBodyScrollLock } from '../hooks/useBodyScrollLock';
 
 export const OwnerView: React.FC = () => {
   const { user, supermarket, token } = useAuth();
@@ -71,6 +75,22 @@ export const OwnerView: React.FC = () => {
   const [showAddPromoModal, setShowAddPromoModal] = useState(false);
   const [showCsvImportModal, setShowCsvImportModal] = useState(false);
   const [showEditPriceStockModal, setShowEditPriceStockModal] = useState<any>(null);
+  const [tempPasswordStaff, setTempPasswordStaff] = useState<User | null>(null);
+  const [staffTempPassword, setStaffTempPassword] = useState<string | null>(null);
+  const [staffTempExpiresAt, setStaffTempExpiresAt] = useState<number | null>(null);
+  const [staffTempError, setStaffTempError] = useState<string | null>(null);
+  const [isGeneratingStaffTemp, setIsGeneratingStaffTemp] = useState(false);
+  const [copiedStaffTemp, setCopiedStaffTemp] = useState(false);
+
+  useBodyScrollLock(
+    showAddBranchModal ||
+      showAddStaffModal ||
+      Boolean(editingStaffMember) ||
+      Boolean(showEditPriceStockModal) ||
+      Boolean(tempPasswordStaff) ||
+      showCsvImportModal ||
+      showAddPromoModal
+  );
 
   // Form states
   const [newBranch, setNewBranch] = useState({ name: '', code: '', address: '', city: 'Nairobi', phone: '', lat: -1.28, lng: 36.82 });
@@ -316,6 +336,32 @@ export const OwnerView: React.FC = () => {
     } catch (e) {}
   };
 
+  // Generate 24h single-use temporary password for owner's own staff member
+  const handleGenerateStaffTempPassword = async () => {
+    if (!tempPasswordStaff || !token) return;
+    setStaffTempError(null);
+    setIsGeneratingStaffTemp(true);
+    try {
+      const res = await fetch(`/api/owner/staff/${tempPasswordStaff.id}/temp-password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setStaffTempError(data.error || 'Could not generate temporary password.');
+      } else {
+        setStaffTempPassword(data.tempPassword);
+        setStaffTempExpiresAt(data.expiresAt || null);
+        setCopiedStaffTemp(false);
+        loadData();
+      }
+    } catch (e: any) {
+      setStaffTempError(e?.message || 'Network error.');
+    } finally {
+      setIsGeneratingStaffTemp(false);
+    }
+  };
+
   // Save Branch Product Override (Price, Stock & Aisle/Shelf)
   const handleSavePriceStock = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -346,8 +392,24 @@ export const OwnerView: React.FC = () => {
   };
 
   // Export Catalogue CSV
-  const handleExportCsv = () => {
-    window.open(`/api/owner/products/csv-export?branchId=${selectedBranchId}`, '_blank');
+  const handleExportCsv = async () => {
+    try {
+      const res = await fetch(`/api/owner/products/csv-export?branchId=${selectedBranchId}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      });
+      if (!res.ok) return;
+      const blob = await res.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      a.download = `smartcart_catalogue_${selectedBranchId || 'branch'}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(blobUrl);
+    } catch (e) {
+      console.error('CSV export failed:', e);
+    }
   };
 
   // Export Reports CSV with Bearer auth (no window.open)
@@ -702,8 +764,9 @@ export const OwnerView: React.FC = () => {
                             {s.status}
                           </span>
                         </td>
-                        <td className="p-3.5 text-right space-x-1.5">
+                        <td className="p-3.5 text-right whitespace-nowrap space-x-1.5">
                           <button
+                            type="button"
                             onClick={() => {
                               setEditingStaffMember(s);
                               setStaffPermissions(p);
@@ -714,6 +777,20 @@ export const OwnerView: React.FC = () => {
                             Permissions
                           </button>
                           <button
+                            type="button"
+                            onClick={() => {
+                              setTempPasswordStaff(s);
+                              setStaffTempPassword(null);
+                              setStaffTempExpiresAt(null);
+                              setStaffTempError(null);
+                              setCopiedStaffTemp(false);
+                            }}
+                            className="px-2.5 py-1 rounded-lg border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 text-[11px] font-semibold text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-950/60"
+                          >
+                            {t.staffTempPasswordBtn}
+                          </button>
+                          <button
+                            type="button"
                             onClick={() => handleToggleStaffStatus(s)}
                             className="px-2.5 py-1 rounded-lg border border-slate-200 dark:border-slate-700 text-[11px] font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
                           >
@@ -1261,71 +1338,83 @@ export const OwnerView: React.FC = () => {
       {/* Modal: Add Branch */}
       {showAddBranchModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in">
-          <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl p-5 shadow-2xl border border-slate-200 dark:border-slate-800 space-y-4">
-            <h3 className="text-base font-bold text-slate-900 dark:text-white">{t.addBranch}</h3>
-            <form onSubmit={handleCreateBranch} className="space-y-3">
-              <div>
-                <label className="text-xs font-semibold block mb-1">Branch Name</label>
-                <input
-                  type="text"
-                  required
-                  value={newBranch.name}
-                  onChange={(e) => setNewBranch({ ...newBranch, name: e.target.value })}
-                  placeholder="e.g. Karen Hub Branch"
-                  className="w-full h-10 px-3 rounded-xl border text-xs"
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-2">
+          <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 max-h-[90dvh] flex flex-col overflow-hidden">
+            <div className="p-5 pb-3 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between shrink-0">
+              <h3 className="text-base font-bold text-slate-900 dark:text-white">{t.addBranch}</h3>
+              <button
+                type="button"
+                onClick={() => setShowAddBranchModal(false)}
+                aria-label="Close"
+                className="p-1.5 rounded-xl text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-5 pt-4 overflow-y-auto overscroll-y-contain flex-1 min-h-0">
+              <form onSubmit={handleCreateBranch} className="space-y-3">
                 <div>
-                  <label className="text-xs font-semibold block mb-1">Branch Code</label>
+                  <label className="text-xs font-semibold block mb-1">Branch Name</label>
                   <input
                     type="text"
                     required
-                    value={newBranch.code}
-                    onChange={(e) => setNewBranch({ ...newBranch, code: e.target.value })}
-                    placeholder="e.g. KRN"
-                    className="w-full h-10 px-3 rounded-xl border text-xs uppercase font-mono"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs font-semibold block mb-1">Phone</label>
-                  <input
-                    type="tel"
-                    required
-                    value={newBranch.phone}
-                    onChange={(e) => setNewBranch({ ...newBranch, phone: e.target.value })}
-                    placeholder="+254711..."
+                    value={newBranch.name}
+                    onChange={(e) => setNewBranch({ ...newBranch, name: e.target.value })}
+                    placeholder="e.g. Karen Hub Branch"
                     className="w-full h-10 px-3 rounded-xl border text-xs"
                   />
                 </div>
-              </div>
-              <div>
-                <label className="text-xs font-semibold block mb-1">Address / Street</label>
-                <input
-                  type="text"
-                  required
-                  value={newBranch.address}
-                  onChange={(e) => setNewBranch({ ...newBranch, address: e.target.value })}
-                  placeholder="e.g. Dagoretti Road"
-                  className="w-full h-10 px-3 rounded-xl border text-xs"
-                />
-              </div>
-              <div className="flex gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setShowAddBranchModal(false)}
-                  className="flex-1 py-2.5 rounded-xl border text-xs font-semibold"
-                >
-                  {t.cancel}
-                </button>
-                <button
-                  type="submit"
-                  className="flex-1 py-2.5 rounded-xl bg-emerald-600 text-white text-xs font-semibold"
-                >
-                  Create Branch
-                </button>
-              </div>
-            </form>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="text-xs font-semibold block mb-1">Branch Code</label>
+                    <input
+                      type="text"
+                      required
+                      value={newBranch.code}
+                      onChange={(e) => setNewBranch({ ...newBranch, code: e.target.value })}
+                      placeholder="e.g. KRN"
+                      className="w-full h-10 px-3 rounded-xl border text-xs uppercase font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs font-semibold block mb-1">Phone</label>
+                    <input
+                      type="tel"
+                      required
+                      value={newBranch.phone}
+                      onChange={(e) => setNewBranch({ ...newBranch, phone: e.target.value })}
+                      placeholder="+254711..."
+                      className="w-full h-10 px-3 rounded-xl border text-xs"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="text-xs font-semibold block mb-1">Address / Street</label>
+                  <input
+                    type="text"
+                    required
+                    value={newBranch.address}
+                    onChange={(e) => setNewBranch({ ...newBranch, address: e.target.value })}
+                    placeholder="e.g. Dagoretti Road"
+                    className="w-full h-10 px-3 rounded-xl border text-xs"
+                  />
+                </div>
+                <div className="flex gap-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowAddBranchModal(false)}
+                    className="flex-1 py-2.5 rounded-xl border text-xs font-semibold"
+                  >
+                    {t.cancel}
+                  </button>
+                  <button
+                    type="submit"
+                    className="flex-1 py-2.5 rounded-xl bg-emerald-600 text-white text-xs font-semibold"
+                  >
+                    Create Branch
+                  </button>
+                </div>
+              </form>
+            </div>
           </div>
         </div>
       )}
@@ -1333,9 +1422,20 @@ export const OwnerView: React.FC = () => {
       {/* Modal: Add Staff with Presets & 7 Permissions */}
       {showAddStaffModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in">
-          <div className="w-full max-w-lg bg-white dark:bg-slate-900 rounded-3xl p-5 shadow-2xl border border-slate-200 dark:border-slate-800 space-y-4 max-h-[90vh] overflow-y-auto">
-            <h3 className="text-base font-bold text-slate-900 dark:text-white">{t.addStaff}</h3>
-            <form onSubmit={handleCreateStaff} className="space-y-3">
+          <div className="w-full max-w-lg bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 max-h-[90dvh] flex flex-col overflow-hidden">
+            <div className="p-5 pb-3 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between shrink-0">
+              <h3 className="text-base font-bold text-slate-900 dark:text-white">{t.addStaff}</h3>
+              <button
+                type="button"
+                onClick={() => setShowAddStaffModal(false)}
+                aria-label="Close"
+                className="p-1.5 rounded-xl text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-5 pt-4 overflow-y-auto overscroll-y-contain flex-1 min-h-0">
+              <form onSubmit={handleCreateStaff} className="space-y-3">
               <div>
                 <label className="text-xs font-semibold block mb-1">{t.fullName}</label>
                 <input
@@ -1495,7 +1595,8 @@ export const OwnerView: React.FC = () => {
                   Create Staff Account
                 </button>
               </div>
-            </form>
+              </form>
+            </div>
           </div>
         </div>
       )}
@@ -1503,12 +1604,22 @@ export const OwnerView: React.FC = () => {
       {/* Modal: Edit Existing Staff Permissions */}
       {editingStaffMember && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in">
-          <div className="w-full max-w-lg bg-white dark:bg-slate-900 rounded-3xl p-5 shadow-2xl border border-slate-200 dark:border-slate-800 space-y-4">
-            <h3 className="text-base font-bold text-slate-900 dark:text-white">
-              Edit Permissions: {editingStaffMember.name}
-            </h3>
-
-            <form onSubmit={handleUpdateStaffPermissions} className="space-y-3">
+          <div className="w-full max-w-lg bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 max-h-[90dvh] flex flex-col overflow-hidden">
+            <div className="p-5 pb-3 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between gap-2 shrink-0">
+              <h3 className="text-base font-bold text-slate-900 dark:text-white truncate">
+                Edit Permissions: {editingStaffMember.name}
+              </h3>
+              <button
+                type="button"
+                onClick={() => setEditingStaffMember(null)}
+                aria-label="Close"
+                className="p-1.5 rounded-xl text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-5 pt-4 overflow-y-auto overscroll-y-contain flex-1 min-h-0">
+              <form onSubmit={handleUpdateStaffPermissions} className="space-y-3">
               <div>
                 <label className="text-xs font-bold block mb-1">{t.presetSelect}</label>
                 <select
@@ -1606,7 +1717,8 @@ export const OwnerView: React.FC = () => {
                   Save Permissions
                 </button>
               </div>
-            </form>
+              </form>
+            </div>
           </div>
         </div>
       )}
@@ -1614,17 +1726,27 @@ export const OwnerView: React.FC = () => {
       {/* Modal: Adjust Branch Price, Stock, & Aisle/Shelf */}
       {showEditPriceStockModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in">
-          <div className="w-full max-w-sm bg-white dark:bg-slate-900 rounded-3xl p-5 shadow-2xl border border-slate-200 dark:border-slate-800 space-y-4">
-            <div>
-              <h3 className="text-sm font-bold text-slate-900 dark:text-white">
-                Adjust Branch Price, Stock &amp; Location
-              </h3>
-              <p className="text-xs text-slate-500 mt-0.5 truncate">
-                {showEditPriceStockModal.name}
-              </p>
+          <div className="w-full max-w-sm bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 max-h-[90dvh] flex flex-col overflow-hidden">
+            <div className="p-5 pb-3 border-b border-slate-100 dark:border-slate-800 flex items-start justify-between gap-2 shrink-0">
+              <div className="min-w-0">
+                <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                  Adjust Branch Price, Stock &amp; Location
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5 truncate">
+                  {showEditPriceStockModal.name}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowEditPriceStockModal(null)}
+                aria-label="Close"
+                className="p-1.5 rounded-xl text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
             </div>
-
-            <form onSubmit={handleSavePriceStock} className="space-y-3">
+            <div className="p-5 pt-4 overflow-y-auto overscroll-y-contain flex-1 min-h-0">
+              <form onSubmit={handleSavePriceStock} className="space-y-3">
               <div>
                 <label className="text-xs font-semibold block mb-1">
                   Branch Price Override (KES)
@@ -1731,7 +1853,8 @@ export const OwnerView: React.FC = () => {
                   Save Changes
                 </button>
               </div>
-            </form>
+              </form>
+            </div>
           </div>
         </div>
       )}
@@ -1739,10 +1862,21 @@ export const OwnerView: React.FC = () => {
       {/* Modal: CSV Import with Aisle and Shelf Columns */}
       {showCsvImportModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in">
-          <div className="w-full max-w-2xl bg-white dark:bg-slate-900 rounded-3xl p-5 shadow-2xl border border-slate-200 dark:border-slate-800 space-y-4 max-h-[90vh] overflow-y-auto">
-            <h3 className="text-base font-bold text-slate-900 dark:text-white">
-              {t.importCsv} (with Aisle &amp; Shelf)
-            </h3>
+          <div className="w-full max-w-2xl bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 max-h-[90dvh] flex flex-col overflow-hidden">
+            <div className="p-5 pb-3 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between shrink-0">
+              <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                {t.importCsv} (with Aisle &amp; Shelf)
+              </h3>
+              <button
+                type="button"
+                onClick={() => setShowCsvImportModal(false)}
+                aria-label="Close"
+                className="p-1.5 rounded-xl text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-5 pt-4 overflow-y-auto overscroll-y-contain flex-1 min-h-0 space-y-4">
             <p className="text-xs text-slate-500">
               Paste your catalogue CSV. Header format: <code className="font-mono text-emerald-600">barcode,name,category,base_price,aisle,shelf,branch_price,stock,low_stock_threshold</code>
             </p>
@@ -1795,7 +1929,8 @@ export const OwnerView: React.FC = () => {
                   Validate &amp; Import
                 </button>
               </div>
-            </form>
+              </form>
+            </div>
           </div>
         </div>
       )}
@@ -1803,9 +1938,20 @@ export const OwnerView: React.FC = () => {
       {/* Modal: Add Promotion */}
       {showAddPromoModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in">
-          <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl p-5 shadow-2xl border border-slate-200 dark:border-slate-800 space-y-4">
-            <h3 className="text-base font-bold text-slate-900 dark:text-white">{t.addPromotion}</h3>
-            <form onSubmit={handleCreatePromo} className="space-y-3">
+          <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 max-h-[90dvh] flex flex-col overflow-hidden">
+            <div className="p-5 pb-3 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between shrink-0">
+              <h3 className="text-base font-bold text-slate-900 dark:text-white">{t.addPromotion}</h3>
+              <button
+                type="button"
+                onClick={() => setShowAddPromoModal(false)}
+                aria-label="Close"
+                className="p-1.5 rounded-xl text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-5 pt-4 overflow-y-auto overscroll-y-contain flex-1 min-h-0">
+              <form onSubmit={handleCreatePromo} className="space-y-3">
               <div>
                 <label className="text-xs font-semibold block mb-1">Offer Title</label>
                 <input
@@ -1940,7 +2086,118 @@ export const OwnerView: React.FC = () => {
                   Save Offer
                 </button>
               </div>
-            </form>
+              </form>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Generate One-Time Staff Temporary Password */}
+      {tempPasswordStaff && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in">
+          <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 max-h-[90dvh] flex flex-col overflow-hidden">
+            <div className="p-5 pb-3 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between gap-2 shrink-0">
+              <div className="flex items-center gap-2 min-w-0">
+                <KeyRound className="w-5 h-5 text-amber-600 shrink-0" />
+                <h3 className="text-base font-bold text-slate-900 dark:text-white truncate">
+                  {t.generateStaffTempTitle}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setTempPasswordStaff(null);
+                  setStaffTempPassword(null);
+                  setStaffTempExpiresAt(null);
+                  setStaffTempError(null);
+                }}
+                aria-label="Close"
+                className="p-1.5 rounded-xl text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-5 pt-4 overflow-y-auto overscroll-y-contain flex-1 min-h-0 space-y-4 text-xs">
+              <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 space-y-1">
+                <p className="font-bold text-slate-900 dark:text-white">{tempPasswordStaff.name}</p>
+                <p className="text-slate-500">
+                  {tempPasswordStaff.email} · {tempPasswordStaff.phone}
+                </p>
+              </div>
+
+              {staffTempError && (
+                <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-rose-700 dark:text-rose-300">
+                  {staffTempError}
+                </div>
+              )}
+
+              {!staffTempPassword ? (
+                <>
+                  <p className="text-slate-600 dark:text-slate-300 leading-relaxed">
+                    Generating a temporary password immediately ends all active sessions for this staff member. The temporary password will be shown once, expires in 24 hours, works once, and forces a new password at their next sign-in.
+                  </p>
+                  <div className="flex gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setTempPasswordStaff(null);
+                        setStaffTempPassword(null);
+                        setStaffTempError(null);
+                      }}
+                      className="flex-1 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 font-semibold"
+                    >
+                      {t.cancel}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isGeneratingStaffTemp}
+                      onClick={handleGenerateStaffTempPassword}
+                      className="flex-1 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold"
+                    >
+                      {isGeneratingStaffTemp ? 'Generating...' : 'Generate Temporary Password'}
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <div className="space-y-3">
+                  <div className="p-3.5 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 text-amber-900 dark:text-amber-200 leading-relaxed">
+                    {t.tempPasswordOneTimeWarning}
+                  </div>
+                  <div className="p-3.5 rounded-2xl bg-slate-900 text-emerald-300 font-mono text-sm flex items-center justify-between gap-2">
+                    <span className="break-all select-all">{staffTempPassword}</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard?.writeText(staffTempPassword);
+                        setCopiedStaffTemp(true);
+                      }}
+                      className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-white text-[11px] font-sans font-semibold flex items-center gap-1 shrink-0"
+                    >
+                      {copiedStaffTemp ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                      <span>{copiedStaffTemp ? t.passwordCopied : t.copyPassword}</span>
+                    </button>
+                  </div>
+                  {staffTempExpiresAt && (
+                    <p className="text-[11px] text-slate-500">
+                      Expires: {new Date(staffTempExpiresAt).toLocaleString()}
+                    </p>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTempPasswordStaff(null);
+                      setStaffTempPassword(null);
+                      setStaffTempExpiresAt(null);
+                      setStaffTempError(null);
+                    }}
+                    className="w-full py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold"
+                  >
+                    Done (Clear From Screen)
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}

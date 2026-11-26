@@ -4,10 +4,21 @@ import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
 import crypto from 'crypto';
 import { db, hashPassword, verifyPassword, createDefaultLoyaltySettings } from './src/server/db';
+import {
+  sendEmail,
+  normalizeAndValidateEmail,
+  EmailLanguage,
+  buildPasswordResetOtpEmail,
+  buildAdminResetLinkEmail,
+  buildPasswordChangedEmail,
+  buildSupermarketApplicationEmail,
+  buildSupermarketStatusEmail,
+} from './src/server/mailer';
 import { validateBarcode } from './src/utils/barcode';
 import { GoogleGenAI, Content } from '@google/genai';
 import {
   User,
+  PortalType,
   Supermarket,
   Cart,
   CartItem,
@@ -18,6 +29,7 @@ import {
   Branch,
   Announcement,
   SupportTicket,
+  PasswordResetRequestDetails,
   ShoppingList,
   LoyaltyTransaction,
   LoyaltyPointsSummary,
@@ -52,8 +64,31 @@ const PORTAL_BY_ROLE: Record<string, string> = {
 };
 
 const app = express();
+app.use('/api/ai', express.json({ limit: '32kb' }));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Handle oversized request bodies and invalid JSON cleanly (especially strict 32kb cap on /api/ai/*)
+app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
+  if (err?.type === 'entity.too.large' || err?.status === 413) {
+    return res.status(413).json({ error: 'Request payload is too large.' });
+  }
+  if (err?.type === 'entity.parse.failed' || err instanceof SyntaxError) {
+    return res.status(400).json({ error: 'Invalid JSON request body.' });
+  }
+  next(err);
+});
+
+function getAppBaseUrl(req: Request): string {
+  const configured = process.env.APP_URL?.trim();
+  if (configured) {
+    return configured.replace(/\/+$/, '');
+  }
+  const protoHeader = (req.headers['x-forwarded-proto'] as string) || req.protocol || 'http';
+  const proto = protoHeader.split(',')[0].trim();
+  const host = (req.get('x-forwarded-host') || req.get('host') || 'localhost:3000').split(',')[0].trim();
+  return `${proto}://${host}`;
+}
 
 // Health check endpoint for Render / load balancers (unauthenticated, exposes no data)
 app.get('/healthz', (_req, res) => {
@@ -122,8 +157,77 @@ function createIpRateLimiter(maxRequests: number, windowMs: number, keyPrefix: s
 const loginRateLimiter = createIpRateLimiter(30, 10 * 60 * 1000, 'login');
 // Sensitive operations: max 10 attempts per hour per IP
 const sensitiveOpsRateLimiter = createIpRateLimiter(10, 60 * 60 * 1000, 'sensitive');
+// Password reset requests (legacy code/link): max 5 attempts per hour per IP
+const forgotPasswordIpRateLimiter = createIpRateLimiter(5, 60 * 60 * 1000, 'forgot_ip');
+// Free support-assisted password reset requests: max 3 attempts per hour per IP
+const passwordResetRequestIpRateLimiter = createIpRateLimiter(3, 60 * 60 * 1000, 'pw_reset_req_ip');
 // Rewards redemption requests: max 12 attempts per 15 minutes per IP
 const redemptionRateLimiter = createIpRateLimiter(12, 15 * 60 * 1000, 'redemption');
+
+const TEMP_PASSWORD_TTL_MS = 24 * 60 * 60 * 1000;
+const PW_RESET_REQ_ONE_HOUR_MS = 60 * 60 * 1000;
+const PW_RESET_REQ_PER_IDENTIFIER_LIMIT = 3;
+const passwordResetIdentifierTimestamps = new Map<string, number[]>();
+
+function isPasswordResetIdentifierRateLimited(keys: string[]): boolean {
+  const now = Date.now();
+  for (const key of keys) {
+    if (!key) continue;
+    const recent = (passwordResetIdentifierTimestamps.get(key) || []).filter(
+      (ts) => now - ts < PW_RESET_REQ_ONE_HOUR_MS
+    );
+    if (recent.length === 0) {
+      passwordResetIdentifierTimestamps.delete(key);
+    } else {
+      passwordResetIdentifierTimestamps.set(key, recent);
+      if (recent.length >= PW_RESET_REQ_PER_IDENTIFIER_LIMIT) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function recordPasswordResetIdentifierAttempt(keys: string[]): void {
+  const now = Date.now();
+  for (const key of keys) {
+    if (!key) continue;
+    const recent = (passwordResetIdentifierTimestamps.get(key) || []).filter(
+      (ts) => now - ts < PW_RESET_REQ_ONE_HOUR_MS
+    );
+    recent.push(now);
+    passwordResetIdentifierTimestamps.set(key, recent);
+  }
+}
+
+function generateTemporaryPassword(): string {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+  const bytes = crypto.randomBytes(12);
+  let randomPart = '';
+  for (let i = 0; i < 12; i++) {
+    randomPart += alphabet[bytes[i] % alphabet.length];
+  }
+  return `Sc!${randomPart}`; // 15 characters (>= 12 chars)
+}
+
+function maskEmail(email: string): string {
+  if (!email || !email.includes('@')) return '';
+  const [local, domain] = email.split('@');
+  if (local.length <= 2) return `${local[0] || '*'}***@${domain}`;
+  return `${local[0]}${'*'.repeat(Math.min(5, local.length - 2))}${local[local.length - 1]}@${domain}`;
+}
+
+function maskPhone(phone: string): string {
+  const clean = phone.trim();
+  if (!clean) return '';
+  if (clean.length <= 4) return '****';
+  const prefixLen = clean.startsWith('+') ? 4 : 2;
+  const suffixLen = 3;
+  if (clean.length <= prefixLen + suffixLen) {
+    return `${clean.slice(0, 2)}***${clean.slice(-2)}`;
+  }
+  return `${clean.slice(0, prefixLen)}${'*'.repeat(Math.max(3, clean.length - prefixLen - suffixLen))}${clean.slice(-suffixLen)}`;
+}
 
 function getSessionDurationMs(portal?: string, role?: string): number {
   if (role === 'admin' || portal === 'admin') {
@@ -193,10 +297,13 @@ function getAuthUser(req: Request): User | null {
     return null;
   }
 
-  // Reject requests if user belongs to a supermarket that is suspended or pending approval
+  // Reject requests if user belongs to a supermarket that is suspended, rejected, or pending approval
   if (user.supermarketId) {
     const supermarket = data.supermarkets.find((s) => s.id === user.supermarketId);
-    if (supermarket && (supermarket.status === 'suspended' || supermarket.status === 'pending')) {
+    if (
+      supermarket &&
+      (supermarket.status === 'suspended' || supermarket.status === 'pending' || supermarket.status === 'rejected')
+    ) {
       sessions.delete(token);
       return null;
     }
@@ -210,11 +317,25 @@ function getAuthUser(req: Request): User | null {
   return user;
 }
 
+const ALLOWED_PENDING_PASSWORD_PATHS = new Set([
+  '/api/auth/me',
+  '/api/auth/logout',
+  '/api/auth/change-required-password',
+  '/api/admin/change-first-password',
+]);
+
 // Require authenticated user
 function requireAuth(req: Request, res: Response, next: NextFunction) {
   const user = getAuthUser(req);
   if (!user) {
     return res.status(401).json({ error: 'Unauthorized. Please log in.' });
+  }
+  const routePath = req.originalUrl.split('?')[0];
+  if (user.mustChangePassword && !ALLOWED_PENDING_PASSWORD_PATHS.has(routePath)) {
+    return res.status(403).json({
+      error: 'You must change your temporary password before continuing.',
+      mustChangePassword: true,
+    });
   }
   (req as any).user = user;
   next();
@@ -582,9 +703,10 @@ app.post('/api/admin/setup', sensitiveOpsRateLimiter, (req, res) => {
 });
 
 // Force Password Change on First Sign-In for Admin
-app.post('/api/admin/change-first-password', requireAuth, requireRole(['admin']), (req, res) => {
+app.post('/api/admin/change-first-password', requireAuth, requireRole(['admin']), async (req, res) => {
   const user = (req as any).user as User;
-  const { currentPassword, newPassword } = req.body;
+  const { currentPassword, newPassword, language } = req.body || {};
+  const emailLang: EmailLanguage = language === 'sw' ? 'sw' : 'en';
 
   if (!currentPassword || !newPassword) {
     return res.status(400).json({ error: 'Current temporary password and new password are required.' });
@@ -631,16 +753,24 @@ app.post('/api/admin/change-first-password', requireAuth, requireRole(['admin'])
   );
   db.save();
 
+  const notice = buildPasswordChangedEmail({ lang: emailLang, name: dbUser?.name || user.name });
+  await sendEmail({
+    to: dbUser?.email || user.email,
+    ...notice,
+    enforceAddressRateLimit: false,
+  });
+
   res.json({
     success: true,
     message: 'Password changed successfully. You now have full access to platform administration.',
   });
 });
 
-// Time-Limited Admin Password Recovery via Link
-app.post('/api/admin/reset-password-with-token', (req, res) => {
-  const { token, newPassword } = req.body;
-  if (!token || !newPassword) {
+// Time-Limited Admin Password Recovery via Link (SHA-256 hashed at rest, 10-minute expiry)
+app.post('/api/admin/reset-password-with-token', sensitiveOpsRateLimiter, async (req, res) => {
+  const { token, newPassword, language } = req.body || {};
+  const emailLang: EmailLanguage = language === 'sw' ? 'sw' : 'en';
+  if (!token || typeof token !== 'string' || !newPassword || typeof newPassword !== 'string') {
     return res.status(400).json({ error: 'Reset token and new password are required.' });
   }
 
@@ -649,10 +779,15 @@ app.post('/api/admin/reset-password-with-token', (req, res) => {
   }
 
   const data = db.getRaw();
-  const tokenKey = `admin_token_${token.trim()}`;
-  const record = (data.resetCodes as any)[tokenKey];
+  const tokenHash = crypto.createHash('sha256').update(token.trim()).digest('hex');
+  const tokenKey = `admin_token_${tokenHash}`;
+  const record = data.resetCodes[tokenKey];
 
-  if (!record || record.used || record.expiresAt < Date.now()) {
+  if (!record || record.used || record.expiresAt < Date.now() || record.tokenHash !== tokenHash) {
+    if (record && record.expiresAt < Date.now()) {
+      delete data.resetCodes[tokenKey];
+      db.save();
+    }
     logAudit(
       null,
       'ADMIN_PASSWORD_RESET_FAILED',
@@ -661,11 +796,16 @@ app.post('/api/admin/reset-password-with-token', (req, res) => {
       'Attempted admin password recovery with invalid or expired time-limited token.'
     );
     return res.status(400).json({
-      error: 'This password reset link is invalid or has expired. Time-limited recovery links expire after 15 minutes.',
+      error: 'This password reset link is invalid or has expired. Time-limited recovery links expire after 10 minutes.',
     });
   }
 
-  const admin = data.users.find((u) => u.role === 'admin' && u.email.toLowerCase() === record.email.toLowerCase());
+  const admin = data.users.find(
+    (u) =>
+      u.role === 'admin' &&
+      ((record.userId && u.id === record.userId) ||
+        (record.email && u.email.toLowerCase() === record.email.toLowerCase()))
+  );
   if (!admin) {
     return res.status(404).json({ error: 'System administrator account not found.' });
   }
@@ -676,9 +816,9 @@ app.post('/api/admin/reset-password-with-token', (req, res) => {
   admin.lockedUntil = null;
   admin.mustChangePassword = false;
 
-  // Mark token used and clean up
+  // Mark token used and delete hashed token record
   record.used = true;
-  delete (data.resetCodes as any)[tokenKey];
+  delete data.resetCodes[tokenKey];
 
   // Revoke any active admin sessions on password reset
   revokeUserSessions(admin.id);
@@ -688,9 +828,16 @@ app.post('/api/admin/reset-password-with-token', (req, res) => {
     'ADMIN_PASSWORD_RESET_COMPLETED',
     'user',
     admin.id,
-    `Admin password successfully reset using time-limited email link (Token: ${token.substring(0, 8)}...).`
+    'Admin password successfully reset using single-use time-limited email link.'
   );
   db.save();
+
+  const notice = buildPasswordChangedEmail({ lang: emailLang, name: admin.name });
+  await sendEmail({
+    to: admin.email,
+    ...notice,
+    enforceAddressRateLimit: false,
+  });
 
   res.json({
     success: true,
@@ -799,12 +946,15 @@ app.post('/api/auth/login', loginRateLimiter, async (req, res) => {
     return res.status(403).json({ error: 'This account has been suspended by an administrator.' });
   }
 
-  // Supermarket pending/suspended check for owner and staff
+  // Supermarket pending/rejected/suspended check for owner and staff
   if (user!.supermarketId) {
     const sm = data.supermarkets.find((s) => s.id === user!.supermarketId);
     if (sm) {
       if (sm.status === 'pending') {
         return res.status(403).json({ error: 'Your application is awaiting approval by the platform administrator.' });
+      }
+      if (sm.status === 'rejected') {
+        return res.status(403).json({ error: 'Your store application was not approved. Please contact platform support for details.' });
       }
       if (sm.status === 'suspended') {
         return res.status(403).json({ error: 'This supermarket has been suspended.' });
@@ -812,9 +962,29 @@ app.post('/api/auth/login', loginRateLimiter, async (req, res) => {
     }
   }
 
+  // Enforce temporary password 24h expiry & single-use before granting session
+  if (user!.tempPasswordExpiresAt && user!.tempPasswordExpiresAt < Date.now()) {
+    const elapsed = Date.now() - startTime;
+    if (elapsed < 200) await new Promise((r) => setTimeout(r, 200 - elapsed));
+    return res.status(401).json({
+      error: 'This temporary password has expired (24-hour limit). Please request a new password reset.',
+    });
+  }
+
+  if (user!.mustChangePassword && user!.tempPasswordConsumed && user!.role !== 'admin') {
+    const elapsed = Date.now() - startTime;
+    if (elapsed < 200) await new Promise((r) => setTimeout(r, 200 - elapsed));
+    return res.status(401).json({
+      error: 'This temporary password has already been used. Please change your password or request a new temporary password.',
+    });
+  }
+
   // Reset failed attempts upon successful login
   user!.failedAttempts = 0;
   user!.lockedUntil = null;
+  if (user!.mustChangePassword && user!.role !== 'admin') {
+    user!.tempPasswordConsumed = true;
+  }
   memoryFailedAttempts.delete(cleanIdentifier);
   db.save();
 
@@ -963,13 +1133,6 @@ app.get('/api/auth/me', (req, res) => {
   });
 });
 
-// Message delivery helper: console log in non-configured environments
-function sendResetMessage(target: string, type: 'email' | 'sms' | 'admin_link', content: string) {
-  // If email/SMS provider is configured (e.g. SMTP/SendGrid/Twilio), deliver here.
-  // When unconfigured, write safely to the server console only.
-  console.log(`[RESET MESSAGE] [${type.toUpperCase()}] Delivered to ${target}: ${content}`);
-}
-
 // Client configuration endpoint
 app.get('/api/auth/config', (req, res) => {
   const isProd = process.env.NODE_ENV === 'production';
@@ -979,82 +1142,124 @@ app.get('/api/auth/config', (req, res) => {
 
 // Password recovery endpoint
 // STRICT SECURITY RULES:
-// 1. Write code/link to server console only when no email provider is configured; NEVER return code, token, or link in HTTP response.
-// 2. Uniform response message and identical response timing (anti-enumeration).
+// 1. Dispatches email via sendEmail() with hashed codes/tokens stored in DB; NEVER returns code, token, or link in HTTP response and NEVER logs secrets in production.
+// 2. Uniform response message and identical response timing (~200ms) for anti-enumeration.
 // 3. Admin recovery is strictly email-only with a time-limited link. Do not reveal admin status.
-// 4. Crypto.randomInt codes, 15-min expiry, single-use, 5 failed attempts invalidation.
-app.post('/api/auth/forgot-password', sensitiveOpsRateLimiter, async (req, res) => {
+// 4. Crypto.randomInt codes (scrypt salted hash), sha256 admin link token hash, 10-min expiry, single-use, 5 failed attempts invalidation.
+app.post('/api/auth/forgot-password', forgotPasswordIpRateLimiter, async (req, res) => {
   const startTime = Date.now();
-  const { identifier } = req.body;
+  const { identifier, language } = req.body || {};
+  const emailLang: EmailLanguage = language === 'sw' ? 'sw' : 'en';
 
   if (!identifier || typeof identifier !== 'string') {
     return res.status(400).json({ error: 'Identifier (email or phone) is required.' });
   }
 
-  const clean = identifier.trim().toLowerCase();
-  const cleanPhone = identifier.replace(/[\s\-()]/g, '');
+  // Reject header/CRLF/NUL injection attempts cleanly
+  if (/[\r\n\0]/.test(identifier)) {
+    return res.status(400).json({ error: 'Invalid email or phone identifier.' });
+  }
+
+  const trimmed = identifier.trim();
+  const looksLikeEmail = trimmed.includes('@');
+  const validatedEmail = looksLikeEmail ? normalizeAndValidateEmail(trimmed) : null;
+  if (looksLikeEmail && !validatedEmail) {
+    return res.status(400).json({ error: 'Please enter a valid email address.' });
+  }
+
+  const clean = validatedEmail || trimmed.toLowerCase();
+  const cleanPhone = looksLikeEmail ? '' : trimmed.replace(/[\s\-()]/g, '');
   const data = db.getRaw();
 
   const user = data.users.find(
-    (u) => u.email.toLowerCase() === clean || u.phone.replace(/[\s\-()]/g, '') === cleanPhone
+    (u) => u.email.toLowerCase() === clean || (cleanPhone && u.phone.replace(/[\s\-()]/g, '') === cleanPhone)
   );
 
-  if (user) {
+  if (user && user.status !== 'suspended') {
+    const recipientEmail = normalizeAndValidateEmail(user.email);
+
     // Admin password recovery: strictly email-only time-limited link
     if (user.role === 'admin') {
       // If identifier was phone number, do NOT send link, and do NOT reveal that account is admin
-      if (clean === user.email.toLowerCase()) {
+      if (recipientEmail && clean === recipientEmail) {
         const resetToken = crypto.randomBytes(24).toString('hex');
-        const tokenKey = `admin_token_${resetToken}`;
+        const tokenHash = crypto.createHash('sha256').update(resetToken).digest('hex');
+        const tokenKey = `admin_token_${tokenHash}`;
         data.resetCodes[tokenKey] = {
-          email: user.email,
-          token: resetToken,
-          identifier: user.email,
-          expiresAt: Date.now() + 15 * 60 * 1000,
+          email: recipientEmail,
+          userId: user.id,
+          tokenHash,
+          identifier: recipientEmail,
+          expiresAt: Date.now() + 10 * 60 * 1000,
           failedAttempts: 0,
           used: false,
         };
         db.save();
 
-        const resetLink = `/admin/login?resetToken=${resetToken}`;
-        sendResetMessage(user.email, 'admin_link', resetLink);
+        const resetUrl = `${getAppBaseUrl(req)}/admin/login?resetToken=${resetToken}`;
+        const emailContent = buildAdminResetLinkEmail({
+          lang: emailLang,
+          name: user.name,
+          resetUrl,
+        });
+        await sendEmail({
+          to: recipientEmail,
+          ...emailContent,
+        });
+
         logAudit(
           user,
           'ADMIN_PASSWORD_RESET_LINK_GENERATED',
           'user',
           user.id,
-          'Time-limited password recovery link generated for admin email (expires in 15 minutes).'
+          'Time-limited password recovery link issued for admin email (expires in 10 minutes).'
         );
       }
-    } else {
-      // Standard user recovery (shopper, staff, owner) via 6-digit code using crypto.randomInt
+    } else if (recipientEmail) {
+      // Standard user recovery (shopper, staff, owner) via 6-digit code (stored ONLY as scrypt hash)
       const code = crypto.randomInt(100000, 1000000).toString();
+      const { hash: codeHash, salt: codeSalt } = hashPassword(code);
       const record = {
-        code,
-        identifier: clean,
-        expiresAt: Date.now() + 15 * 60 * 1000,
+        codeHash,
+        codeSalt,
+        userId: user.id,
+        email: recipientEmail,
+        identifier: recipientEmail,
+        expiresAt: Date.now() + 10 * 60 * 1000,
         failedAttempts: 0,
         used: false,
       };
-      data.resetCodes[clean] = record;
+      data.resetCodes[recipientEmail] = record;
+      if (clean && clean !== recipientEmail) data.resetCodes[clean] = record;
       if (cleanPhone) data.resetCodes[cleanPhone] = record;
+      const userCleanPhone = user.phone.replace(/[\s\-()]/g, '');
+      if (userCleanPhone && userCleanPhone !== cleanPhone) {
+        data.resetCodes[userCleanPhone] = record;
+      }
       db.save();
 
-      const deliveryTarget = user.email || user.phone;
-      const deliveryType = user.email && clean === user.email.toLowerCase() ? 'email' : 'sms';
-      sendResetMessage(deliveryTarget, deliveryType as any, code);
-      logAudit(user, 'PASSWORD_RESET_REQUESTED', 'user', user.id, 'Password reset verification code generated.');
+      const emailContent = buildPasswordResetOtpEmail({
+        lang: emailLang,
+        name: user.name,
+        code,
+      });
+      await sendEmail({
+        to: recipientEmail,
+        ...emailContent,
+      });
+
+      logAudit(user, 'PASSWORD_RESET_REQUESTED', 'user', user.id, 'Password reset verification code issued (10-minute expiry).');
     }
   }
 
-  // Enforce uniform response time (~200ms) regardless of whether user exists
+  // Enforce uniform response time (~200ms) regardless of whether user exists or email succeeded
   const minDuration = 200;
   const elapsed = Date.now() - startTime;
   if (elapsed < minDuration) {
     await new Promise((resolve) => setTimeout(resolve, minDuration - elapsed));
   }
 
-  // Always return the exact same generic message without leaking code or link
+  // Always return the exact same generic message without leaking code, link, or delivery failure
   res.json({
     success: true,
     message: 'If an account exists, a recovery message has been sent.',
@@ -1062,11 +1267,16 @@ app.post('/api/auth/forgot-password', sensitiveOpsRateLimiter, async (req, res) 
 });
 
 // Reset password using verification code
-// Enforces single-use, 15-minute expiry, invalidation after 5 wrong attempts, min 8-char password
-app.post('/api/auth/reset-password', sensitiveOpsRateLimiter, (req, res) => {
-  const { identifier, code, newPassword } = req.body;
-  if (!identifier || !code || !newPassword) {
+// Enforces single-use, 10-minute expiry, scrypt verification, invalidation after 5 wrong attempts, min 8-char password
+app.post('/api/auth/reset-password', sensitiveOpsRateLimiter, async (req, res) => {
+  const { identifier, code, newPassword, language } = req.body || {};
+  const emailLang: EmailLanguage = language === 'sw' ? 'sw' : 'en';
+  if (!identifier || !code || !newPassword || typeof identifier !== 'string' || typeof code !== 'string') {
     return res.status(400).json({ error: 'Identifier, verification code, and new password are required.' });
+  }
+
+  if (/[\r\n\0]/.test(identifier)) {
+    return res.status(400).json({ error: 'Invalid identifier format.' });
   }
 
   if (typeof newPassword !== 'string' || newPassword.length < 8) {
@@ -1078,15 +1288,30 @@ app.post('/api/auth/reset-password', sensitiveOpsRateLimiter, (req, res) => {
   const data = db.getRaw();
 
   const resetRecord = data.resetCodes[clean] || (cleanPhone ? data.resetCodes[cleanPhone] : undefined);
-  if (!resetRecord || resetRecord.used || resetRecord.expiresAt < Date.now()) {
+  if (
+    !resetRecord ||
+    resetRecord.used ||
+    resetRecord.expiresAt < Date.now() ||
+    !resetRecord.codeHash ||
+    !resetRecord.codeSalt
+  ) {
     return res.status(400).json({ error: 'Invalid or expired verification code.' });
   }
 
-  if (resetRecord.code !== code.trim()) {
+  const deleteAllResetRefs = () => {
+    for (const [k, v] of Object.entries(data.resetCodes)) {
+      if (v === resetRecord || (resetRecord.userId && v.userId === resetRecord.userId && !k.startsWith('admin_token_'))) {
+        delete data.resetCodes[k];
+      }
+    }
+    delete data.resetCodes[clean];
+    if (cleanPhone) delete data.resetCodes[cleanPhone];
+  };
+
+  if (!verifyPassword(code.trim(), resetRecord.codeHash, resetRecord.codeSalt)) {
     resetRecord.failedAttempts = (resetRecord.failedAttempts || 0) + 1;
     if (resetRecord.failedAttempts >= 5) {
-      delete data.resetCodes[clean];
-      if (cleanPhone) delete data.resetCodes[cleanPhone];
+      deleteAllResetRefs();
       db.save();
       return res.status(400).json({
         error: 'Too many incorrect attempts. This verification code has been invalidated. Please request a new code.',
@@ -1100,7 +1325,10 @@ app.post('/api/auth/reset-password', sensitiveOpsRateLimiter, (req, res) => {
   }
 
   const user = data.users.find(
-    (u) => u.email.toLowerCase() === clean || u.phone.replace(/[\s\-()]/g, '') === cleanPhone
+    (u) =>
+      (resetRecord.userId && u.id === resetRecord.userId) ||
+      u.email.toLowerCase() === clean ||
+      (cleanPhone && u.phone.replace(/[\s\-()]/g, '') === cleanPhone)
   );
 
   if (!user) {
@@ -1119,10 +1347,9 @@ app.post('/api/auth/reset-password', sensitiveOpsRateLimiter, (req, res) => {
   user.failedAttempts = 0;
   user.lockedUntil = null;
 
-  // Single-use: delete reset code
+  // Single-use: invalidate & delete all pointers to this reset code
   resetRecord.used = true;
-  delete data.resetCodes[clean];
-  if (cleanPhone) delete data.resetCodes[cleanPhone];
+  deleteAllResetRefs();
 
   // Revoke all active sessions immediately
   revokeUserSessions(user.id);
@@ -1130,7 +1357,199 @@ app.post('/api/auth/reset-password', sensitiveOpsRateLimiter, (req, res) => {
   logAudit(user, 'PASSWORD_RESET_COMPLETED', 'user', user.id, 'Password successfully reset.');
   db.save();
 
+  const notice = buildPasswordChangedEmail({ lang: emailLang, name: user.name });
+  await sendEmail({
+    to: user.email,
+    ...notice,
+    enforceAddressRateLimit: false,
+  });
+
   res.json({ success: true, message: 'Password reset successfully. You can now log in.' });
+});
+
+// Change required temporary password upon sign-in (shopper, staff, owner)
+app.post('/api/auth/change-required-password', requireAuth, (req, res) => {
+  const user = (req as any).user as User;
+  const { currentPassword, newPassword } = req.body || {};
+
+  if (!currentPassword || !newPassword || typeof currentPassword !== 'string' || typeof newPassword !== 'string') {
+    return res.status(400).json({ error: 'Current temporary password and new password are required.' });
+  }
+
+  if (newPassword.length < 8) {
+    return res.status(400).json({ error: 'New password must be at least 8 characters long.' });
+  }
+
+  if (currentPassword === newPassword) {
+    return res.status(400).json({ error: 'New password cannot be the same as your temporary password.' });
+  }
+
+  const data = db.getRaw();
+  const userPwd = data.passwords[user.id];
+  if (!userPwd || !verifyPassword(currentPassword, userPwd.hash, userPwd.salt)) {
+    return res.status(401).json({ error: 'Current temporary password is incorrect.' });
+  }
+
+  const dbUser = data.users.find((u) => u.id === user.id);
+  if (!dbUser) return res.status(404).json({ error: 'User account not found.' });
+
+  if (dbUser.tempPasswordExpiresAt && dbUser.tempPasswordExpiresAt < Date.now()) {
+    return res.status(401).json({ error: 'This temporary password has expired. Please request a new reset.' });
+  }
+
+  const { hash, salt } = hashPassword(newPassword);
+  data.passwords[dbUser.id] = { hash, salt };
+  dbUser.mustChangePassword = false;
+  dbUser.tempPasswordExpiresAt = null;
+  dbUser.tempPasswordConsumed = false;
+  dbUser.failedAttempts = 0;
+  dbUser.lockedUntil = null;
+
+  // Revoke any other existing sessions for this user, keeping current session valid
+  const currentSession = (req as any).session as SessionRecord | undefined;
+  for (const [tok, sess] of sessions.entries()) {
+    if (sess.userId === dbUser.id && (!currentSession || tok !== currentSession.token)) {
+      sessions.delete(tok);
+    }
+  }
+
+  logAudit(
+    dbUser,
+    'PASSWORD_CHANGED_AFTER_TEMP_RESET',
+    'user',
+    dbUser.id,
+    `${dbUser.role} account ${dbUser.name} changed required temporary password.`,
+    dbUser.supermarketId || null,
+    dbUser.branchId || null
+  );
+  db.save();
+
+  res.json({
+    success: true,
+    message: 'Your password has been updated.',
+    user: {
+      id: dbUser.id,
+      name: dbUser.name,
+      email: dbUser.email,
+      phone: dbUser.phone,
+      role: dbUser.role,
+      supermarketId: dbUser.supermarketId,
+      branchId: dbUser.branchId,
+      permissions: dbUser.permissions,
+      status: dbUser.status,
+      mustChangePassword: false,
+      isPermanentAdmin: dbUser.isPermanentAdmin ?? false,
+    },
+  });
+});
+
+// Free support-assisted Password Reset Request (no email or SMS service needed)
+// Strict anti-enumeration: identical generic response and uniform timing (~200ms).
+// Never reveals whether an account exists, never exposes codes/links, and never allows resetting admin account.
+app.post('/api/auth/password-reset-request', passwordResetRequestIpRateLimiter, async (req, res) => {
+  const startTime = Date.now();
+  const { identifier, fullName, note, portal } = req.body || {};
+
+  if (!identifier || typeof identifier !== 'string' || /[\r\n\0]/.test(identifier) || identifier.trim().length > 200) {
+    return res.status(400).json({ error: 'A valid email or phone number is required.' });
+  }
+
+  if (!fullName || typeof fullName !== 'string' || /[\r\n\0]/.test(fullName) || fullName.trim().length < 2 || fullName.trim().length > 120) {
+    return res.status(400).json({ error: 'Full name is required (2-120 characters).' });
+  }
+
+  if (note !== undefined && note !== null && (typeof note !== 'string' || note.length > 500)) {
+    return res.status(400).json({ error: 'Optional note must be 500 characters or fewer.' });
+  }
+
+  const allowedPortals: PortalType[] = ['shopper', 'staff', 'management'];
+  const requestedPortal: PortalType = portal && allowedPortals.includes(portal) ? portal : portal ? null! : 'shopper';
+  if (!requestedPortal) {
+    return res.status(400).json({ error: 'Invalid sign-in portal for password reset request.' });
+  }
+
+  const cleanIdentifier = identifier.trim().toLowerCase();
+  const cleanPhone = identifier.replace(/[\s\-()]/g, '').toLowerCase();
+  const identifierKeys = Array.from(new Set([cleanIdentifier, cleanPhone].filter(Boolean)));
+
+  if (isPasswordResetIdentifierRateLimited(identifierKeys)) {
+    return res.status(429).json({
+      error: 'Too many password reset requests for this email or phone. Please try again later.',
+    });
+  }
+  recordPasswordResetIdentifierAttempt(identifierKeys);
+
+  const data = db.getRaw();
+  const cleanName = fullName.trim();
+  const cleanNote = typeof note === 'string' ? note.trim() : '';
+
+  // Never allow resetting or exposing the system admin account through this flow
+  const candidate = data.users.find(
+    (u) =>
+      u.email.toLowerCase() === cleanIdentifier ||
+      (cleanPhone && u.phone.replace(/[\s\-()]/g, '').toLowerCase() === cleanPhone)
+  );
+  const matchedUser = candidate && candidate.role !== 'admin' ? candidate : null;
+  const matchedSm =
+    matchedUser?.supermarketId
+      ? data.supermarkets.find((s) => s.id === matchedUser.supermarketId) || null
+      : null;
+
+  const details: PasswordResetRequestDetails = {
+    requestedIdentifier: identifier.trim(),
+    requestedFullName: cleanName,
+    note: cleanNote,
+    portalRequested: requestedPortal,
+    matchedAccount: Boolean(matchedUser),
+    matchedUserId: matchedUser ? matchedUser.id : null,
+    matchedRole: matchedUser ? (matchedUser.role as Exclude<User['role'], 'admin'>) : null,
+    matchedSupermarketId: matchedSm ? matchedSm.id : null,
+    matchedSupermarketName: matchedSm ? matchedSm.name : null,
+    maskedEmail: matchedUser ? maskEmail(matchedUser.email) : null,
+    maskedPhone: matchedUser ? maskPhone(matchedUser.phone) : null,
+    identityChecked: {
+      phoneConfirmed: false,
+      lastPurchaseOrPointsConfirmed: false,
+    },
+  };
+
+  const nowIso = new Date().toISOString();
+  const ticket: SupportTicket = {
+    id: `tkt_pwr_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
+    userId: 'anonymous_reset_request',
+    userName: cleanName,
+    userEmail: '',
+    userPhone: '',
+    supermarketId: matchedSm?.id || null,
+    category: 'password_reset',
+    subject: 'Password reset request',
+    message: cleanNote || 'Password reset requested via support form.',
+    status: 'open',
+    passwordResetDetails: details,
+    createdAt: nowIso,
+    updatedAt: nowIso,
+  };
+
+  if (!Array.isArray(data.supportTickets)) data.supportTickets = [];
+  data.supportTickets.unshift(ticket);
+  logAudit(
+    null,
+    'PASSWORD_RESET_SUPPORT_REQUESTED',
+    'user',
+    ticket.id,
+    `Support password reset request submitted on portal "${requestedPortal}".`
+  );
+  db.save();
+
+  const elapsed = Date.now() - startTime;
+  if (elapsed < 200) {
+    await new Promise((resolve) => setTimeout(resolve, 200 - elapsed));
+  }
+
+  res.json({
+    success: true,
+    message: 'If we find your account, support will contact you shortly.',
+  });
 });
 
 // ==========================================
@@ -1149,7 +1568,9 @@ app.post(['/api/supermarket/apply', '/api/supermarkets/apply'], sensitiveOpsRate
     notes,
     password,
     ownerName,
-  } = req.body;
+    language,
+  } = req.body || {};
+  const emailLang: EmailLanguage = language === 'sw' ? 'sw' : 'en';
 
   if (!chainName || !contactEmail || !contactPhone || !password) {
     return res.status(400).json({ error: 'Chain name, contact email, contact phone, and password are required.' });
@@ -1159,8 +1580,12 @@ app.post(['/api/supermarket/apply', '/api/supermarkets/apply'], sensitiveOpsRate
     return res.status(400).json({ error: 'Password must be at least 8 characters long.' });
   }
 
-  const cleanEmail = contactEmail.trim().toLowerCase();
-  const cleanPhone = contactPhone.replace(/[\s\-()]/g, '');
+  const cleanEmail = normalizeAndValidateEmail(contactEmail);
+  if (!cleanEmail) {
+    return res.status(400).json({ error: 'Please enter a valid contact email address.' });
+  }
+
+  const cleanPhone = String(contactPhone).replace(/[\s\-()]/g, '');
   const data = db.getRaw();
 
   if (data.users.some((u) => u.email.toLowerCase() === cleanEmail)) {
@@ -1236,6 +1661,16 @@ app.post(['/api/supermarket/apply', '/api/supermarkets/apply'], sensitiveOpsRate
     `New supermarket application submitted for "${newSupermarket.name}" (${newSupermarket.contactEmail}). Status: pending approval.`
   );
   db.save();
+
+  const receivedNotice = buildSupermarketApplicationEmail({
+    lang: emailLang,
+    ownerName: newOwner.name,
+    chainName: newSupermarket.name,
+  });
+  await sendEmail({
+    to: newSupermarket.contactEmail,
+    ...receivedNotice,
+  });
 
   res.json({
     success: true,
@@ -2865,6 +3300,64 @@ app.put('/api/owner/staff/:id', requireAuth, requireRole(['owner', 'admin']), (r
   res.json(staff);
 });
 
+// Store Owner (or Admin) generates a 24-hour single-use temporary password for their own staff member
+app.post('/api/owner/staff/:id/temp-password', requireAuth, requireRole(['owner', 'admin']), (req, res) => {
+  const caller = (req as any).user as User;
+  const data = db.getRaw();
+  const target = data.users.find((u) => u.id === req.params.id);
+  if (!target) {
+    return res.status(404).json({ error: 'Staff member not found.' });
+  }
+
+  if (target.role === 'admin') {
+    return res.status(403).json({ error: 'System administrator account cannot be reset through this flow.' });
+  }
+
+  if (caller.role === 'owner') {
+    if (target.role !== 'staff' || !target.supermarketId || target.supermarketId !== caller.supermarketId) {
+      return res.status(403).json({
+        error: 'Forbidden: Store owners can only generate temporary passwords for their own staff.',
+      });
+    }
+  } else if (caller.role === 'admin') {
+    if (target.role !== 'staff') {
+      return res.status(403).json({
+        error: 'Use admin user or shop reset controls for non-staff accounts.',
+      });
+    }
+  }
+
+  const tempPassword = generateTemporaryPassword();
+  const { hash, salt } = hashPassword(tempPassword);
+  data.passwords[target.id] = { hash, salt };
+  target.mustChangePassword = true;
+  target.tempPasswordExpiresAt = Date.now() + TEMP_PASSWORD_TTL_MS;
+  target.tempPasswordConsumed = false;
+  target.failedAttempts = 0;
+  target.lockedUntil = null;
+
+  revokeUserSessions(target.id);
+
+  const whenIso = new Date().toISOString();
+  logAudit(
+    caller,
+    'STAFF_TEMP_PASSWORD_GENERATED',
+    'staff',
+    target.id,
+    `${caller.name} (${caller.role}) generated a 24h single-use temporary password for staff ${target.name} (${maskEmail(target.email)}) at ${whenIso}.`,
+    target.supermarketId || null,
+    target.branchId || null
+  );
+  db.save();
+
+  res.json({
+    success: true,
+    tempPassword,
+    expiresAt: target.tempPasswordExpiresAt,
+    message: `Temporary password generated for ${target.name}. Share it securely and advise them to change it immediately at next sign-in.`,
+  });
+});
+
 // Adjust Branch Product: Enforces backend branch access, supermarket product ownership, role permissions, and input validation
 app.post('/api/owner/branch-product-override', requireAuth, (req, res) => {
   const user = (req as any).user as User;
@@ -3676,14 +4169,15 @@ app.get('/api/admin/metrics', requireAuth, requireRole(['admin']), (req, res) =>
   });
 });
 
-app.put('/api/admin/supermarkets/:id/status', requireAuth, requireRole(['admin']), (req, res) => {
+app.put('/api/admin/supermarkets/:id/status', requireAuth, requireRole(['admin']), async (req, res) => {
   const user = (req as any).user as User;
   if (user.role !== 'admin') {
     return res.status(403).json({ error: 'Forbidden: Only the System Administrator can approve or manage shops.' });
   }
-  const { status } = req.body;
-  if (!['active', 'suspended', 'pending'].includes(status)) {
-    return res.status(400).json({ error: 'Invalid status. Allowed: active, suspended, pending.' });
+  const { status, language } = req.body || {};
+  const emailLang: EmailLanguage = language === 'sw' ? 'sw' : 'en';
+  if (!['active', 'suspended', 'pending', 'rejected'].includes(status)) {
+    return res.status(400).json({ error: 'Invalid status. Allowed: active, suspended, rejected, pending.' });
   }
   const data = db.getRaw();
   const sm = data.supermarkets.find((s) => s.id === req.params.id);
@@ -3699,11 +4193,31 @@ app.put('/api/admin/supermarkets/:id/status', requireAuth, requireRole(['admin']
         b.isActive = true;
       }
     });
-  } else if (status === 'suspended' || status === 'pending') {
+  } else if (status === 'suspended' || status === 'pending' || status === 'rejected') {
     revokeSupermarketSessions(sm.id);
   }
   logAudit(user, `SUPERMARKET_${status.toUpperCase()}`, 'supermarket', sm.id, `Supermarket ${sm.name} ${status} by admin`);
   db.save();
+
+  if (status === 'active' || status === 'rejected' || status === 'suspended') {
+    const ownerUser =
+      data.users.find((u) => u.supermarketId === sm.id && u.role === 'owner') ||
+      data.users.find((u) => u.email.toLowerCase() === sm.contactEmail.toLowerCase());
+    const recipient = ownerUser?.email || sm.contactEmail;
+    const statusEmail = buildSupermarketStatusEmail({
+      lang: emailLang,
+      ownerName: ownerUser?.name || `${sm.name} Owner`,
+      chainName: sm.name,
+      status,
+      portalUrl: status === 'active' ? `${getAppBaseUrl(req)}/store/login` : undefined,
+    });
+    await sendEmail({
+      to: recipient,
+      ...statusEmail,
+      enforceAddressRateLimit: false,
+    });
+  }
+
   res.json(sm);
 });
 
@@ -3780,9 +4294,10 @@ app.put('/api/admin/users/:id/status', requireAuth, requireRole(['admin']), (req
   res.json(targetUser);
 });
 
-app.post('/api/admin/users/:id/reset-password', requireAuth, requireRole(['admin']), (req, res) => {
+app.post('/api/admin/users/:id/reset-password', requireAuth, requireRole(['admin']), async (req, res) => {
   const adminUser = (req as any).user as User;
-  const { newPassword } = req.body || {};
+  const { newPassword, language } = req.body || {};
+  const emailLang: EmailLanguage = language === 'sw' ? 'sw' : 'en';
   const data = db.getRaw();
   const targetUser = data.users.find((u) => u.id === req.params.id);
   if (!targetUser) return res.status(404).json({ error: 'User not found' });
@@ -3802,8 +4317,15 @@ app.post('/api/admin/users/:id/reset-password', requireAuth, requireRole(['admin
   let generatedPassword: string | undefined;
   let finalPassword = customPassword;
   if (!finalPassword) {
-    generatedPassword = `Sc!${crypto.randomBytes(4).toString('hex')}${crypto.randomInt(100, 1000)}`;
+    generatedPassword = generateTemporaryPassword();
     finalPassword = generatedPassword;
+    targetUser.mustChangePassword = true;
+    targetUser.tempPasswordExpiresAt = Date.now() + TEMP_PASSWORD_TTL_MS;
+    targetUser.tempPasswordConsumed = false;
+  } else {
+    targetUser.mustChangePassword = false;
+    targetUser.tempPasswordExpiresAt = null;
+    targetUser.tempPasswordConsumed = false;
   }
 
   const { hash, salt } = hashPassword(finalPassword);
@@ -3818,22 +4340,33 @@ app.post('/api/admin/users/:id/reset-password', requireAuth, requireRole(['admin
     'USER_PASSWORD_RESET',
     targetUser.role === 'shopper' ? 'user' : 'staff',
     targetUser.id,
-    `Admin reset password for ${targetUser.role} account ${targetUser.name} (${targetUser.email})`,
+    `Admin ${adminUser.name} reset password for ${targetUser.role} account ${targetUser.name} (${maskEmail(targetUser.email)}) at ${new Date().toISOString()}`,
     targetUser.supermarketId || null,
     targetUser.branchId || null
   );
   db.save();
+
+  const notice = buildPasswordChangedEmail({ lang: emailLang, name: targetUser.name });
+  await sendEmail({
+    to: targetUser.email,
+    ...notice,
+    enforceAddressRateLimit: false,
+  });
+
   res.json({
     success: true,
     message: `Password reset for ${targetUser.name}`,
-    ...(generatedPassword ? { generatedPassword } : {}),
+    ...(generatedPassword
+      ? { generatedPassword, expiresAt: targetUser.tempPasswordExpiresAt }
+      : {}),
   });
 });
 
 // Admin helper: reset primary shop owner password directly from the Supermarkets / Shops view
-app.post('/api/admin/supermarkets/:id/reset-password', requireAuth, requireRole(['admin']), (req, res) => {
+app.post('/api/admin/supermarkets/:id/reset-password', requireAuth, requireRole(['admin']), async (req, res) => {
   const adminUser = (req as any).user as User;
-  const { newPassword } = req.body || {};
+  const { newPassword, language } = req.body || {};
+  const emailLang: EmailLanguage = language === 'sw' ? 'sw' : 'en';
   const data = db.getRaw();
   const sm = data.supermarkets.find((s) => s.id === req.params.id);
   if (!sm) return res.status(404).json({ error: 'Supermarket not found' });
@@ -3854,8 +4387,15 @@ app.post('/api/admin/supermarkets/:id/reset-password', requireAuth, requireRole(
   let generatedPassword: string | undefined;
   let finalPassword = customPassword;
   if (!finalPassword) {
-    generatedPassword = `Sc!${crypto.randomBytes(4).toString('hex')}${crypto.randomInt(100, 1000)}`;
+    generatedPassword = generateTemporaryPassword();
     finalPassword = generatedPassword;
+    ownerUser.mustChangePassword = true;
+    ownerUser.tempPasswordExpiresAt = Date.now() + TEMP_PASSWORD_TTL_MS;
+    ownerUser.tempPasswordConsumed = false;
+  } else {
+    ownerUser.mustChangePassword = false;
+    ownerUser.tempPasswordExpiresAt = null;
+    ownerUser.tempPasswordConsumed = false;
   }
 
   const { hash, salt } = hashPassword(finalPassword);
@@ -3870,22 +4410,33 @@ app.post('/api/admin/supermarkets/:id/reset-password', requireAuth, requireRole(
     'SHOP_PASSWORD_RESET',
     'supermarket',
     sm.id,
-    `Admin reset shop owner password for "${sm.name}" (${ownerUser.email})`,
+    `Admin ${adminUser.name} reset shop owner password for "${sm.name}" (${maskEmail(ownerUser.email)}) at ${new Date().toISOString()}`,
     sm.id
   );
   db.save();
+
+  const notice = buildPasswordChangedEmail({ lang: emailLang, name: ownerUser.name });
+  await sendEmail({
+    to: ownerUser.email,
+    ...notice,
+    enforceAddressRateLimit: false,
+  });
+
   res.json({
     success: true,
     message: `Shop password reset for ${sm.name} (${ownerUser.email})`,
     ownerEmail: ownerUser.email,
-    ...(generatedPassword ? { generatedPassword } : {}),
+    ...(generatedPassword
+      ? { generatedPassword, expiresAt: ownerUser.tempPasswordExpiresAt }
+      : {}),
   });
 });
 
 // Update the single System Administrator's credentials (email, name, and/or password)
-app.put('/api/admin/account', requireAuth, requireRole(['admin']), (req, res) => {
+app.put('/api/admin/account', requireAuth, requireRole(['admin']), async (req, res) => {
   const adminUser = (req as any).user as User;
-  const { currentPassword, newEmail, newPassword, name } = req.body;
+  const { currentPassword, newEmail, newPassword, name, language } = req.body || {};
+  const emailLang: EmailLanguage = language === 'sw' ? 'sw' : 'en';
 
   if (!currentPassword || typeof currentPassword !== 'string') {
     return res.status(400).json({ error: 'Current password is required to update administrator credentials.' });
@@ -3906,9 +4457,8 @@ app.put('/api/admin/account', requireAuth, requireRole(['admin']), (req, res) =>
   let passwordChanged = false;
 
   if (newEmail !== undefined && typeof newEmail === 'string' && newEmail.trim()) {
-    const cleanEmail = newEmail.trim().toLowerCase();
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(cleanEmail)) {
+    const cleanEmail = normalizeAndValidateEmail(newEmail);
+    if (!cleanEmail) {
       return res.status(400).json({ error: 'Please enter a valid email address format.' });
     }
     if (data.users.some((u) => u.id !== dbAdmin.id && u.email.toLowerCase() === cleanEmail)) {
@@ -3954,6 +4504,15 @@ app.put('/api/admin/account', requireAuth, requireRole(['admin']), (req, res) =>
     `System Administrator updated account credentials${emailChanged ? ` (email changed to ${dbAdmin.email})` : ''}${passwordChanged ? ' (password updated)' : ''}.`
   );
   db.save();
+
+  if (passwordChanged) {
+    const notice = buildPasswordChangedEmail({ lang: emailLang, name: dbAdmin.name });
+    await sendEmail({
+      to: dbAdmin.email,
+      ...notice,
+      enforceAddressRateLimit: false,
+    });
+  }
 
   res.json({
     success: true,
@@ -4028,7 +4587,7 @@ app.post('/api/announcements/:id/read', requireAuth, (req, res) => {
   res.json({ success: true, announcement: anc });
 });
 
-// Support & Complaints Inbox
+// Support & Complaints Inbox (includes admin-only enrichment for password reset requests)
 app.get('/api/support', requireAuth, (req, res) => {
   const user = (req as any).user as User;
   const { status, category } = req.query as Record<string, string>;
@@ -4042,6 +4601,50 @@ app.get('/api/support', requireAuth, (req, res) => {
 
   if (status) tickets = tickets.filter((t) => t.status === status);
   if (category) tickets = tickets.filter((t) => t.category === category);
+
+  if (user.role === 'admin') {
+    tickets = tickets.map((t) => {
+      if (t.category !== 'password_reset' || !t.passwordResetDetails) return t;
+      const details = { ...t.passwordResetDetails };
+      const matched =
+        details.matchedUserId
+          ? data.users.find((u) => u.id === details.matchedUserId && u.role !== 'admin')
+          : null;
+
+      if (matched) {
+        const sm = matched.supermarketId
+          ? data.supermarkets.find((s) => s.id === matched.supermarketId)
+          : null;
+        const pointsBal = getLedgerBalance(data, matched.id);
+        const lastCart = data.carts
+          .filter((c) => c.shopperId === matched.id && c.status === 'completed')
+          .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))[0];
+        const lastBranch = lastCart ? data.branches.find((b) => b.id === lastCart.branchId) : null;
+        const lastSm = lastCart ? data.supermarkets.find((s) => s.id === lastCart.supermarketId) : null;
+
+        details.matchedAccount = true;
+        details.matchedRole = matched.role as Exclude<User['role'], 'admin'>;
+        details.matchedSupermarketId = sm?.id || null;
+        details.matchedSupermarketName = sm?.name || null;
+        details.maskedEmail = maskEmail(matched.email);
+        details.maskedPhone = maskPhone(matched.phone);
+        details.identityHintPointsBalance = pointsBal;
+        details.identityHintLastPurchase = lastCart
+          ? `${lastSm?.name || 'Store'} (${lastBranch?.name || 'Branch'}) · ${new Date(lastCart.updatedAt).toLocaleDateString()} · KES ${lastCart.finalTotal.toLocaleString()}`
+          : 'No completed carts yet';
+      } else {
+        details.matchedAccount = false;
+        details.matchedUserId = null;
+        details.matchedRole = null;
+        details.maskedEmail = null;
+        details.maskedPhone = null;
+        details.identityHintPointsBalance = null;
+        details.identityHintLastPurchase = null;
+      }
+
+      return { ...t, passwordResetDetails: details };
+    });
+  }
 
   res.json(tickets);
 });
@@ -4100,6 +4703,175 @@ app.put('/api/support/:id/reply', requireAuth, requireRole(['admin']), (req, res
   db.save();
 
   res.json(ticket);
+});
+
+// Admin updates identity verification checklist on a password reset support request
+app.put('/api/support/:id/verify-identity', requireAuth, requireRole(['admin']), (req, res) => {
+  const adminUser = (req as any).user as User;
+  const { phoneConfirmed, lastPurchaseOrPointsConfirmed } = req.body || {};
+  const data = db.getRaw();
+  const ticket = (data.supportTickets || []).find((t) => t.id === req.params.id);
+  if (!ticket || ticket.category !== 'password_reset' || !ticket.passwordResetDetails) {
+    return res.status(404).json({ error: 'Password reset request not found.' });
+  }
+  if (ticket.status === 'completed' || ticket.status === 'rejected') {
+    return res.status(400).json({ error: `Request is already ${ticket.status}.` });
+  }
+
+  const nextPhone = Boolean(phoneConfirmed);
+  const nextSecondary = Boolean(lastPurchaseOrPointsConfirmed);
+  const nowIso = new Date().toISOString();
+  ticket.passwordResetDetails.identityChecked = {
+    phoneConfirmed: nextPhone,
+    lastPurchaseOrPointsConfirmed: nextSecondary,
+    verifiedByUserId: adminUser.id,
+    verifiedByName: adminUser.name,
+    verifiedAt: nowIso,
+  };
+  if (nextPhone && nextSecondary) {
+    ticket.status = 'verified';
+  } else if (ticket.status === 'verified') {
+    ticket.status = 'open';
+  }
+  ticket.updatedAt = nowIso;
+
+  logAudit(
+    adminUser,
+    'PASSWORD_RESET_IDENTITY_CHECKED',
+    'user',
+    ticket.passwordResetDetails.matchedUserId || ticket.id,
+    `Admin ${adminUser.name} updated identity checklist on password reset request ${ticket.id} (phoneConfirmed=${nextPhone}, purchaseOrPointsConfirmed=${nextSecondary}).`
+  );
+  db.save();
+
+  res.json(ticket);
+});
+
+// Admin generates a one-time 24h temporary password for a matching non-admin account from a support request
+app.post('/api/support/:id/generate-temp-password', requireAuth, requireRole(['admin']), (req, res) => {
+  const adminUser = (req as any).user as User;
+  const { phoneConfirmed, lastPurchaseOrPointsConfirmed } = req.body || {};
+  const data = db.getRaw();
+  const ticket = (data.supportTickets || []).find((t) => t.id === req.params.id);
+  if (!ticket || ticket.category !== 'password_reset' || !ticket.passwordResetDetails) {
+    return res.status(404).json({ error: 'Password reset request not found.' });
+  }
+
+  if (ticket.status === 'completed' || ticket.status === 'rejected') {
+    return res.status(400).json({ error: `Cannot generate password for ${ticket.status} request.` });
+  }
+
+  const existingChecklist = ticket.passwordResetDetails.identityChecked;
+  const isPhoneOk = phoneConfirmed !== undefined ? Boolean(phoneConfirmed) : Boolean(existingChecklist?.phoneConfirmed);
+  const isSecondaryOk =
+    lastPurchaseOrPointsConfirmed !== undefined
+      ? Boolean(lastPurchaseOrPointsConfirmed)
+      : Boolean(existingChecklist?.lastPurchaseOrPointsConfirmed);
+
+  if (!isPhoneOk || !isSecondaryOk) {
+    return res.status(400).json({
+      error: 'Complete both identity verification checks (phone number and last purchase or points balance) before generating a temporary password.',
+    });
+  }
+
+  const targetId = ticket.passwordResetDetails.matchedUserId;
+  if (!targetId) {
+    return res.status(400).json({ error: 'No matching account found for this request.' });
+  }
+
+  const targetUser = data.users.find((u) => u.id === targetId);
+  if (!targetUser) {
+    return res.status(404).json({ error: 'Matched user account no longer exists.' });
+  }
+
+  // Strictly block resetting system admin account through this flow
+  if (targetUser.role === 'admin') {
+    return res.status(403).json({
+      error: 'The system administrator account cannot be reset through this flow.',
+    });
+  }
+
+  const tempPassword = generateTemporaryPassword();
+  const { hash, salt } = hashPassword(tempPassword);
+  data.passwords[targetUser.id] = { hash, salt };
+  targetUser.mustChangePassword = true;
+  targetUser.tempPasswordExpiresAt = Date.now() + TEMP_PASSWORD_TTL_MS;
+  targetUser.tempPasswordConsumed = false;
+  targetUser.failedAttempts = 0;
+  targetUser.lockedUntil = null;
+
+  revokeUserSessions(targetUser.id);
+
+  const nowIso = new Date().toISOString();
+  ticket.status = 'completed';
+  ticket.updatedAt = nowIso;
+  ticket.passwordResetDetails.identityChecked = {
+    phoneConfirmed: true,
+    lastPurchaseOrPointsConfirmed: true,
+    verifiedByUserId: adminUser.id,
+    verifiedByName: adminUser.name,
+    verifiedAt: nowIso,
+  };
+  ticket.passwordResetDetails.tempPasswordExpiresAt = targetUser.tempPasswordExpiresAt;
+  ticket.passwordResetDetails.resolvedByUserId = adminUser.id;
+  ticket.passwordResetDetails.resolvedByName = adminUser.name;
+  ticket.passwordResetDetails.resolvedAt = nowIso;
+
+  logAudit(
+    adminUser,
+    'PASSWORD_RESET_TEMP_GENERATED',
+    targetUser.role === 'owner' ? 'supermarket' : 'user',
+    targetUser.id,
+    `Admin ${adminUser.name} verified identity and generated a 24h temporary password for ${targetUser.role} account ${targetUser.name} (${maskEmail(targetUser.email)}) for request ${ticket.id} at ${nowIso}.`,
+    targetUser.supermarketId || null,
+    targetUser.branchId || null
+  );
+  db.save();
+
+  res.json({
+    success: true,
+    tempPassword,
+    expiresAt: targetUser.tempPasswordExpiresAt,
+    ticket,
+  });
+});
+
+// Admin rejects a password reset request with a reason
+app.put('/api/support/:id/reject', requireAuth, requireRole(['admin']), (req, res) => {
+  const adminUser = (req as any).user as User;
+  const { reason } = req.body || {};
+  if (!reason || typeof reason !== 'string' || reason.trim().length < 3 || reason.trim().length > 300) {
+    return res.status(400).json({ error: 'Rejection reason is required (3-300 characters).' });
+  }
+
+  const data = db.getRaw();
+  const ticket = (data.supportTickets || []).find((t) => t.id === req.params.id);
+  if (!ticket || ticket.category !== 'password_reset' || !ticket.passwordResetDetails) {
+    return res.status(404).json({ error: 'Password reset request not found.' });
+  }
+
+  if (ticket.status === 'completed') {
+    return res.status(400).json({ error: 'Completed request cannot be rejected.' });
+  }
+
+  const nowIso = new Date().toISOString();
+  ticket.status = 'rejected';
+  ticket.updatedAt = nowIso;
+  ticket.passwordResetDetails.rejectionReason = reason.trim();
+  ticket.passwordResetDetails.resolvedByUserId = adminUser.id;
+  ticket.passwordResetDetails.resolvedByName = adminUser.name;
+  ticket.passwordResetDetails.resolvedAt = nowIso;
+
+  logAudit(
+    adminUser,
+    'PASSWORD_RESET_REQUEST_REJECTED',
+    'user',
+    ticket.passwordResetDetails.matchedUserId || ticket.id,
+    `Admin ${adminUser.name} rejected password reset request ${ticket.id} at ${nowIso}: ${reason.trim()}`
+  );
+  db.save();
+
+  res.json({ success: true, ticket });
 });
 
 // Platform Audit Logs (Admin: everything, Owner: chain-scoped)
@@ -5209,39 +5981,206 @@ app.get('/api/admin/redemptions/export-csv', requireAuth, requireRole(['admin'])
 });
 
 // ==========================================
-// 12. GEMINI AI ASSISTANT & GOOGLE MAPS GROUNDING
+// 12. PROTECTED GEMINI AI ASSISTANT & GOOGLE MAPS GROUNDING
 // ==========================================
 
-app.post('/api/ai/maps-grounding', async (req, res) => {
+const AI_MAX_MESSAGE_LENGTH = 1000;
+const AI_MAX_HISTORY_TURNS = 10;
+const AI_MAX_HISTORY_INPUT = 50;
+
+function getAiUserHourlyCap(): number {
+  const parsed = Number(process.env.AI_USER_HOURLY_CAP);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : 20;
+}
+
+function getAiUserDailyCap(): number {
+  const parsed = Number(process.env.AI_USER_DAILY_CAP);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : 50;
+}
+
+function getAiGlobalDailyCap(): number {
+  const parsed = Number(process.env.AI_DAILY_CAP);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : 500;
+}
+
+function validateAiLanguage(raw: unknown): 'en' | 'sw' | null {
+  if (raw === undefined || raw === null) return 'en';
+  if (raw === 'en' || raw === 'sw') return raw;
+  return null;
+}
+
+function validateOptionalCoordinates(
+  rawLat: unknown,
+  rawLng: unknown
+): { valid: boolean; lat?: number; lng?: number; error?: string } {
+  const hasLat = rawLat !== undefined && rawLat !== null;
+  const hasLng = rawLng !== undefined && rawLng !== null;
+  if (!hasLat && !hasLng) return { valid: true };
+  if (hasLat !== hasLng) {
+    return { valid: false, error: 'Both lat and lng coordinates must be provided together.' };
+  }
+  if (typeof rawLat === 'boolean' || typeof rawLng === 'boolean' || rawLat === '' || rawLng === '') {
+    return { valid: false, error: 'Coordinates lat and lng must be valid finite numbers.' };
+  }
+  const lat = typeof rawLat === 'number' ? rawLat : Number(rawLat);
+  const lng = typeof rawLng === 'number' ? rawLng : Number(rawLng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return { valid: false, error: 'Coordinates lat and lng must be valid finite numbers.' };
+  }
+  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+    return { valid: false, error: 'Coordinates out of range (lat -90..90, lng -180..180).' };
+  }
+  return { valid: true, lat, lng };
+}
+
+function consumeAiQuota(
+  user: User,
+  endpoint: '/api/ai/chat' | '/api/ai/maps-grounding',
+  lang: 'en' | 'sw',
+  hasCoords: boolean
+): { allowed: boolean; error?: string } {
+  const data = db.getRaw();
+  if (!Array.isArray(data.aiUsageLogs)) {
+    data.aiUsageLogs = [];
+  }
+
+  const now = Date.now();
+  const oneHourAgo = now - 60 * 60 * 1000;
+  const todayUtc = new Date(now).toISOString().slice(0, 10);
+  const cutoffPrune = now - 48 * 60 * 60 * 1000;
+
+  // Prune entries older than 48h to keep file storage bounded
+  if (data.aiUsageLogs.length > 500) {
+    data.aiUsageLogs = data.aiUsageLogs.filter((entry) => entry.createdAt >= cutoffPrune);
+  }
+
+  let userHourlyCount = 0;
+  let userDailyCount = 0;
+  let globalDailyCount = 0;
+
+  for (const entry of data.aiUsageLogs) {
+    const ts = Number(entry.createdAt);
+    if (!Number.isFinite(ts)) continue;
+    const isToday = new Date(ts).toISOString().slice(0, 10) === todayUtc;
+    if (isToday) {
+      globalDailyCount += 1;
+      if (entry.userId === user.id) {
+        userDailyCount += 1;
+      }
+    }
+    if (ts >= oneHourAgo && entry.userId === user.id) {
+      userHourlyCount += 1;
+    }
+  }
+
+  const globalCap = getAiGlobalDailyCap();
+  if (globalDailyCount >= globalCap) {
+    return {
+      allowed: false,
+      error:
+        lang === 'sw'
+          ? 'Kiwango cha juu cha matumizi ya msaidizi wa AI kwa siku nzima kimefikiwa. Tafadhali jaribu tena kesho.'
+          : 'Daily platform AI usage capacity has been reached. Please try again tomorrow.',
+    };
+  }
+
+  const userDailyCap = getAiUserDailyCap();
+  if (userDailyCount >= userDailyCap) {
+    return {
+      allowed: false,
+      error:
+        lang === 'sw'
+          ? 'Umefikia kikomo chako cha maombi ya AI kwa leo. Tafadhali jaribu tena kesho.'
+          : 'You have reached your daily AI assistant quota. Please try again tomorrow.',
+    };
+  }
+
+  const userHourlyCap = getAiUserHourlyCap();
+  if (userHourlyCount >= userHourlyCap) {
+    return {
+      allowed: false,
+      error:
+        lang === 'sw'
+          ? 'Umetuma maombi mengi kwa saa moja. Tafadhali subiri kidogo kabla ya kuuliza tena.'
+          : 'Hourly AI request limit reached. Please wait a little before asking again.',
+    };
+  }
+
+  data.aiUsageLogs.push({
+    id: `ai_${now}_${crypto.randomBytes(3).toString('hex')}`,
+    userId: user.id,
+    userRole: user.role,
+    endpoint,
+    language: lang,
+    hasCoords,
+    createdAt: now,
+  });
+  if (data.aiUsageLogs.length > 5000) {
+    data.aiUsageLogs.splice(0, data.aiUsageLogs.length - 5000);
+  }
+  db.save();
+
+  console.log(
+    `[AI USAGE] user=${user.id} role=${user.role} endpoint=${endpoint} hour=${userHourlyCount + 1}/${userHourlyCap} day=${userDailyCount + 1}/${userDailyCap} globalDay=${globalDailyCount + 1}/${globalCap}`
+  );
+  return { allowed: true };
+}
+
+app.post('/api/ai/maps-grounding', requireAuth, async (req, res) => {
+  const user = (req as any).user as User;
   const ai = getGeminiClient();
   if (!ai) {
     return res.status(503).json({
-      error: 'Gemini AI service is not configured. Please check GEMINI_API_KEY in Settings > Secrets.',
+      error: 'AI store finder is currently unavailable. GEMINI_API_KEY is not configured on the server.',
     });
   }
 
-  const { query, lat, lng, language = 'en' } = req.body;
+  const { query, lat, lng, language } = req.body || {};
+  const validLang = validateAiLanguage(language);
+  if (!validLang) {
+    return res.status(400).json({ error: 'Invalid language. Must be "en" or "sw".' });
+  }
+
   if (!query || typeof query !== 'string' || query.trim().length < 2) {
-    return res.status(400).json({ error: 'A location query is required.' });
+    return res.status(400).json({ error: 'A location query is required (minimum 2 characters).' });
+  }
+
+  if (query.trim().length > AI_MAX_MESSAGE_LENGTH) {
+    return res.status(400).json({
+      error: `Query exceeds maximum length of ${AI_MAX_MESSAGE_LENGTH} characters.`,
+    });
+  }
+
+  const coordCheck = validateOptionalCoordinates(lat, lng);
+  if (!coordCheck.valid) {
+    return res.status(400).json({ error: coordCheck.error });
+  }
+
+  const quota = consumeAiQuota(
+    user,
+    '/api/ai/maps-grounding',
+    validLang,
+    coordCheck.lat !== undefined && coordCheck.lng !== undefined
+  );
+  if (!quota.allowed) {
+    return res.status(429).json({ error: quota.error });
   }
 
   try {
     const config: any = {
       tools: [{ googleMaps: {} }],
       systemInstruction:
-        language === 'sw'
+        validLang === 'sw'
           ? 'Wewe ni msaidizi wa Smart Cart wa kutafuta maduka makubwa karibu na mtumiaji. Jibu kwa Kiswahili ukitumia matokeo halisi ya Google Maps.'
-          : 'You are Smart Cart\'s live store locator assistant. Help shoppers find nearby supermarket branches, directions, and store details using real Google Maps data.',
+          : "You are Smart Cart's live store locator assistant. Help shoppers find nearby supermarket branches, directions, and store details using real Google Maps data.",
     };
 
-    const numLat = Number(lat);
-    const numLng = Number(lng);
-    if (!isNaN(numLat) && !isNaN(numLng) && isFinite(numLat) && isFinite(numLng)) {
+    if (coordCheck.lat !== undefined && coordCheck.lng !== undefined) {
       config.toolConfig = {
         retrievalConfig: {
           latLng: {
-            latitude: numLat,
-            longitude: numLng,
+            latitude: coordCheck.lat,
+            longitude: coordCheck.lng,
           },
         },
       };
@@ -5270,18 +6209,22 @@ app.post('/api/ai/maps-grounding', async (req, res) => {
       places,
     });
   } catch (err: any) {
-    console.error('[Smart Cart AI Maps Grounding Error]', err?.message || err);
-    res.status(err?.status || 500).json({
-      error: err?.message || 'Failed to query Google Maps grounding.',
+    console.error(`[Smart Cart AI Maps Error] user=${user.id} status=${err?.status || 'unknown'}`);
+    res.status(502).json({
+      error:
+        validLang === 'sw'
+          ? 'Huduma ya kutafuta maduka haipatikani kwa sasa. Tafadhali jaribu tena baadaye.'
+          : 'Unable to reach store finder service right now. Please try again shortly.',
     });
   }
 });
 
-app.post('/api/ai/chat', async (req, res) => {
+app.post('/api/ai/chat', requireAuth, async (req, res) => {
+  const user = (req as any).user as User;
   const ai = getGeminiClient();
   if (!ai) {
     return res.status(503).json({
-      error: 'Gemini AI service is not configured. Please check GEMINI_API_KEY in Settings > Secrets.',
+      error: 'AI assistant is currently unavailable. GEMINI_API_KEY is not configured on the server.',
     });
   }
 
@@ -5289,24 +6232,70 @@ app.post('/api/ai/chat', async (req, res) => {
     message,
     history = [],
     branchId,
-    language = 'en',
+    language,
     fastMode = false,
     useMapsGrounding = false,
     lat,
     lng,
-  } = req.body;
+  } = req.body || {};
+
+  const validLang = validateAiLanguage(language);
+  if (!validLang) {
+    return res.status(400).json({ error: 'Invalid language. Must be "en" or "sw".' });
+  }
 
   if (!message || typeof message !== 'string' || !message.trim()) {
     return res.status(400).json({ error: 'message is required.' });
   }
 
-  const user = getAuthUser(req);
+  const trimmedMessage = message.trim();
+  if (trimmedMessage.length > AI_MAX_MESSAGE_LENGTH) {
+    return res.status(400).json({
+      error: `Message exceeds maximum length of ${AI_MAX_MESSAGE_LENGTH} characters.`,
+    });
+  }
+
+  if (history !== undefined && !Array.isArray(history)) {
+    return res.status(400).json({ error: 'history must be an array.' });
+  }
+
+  if (Array.isArray(history) && history.length > AI_MAX_HISTORY_INPUT) {
+    return res.status(400).json({
+      error: `Conversation history exceeds allowed maximum (${AI_MAX_HISTORY_INPUT} items).`,
+    });
+  }
+
+  if (Array.isArray(history)) {
+    for (const item of history) {
+      if (typeof item?.text === 'string' && item.text.length > AI_MAX_MESSAGE_LENGTH) {
+        return res.status(400).json({
+          error: `History message entry exceeds maximum length of ${AI_MAX_MESSAGE_LENGTH} characters.`,
+        });
+      }
+    }
+  }
+
+  const coordCheck = validateOptionalCoordinates(lat, lng);
+  if (!coordCheck.valid) {
+    return res.status(400).json({ error: coordCheck.error });
+  }
+
+  const quota = consumeAiQuota(
+    user,
+    '/api/ai/chat',
+    validLang,
+    coordCheck.lat !== undefined && coordCheck.lng !== undefined
+  );
+  if (!quota.allowed) {
+    return res.status(429).json({ error: quota.error });
+  }
+
   const data = db.getRaw();
 
   const activeBranch = branchId ? data.branches.find((b) => b.id === branchId) : undefined;
   const activeSupermarket = activeBranch
     ? data.supermarkets.find((s) => s.id === activeBranch.supermarketId && s.status === 'active')
-    : user?.supermarketId
+    : user.supermarketId
     ? data.supermarkets.find((s) => s.id === user.supermarketId)
     : undefined;
 
@@ -5331,12 +6320,10 @@ app.post('/api/ai/chat', async (req, res) => {
     storeContext = `\nActive Branch Context: ${activeSupermarket.name} — ${activeBranch.name} (${activeBranch.address}, ${activeBranch.city}).\nSample Branch Catalogue: ${branchProducts.join('; ')}.\nActive Promotions: ${activePromos.join(', ') || 'None'}.`;
   }
 
-  const roleNote = user
-    ? `Signed-in User Role: ${user.role} (${user.name}).`
-    : 'User is an unauthenticated Guest Shopper.';
+  const roleNote = `Signed-in User Role: ${user.role} (${user.name}).`;
 
   const systemInstruction = [
-    language === 'sw'
+    validLang === 'sw'
       ? 'Wewe ni Msaidizi wa Smart Cart. Jibu kwa Kiswahili au lugha aliyotumia mtumiaji, kwa ufupi na kwa uwazi.'
       : 'You are the Smart Cart Assistant — helpful, concise, and accurate.',
     'Smart Cart is a scan-as-you-shop supermarket platform with NO in-app payments; shoppers present their cart code to a cashier at the till.',
@@ -5349,10 +6336,10 @@ app.post('/api/ai/chat', async (req, res) => {
   const formattedHistory: Content[] = Array.isArray(history)
     ? history
         .filter((m: any) => (m?.role === 'user' || m?.role === 'model') && typeof m?.text === 'string' && m.text.trim())
-        .slice(-20)
+        .slice(-AI_MAX_HISTORY_TURNS)
         .map((m: any) => ({
           role: m.role === 'model' ? 'model' : 'user',
-          parts: [{ text: m.text.trim() }],
+          parts: [{ text: m.text.trim().slice(0, AI_MAX_MESSAGE_LENGTH) }],
         }))
     : [];
 
@@ -5369,12 +6356,10 @@ app.post('/api/ai/chat', async (req, res) => {
 
     if (useMapsGrounding) {
       config.tools = [{ googleMaps: {} }];
-      const numLat = Number(lat);
-      const numLng = Number(lng);
-      if (!isNaN(numLat) && !isNaN(numLng) && isFinite(numLat) && isFinite(numLng)) {
+      if (coordCheck.lat !== undefined && coordCheck.lng !== undefined) {
         config.toolConfig = {
           retrievalConfig: {
-            latLng: { latitude: numLat, longitude: numLng },
+            latLng: { latitude: coordCheck.lat, longitude: coordCheck.lng },
           },
         };
       }
@@ -5386,7 +6371,7 @@ app.post('/api/ai/chat', async (req, res) => {
       config,
     });
 
-    const response = await chat.sendMessage({ message: message.trim() });
+    const response = await chat.sendMessage({ message: trimmedMessage });
 
     const rawChunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
     const places = rawChunks
@@ -5405,9 +6390,12 @@ app.post('/api/ai/chat', async (req, res) => {
       places,
     });
   } catch (err: any) {
-    console.error('[Smart Cart AI Chat Error]', err?.message || err);
-    res.status(err?.status || 500).json({
-      error: err?.message || 'Failed to generate AI response.',
+    console.error(`[Smart Cart AI Chat Error] user=${user.id} status=${err?.status || 'unknown'}`);
+    res.status(502).json({
+      error:
+        validLang === 'sw'
+          ? 'Msaidizi wa AI hapatikani kwa sasa. Tafadhali jaribu tena baadaye.'
+          : 'AI assistant service is temporarily unavailable. Please try again shortly.',
     });
   }
 });

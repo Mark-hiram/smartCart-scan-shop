@@ -1,7 +1,7 @@
 // Copyright (c) 2026 SmartCart Owner. All rights reserved.
 
 import React, { useState, useRef, useEffect } from 'react';
-import { MessageSquare, X, Send, Sparkles, MapPin, Zap, Trash2, ExternalLink } from 'lucide-react';
+import { MessageSquare, X, Send, Sparkles, MapPin, Zap, Trash2, ExternalLink, Lock } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { useAuth } from '../context/AuthContext';
 import { useTranslation } from '../utils/i18n';
@@ -20,8 +20,14 @@ interface ChatMessage {
   places?: MapsPlace[];
 }
 
-export const SmartCartChat: React.FC = () => {
-  const { branch, token } = useAuth();
+interface SmartCartChatProps {
+  hasFixedBottomBar?: boolean;
+}
+
+const MAX_AI_CHARS = 1000;
+
+export const SmartCartChat: React.FC<SmartCartChatProps> = ({ hasFixedBottomBar = false }) => {
+  const { branch, token, user } = useAuth();
   const { t, language } = useTranslation();
 
   const [isOpen, setIsOpen] = useState(false);
@@ -34,6 +40,7 @@ export const SmartCartChat: React.FC = () => {
   const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(null);
 
   const endRef = useRef<HTMLDivElement | null>(null);
+  const isAuthenticated = Boolean(user && token);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -55,6 +62,16 @@ export const SmartCartChat: React.FC = () => {
     const trimmed = input.trim();
     if (!trimmed || isSending) return;
 
+    if (!isAuthenticated || !token) {
+      setErrorMsg(t.aiSignInRequired);
+      return;
+    }
+
+    if (trimmed.length > MAX_AI_CHARS) {
+      setErrorMsg(`Message must be ${MAX_AI_CHARS} characters or fewer.`);
+      return;
+    }
+
     const userMsg: ChatMessage = {
       id: `u_${Date.now()}`,
       role: 'user',
@@ -68,15 +85,20 @@ export const SmartCartChat: React.FC = () => {
     setIsSending(true);
 
     try {
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (token) headers['Authorization'] = `Bearer ${token}`;
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      };
 
       const res = await fetch('/api/ai/chat', {
         method: 'POST',
         headers,
         body: JSON.stringify({
           message: trimmed,
-          history: messages.map((m) => ({ role: m.role, text: m.text })),
+          history: messages.slice(-10).map((m) => ({
+            role: m.role,
+            text: m.text.slice(0, MAX_AI_CHARS),
+          })),
           branchId: branch?.id,
           language,
           fastMode,
@@ -105,6 +127,10 @@ export const SmartCartChat: React.FC = () => {
     }
   };
 
+  const launcherBottomClass = hasFixedBottomBar
+    ? 'bottom-[calc(5.75rem+env(safe-area-inset-bottom,0px))]'
+    : 'bottom-[calc(1rem+env(safe-area-inset-bottom,0px))]';
+
   return (
     <>
       {/* Floating Chat Trigger */}
@@ -113,7 +139,7 @@ export const SmartCartChat: React.FC = () => {
           type="button"
           onClick={() => setIsOpen(true)}
           aria-label={t.aiAssistantTitle}
-          className="fixed bottom-24 right-4 z-40 w-12 h-12 rounded-2xl bg-slate-900 dark:bg-emerald-600 text-white shadow-xl border border-slate-700/50 dark:border-emerald-500 flex items-center justify-center hover:scale-105 active:scale-95 transition"
+          className={`fixed ${launcherBottomClass} right-4 z-40 w-12 h-12 rounded-2xl bg-slate-900 dark:bg-emerald-600 text-white shadow-xl border border-slate-700/50 dark:border-emerald-500 flex items-center justify-center hover:scale-105 active:scale-95 transition`}
         >
           <Sparkles className="w-5 h-5 text-emerald-400 dark:text-white" />
         </button>
@@ -121,9 +147,12 @@ export const SmartCartChat: React.FC = () => {
 
       {/* Slide-over Chat Drawer */}
       {isOpen && (
-        <div className="fixed bottom-4 right-4 z-50 w-[calc(100vw-2rem)] max-w-sm h-[520px] max-h-[82vh] bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 flex flex-col overflow-hidden animate-in fade-in">
+        <div
+          className="fixed right-4 z-50 w-[calc(100vw-2rem)] max-w-sm h-[520px] max-h-[82dvh] bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 flex flex-col overflow-hidden animate-in fade-in"
+          style={{ bottom: 'calc(1rem + env(safe-area-inset-bottom, 0px))' }}
+        >
           {/* Header */}
-          <div className="p-3.5 border-b border-slate-100 dark:border-slate-800 bg-slate-900 text-white flex items-center justify-between">
+          <div className="p-3.5 border-b border-slate-100 dark:border-slate-800 bg-slate-900 text-white flex items-center justify-between shrink-0">
             <div className="flex items-center gap-2">
               <div className="w-8 h-8 rounded-xl bg-emerald-600 flex items-center justify-center">
                 <MessageSquare className="w-4 h-4 text-white" />
@@ -144,6 +173,7 @@ export const SmartCartChat: React.FC = () => {
                     setErrorMsg(null);
                   }}
                   title={t.aiClearChat}
+                  aria-label={t.aiClearChat}
                   className="p-1.5 rounded-lg text-slate-400 hover:text-white transition"
                 >
                   <Trash2 className="w-4 h-4" />
@@ -152,6 +182,7 @@ export const SmartCartChat: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setIsOpen(false)}
+                aria-label="Close"
                 className="p-1.5 rounded-lg text-slate-400 hover:text-white transition"
               >
                 <X className="w-4 h-4" />
@@ -160,7 +191,7 @@ export const SmartCartChat: React.FC = () => {
           </div>
 
           {/* Mode Toggles */}
-          <div className="px-3 py-2 bg-slate-50 dark:bg-slate-800/60 border-b border-slate-100 dark:border-slate-800 flex items-center gap-2">
+          <div className="px-3 py-2 bg-slate-50 dark:bg-slate-800/60 border-b border-slate-100 dark:border-slate-800 flex items-center gap-2 shrink-0">
             <button
               type="button"
               onClick={() => setFastMode(!fastMode)}
@@ -189,8 +220,15 @@ export const SmartCartChat: React.FC = () => {
           </div>
 
           {/* Messages Thread */}
-          <div className="flex-1 overflow-y-auto p-3 space-y-3">
-            {messages.length === 0 && (
+          <div className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain p-3 space-y-3">
+            {!isAuthenticated && (
+              <div className="p-3 rounded-2xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 text-xs text-amber-900 dark:text-amber-200 flex items-start gap-2">
+                <Lock className="w-4 h-4 shrink-0 mt-0.5 text-amber-600" />
+                <span>{t.aiSignInRequired}</span>
+              </div>
+            )}
+
+            {messages.length === 0 && isAuthenticated && (
               <div className="text-center py-8 px-4 space-y-2">
                 <Sparkles className="w-8 h-8 text-emerald-500 mx-auto" />
                 <p className="text-xs font-semibold text-slate-700 dark:text-slate-200">
@@ -269,18 +307,21 @@ export const SmartCartChat: React.FC = () => {
           {/* Input Bar */}
           <form
             onSubmit={handleSend}
-            className="p-2.5 border-t border-slate-100 dark:border-slate-800 flex items-center gap-2 bg-white dark:bg-slate-900"
+            className="p-2.5 border-t border-slate-100 dark:border-slate-800 flex items-center gap-2 bg-white dark:bg-slate-900 shrink-0"
           >
             <input
               type="text"
               value={input}
+              maxLength={MAX_AI_CHARS}
+              disabled={!isAuthenticated || isSending}
               onChange={(e) => setInput(e.target.value)}
-              placeholder={t.aiInputPlaceholder}
-              className="flex-1 h-9 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs text-slate-900 dark:text-white focus:outline-emerald-500"
+              placeholder={isAuthenticated ? t.aiInputPlaceholder : t.aiSignInRequired}
+              className="flex-1 h-9 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs text-slate-900 dark:text-white focus:outline-emerald-500 disabled:opacity-60"
             />
             <button
               type="submit"
-              disabled={isSending || !input.trim()}
+              disabled={!isAuthenticated || isSending || !input.trim()}
+              aria-label="Send"
               className="w-9 h-9 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white flex items-center justify-center shrink-0 transition"
             >
               <Send className="w-4 h-4" />

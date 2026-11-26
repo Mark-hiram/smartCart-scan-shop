@@ -8,16 +8,24 @@
     --font-sans: var(--font-body);
   }
 
-  html,
-  body {
-    overflow-x: hidden;
+  html {
+    min-height: 100%;
+    height: auto;
   }
 
   body {
     font-family: var(--font-sans);
     -webkit-tap-highlight-color: transparent;
+    min-height: 100vh;
+    min-height: 100dvh;
+    height: auto;
+    overflow-y: auto;
+  }
+
+  button,
+  [role="button"],
+  [role="tab"] {
     user-select: none;
-    overscroll-behavior-y: none;
   }
 
   input,
@@ -25,6 +33,26 @@
   select {
     user-select: text;
   }
+}
+
+/* App shell horizontal clip without trapping html/body scroll or breaking sticky headers */
+.app-shell-root {
+  min-height: 100vh;
+  min-height: 100dvh;
+  overflow-x: clip;
+}
+
+.safe-top {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+
+.safe-bottom {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+.safe-x {
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
 }
 
 /* Custom smooth transitions for scan reticle & scanner beam */

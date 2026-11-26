@@ -19,8 +19,10 @@ export const LegalFooter: React.FC<LegalFooterProps> = ({
   return (
     <footer
       aria-label={t.legalNoticeTitle}
-      className={`w-full border-t border-slate-200/80 dark:border-slate-800/80 bg-white/85 dark:bg-slate-900/85 backdrop-blur-sm text-slate-600 dark:text-slate-400 transition-colors ${
-        hasFixedBottomBar ? 'pb-28 md:pb-24' : 'pb-4'
+      className={`w-full safe-x border-t border-slate-200/80 dark:border-slate-800/80 bg-white/85 dark:bg-slate-900/85 backdrop-blur-sm text-slate-600 dark:text-slate-400 transition-colors ${
+        hasFixedBottomBar
+          ? 'pb-[calc(7rem+env(safe-area-inset-bottom,0px))] md:pb-[calc(6rem+env(safe-area-inset-bottom,0px))]'
+          : 'pb-[calc(1rem+env(safe-area-inset-bottom,0px))]'
       } pt-3.5 px-4`}
     >
       <div className="max-w-7xl mx-auto flex flex-col items-center justify-center gap-1.5 text-[11px] leading-relaxed text-center">

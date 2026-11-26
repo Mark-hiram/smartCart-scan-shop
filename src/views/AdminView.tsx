@@ -47,10 +47,11 @@ import {
   Edit3,
   X,
 } from 'lucide-react';
+import { useBodyScrollLock } from '../hooks/useBodyScrollLock';
 
 export const AdminView: React.FC = () => {
   const { token, user, reloadUser } = useAuth();
-  const { t } = useTranslation();
+  const { t, language } = useTranslation();
 
   const [activeTab, setActiveTab] = useState<
     'metrics' | 'reports' | 'supermarkets' | 'users' | 'rewards' | 'loyalty_settings' | 'announcements' | 'support' | 'audit'
@@ -128,6 +129,14 @@ export const AdminView: React.FC = () => {
   });
   const [replyTicketId, setReplyTicketId] = useState<string | null>(null);
   const [replyText, setReplyText] = useState('');
+  const [generatedResetPasswords, setGeneratedResetPasswords] = useState<
+    Record<string, { tempPassword: string; expiresAt: number }>
+  >({});
+  const [copiedTicketPassId, setCopiedTicketPassId] = useState<string | null>(null);
+  const [rejectingTicketId, setRejectingTicketId] = useState<string | null>(null);
+  const [ticketRejectReason, setTicketRejectReason] = useState('');
+  const [supportActionError, setSupportActionError] = useState<Record<string, string>>({});
+  const [isSupportActionLoading, setIsSupportActionLoading] = useState<string | null>(null);
 
   // Admin reset password modal for shoppers & shops
   const [resetTarget, setResetTarget] = useState<{
@@ -153,6 +162,14 @@ export const AdminView: React.FC = () => {
   const [acctConfirmPassword, setAcctConfirmPassword] = useState('');
   const [acctStatus, setAcctStatus] = useState<{ type: 'error' | 'success'; text: string } | null>(null);
   const [isUpdatingAcct, setIsUpdatingAcct] = useState(false);
+
+  useBodyScrollLock(
+    showAncModal ||
+      showAccountModal ||
+      Boolean(resetTarget) ||
+      Boolean(rejectModalOrder) ||
+      Boolean(rewardEditor)
+  );
 
   const loadAdminData = async () => {
     if (!token) return;
@@ -213,14 +230,17 @@ export const AdminView: React.FC = () => {
     loadAdminData();
   }, [token]);
 
-  // Supermarket toggle/set status (approve / suspend)
-  const handleToggleSupermarketStatus = async (sm: Supermarket, explicitStatus?: 'active' | 'suspended') => {
+  // Supermarket toggle/set status (approve / reject / suspend)
+  const handleToggleSupermarketStatus = async (
+    sm: Supermarket,
+    explicitStatus?: 'active' | 'suspended' | 'rejected'
+  ) => {
     const nextStatus = explicitStatus || (sm.status === 'active' ? 'suspended' : 'active');
     try {
       const res = await fetch(`/api/admin/supermarkets/${sm.id}/status`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ status: nextStatus }),
+        body: JSON.stringify({ status: nextStatus, language }),
       });
       if (res.ok) loadAdminData();
     } catch (e) {}
@@ -281,7 +301,9 @@ export const AdminView: React.FC = () => {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify(autoGenerate ? {} : { newPassword: resetCustomPassword.trim() }),
+        body: JSON.stringify(
+          autoGenerate ? { language } : { newPassword: resetCustomPassword.trim(), language }
+        ),
       });
 
       const data = await res.json();
@@ -340,6 +362,116 @@ export const AdminView: React.FC = () => {
         loadAdminData();
       }
     } catch (e) {}
+  };
+
+  // Admin: update identity check checklist on a password reset request
+  const handleToggleIdentityCheck = async (
+    ticket: SupportTicket,
+    field: 'phoneConfirmed' | 'lastPurchaseOrPointsConfirmed'
+  ) => {
+    if (!token || !ticket.passwordResetDetails) return;
+    const current = ticket.passwordResetDetails.identityChecked || {
+      phoneConfirmed: false,
+      lastPurchaseOrPointsConfirmed: false,
+    };
+    const payload = {
+      phoneConfirmed: field === 'phoneConfirmed' ? !current.phoneConfirmed : Boolean(current.phoneConfirmed),
+      lastPurchaseOrPointsConfirmed:
+        field === 'lastPurchaseOrPointsConfirmed'
+          ? !current.lastPurchaseOrPointsConfirmed
+          : Boolean(current.lastPurchaseOrPointsConfirmed),
+    };
+    setSupportActionError((prev) => ({ ...prev, [ticket.id]: '' }));
+    setIsSupportActionLoading(ticket.id);
+    try {
+      const res = await fetch(`/api/support/${ticket.id}/verify-identity`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setSupportActionError((prev) => ({ ...prev, [ticket.id]: data.error || 'Failed to update identity check.' }));
+      } else {
+        await loadAdminData();
+      }
+    } catch (e: any) {
+      setSupportActionError((prev) => ({ ...prev, [ticket.id]: e?.message || 'Network error.' }));
+    } finally {
+      setIsSupportActionLoading(null);
+    }
+  };
+
+  // Admin: generate one-time 24h temporary password for verified password reset request
+  const handleGenerateResetTempPassword = async (ticket: SupportTicket) => {
+    if (!token || !ticket.passwordResetDetails) return;
+    const checked = ticket.passwordResetDetails.identityChecked;
+    setSupportActionError((prev) => ({ ...prev, [ticket.id]: '' }));
+    setIsSupportActionLoading(ticket.id);
+    try {
+      const res = await fetch(`/api/support/${ticket.id}/generate-temp-password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          phoneConfirmed: Boolean(checked?.phoneConfirmed),
+          lastPurchaseOrPointsConfirmed: Boolean(checked?.lastPurchaseOrPointsConfirmed),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setSupportActionError((prev) => ({
+          ...prev,
+          [ticket.id]: data.error || 'Could not generate temporary password.',
+        }));
+      } else {
+        setGeneratedResetPasswords((prev) => ({
+          ...prev,
+          [ticket.id]: {
+            tempPassword: data.tempPassword,
+            expiresAt: data.expiresAt,
+          },
+        }));
+        setCopiedTicketPassId(null);
+        await loadAdminData();
+      }
+    } catch (e: any) {
+      setSupportActionError((prev) => ({ ...prev, [ticket.id]: e?.message || 'Network error.' }));
+    } finally {
+      setIsSupportActionLoading(null);
+    }
+  };
+
+  // Admin: reject password reset request with a reason
+  const handleRejectResetRequest = async (ticketId: string) => {
+    if (!token) return;
+    if (ticketRejectReason.trim().length < 3) {
+      setSupportActionError((prev) => ({
+        ...prev,
+        [ticketId]: 'Please enter a rejection reason (at least 3 characters).',
+      }));
+      return;
+    }
+    setSupportActionError((prev) => ({ ...prev, [ticketId]: '' }));
+    setIsSupportActionLoading(ticketId);
+    try {
+      const res = await fetch(`/api/support/${ticketId}/reject`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ reason: ticketRejectReason.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setSupportActionError((prev) => ({ ...prev, [ticketId]: data.error || 'Could not reject request.' }));
+      } else {
+        setRejectingTicketId(null);
+        setTicketRejectReason('');
+        await loadAdminData();
+      }
+    } catch (e: any) {
+      setSupportActionError((prev) => ({ ...prev, [ticketId]: e?.message || 'Network error.' }));
+    } finally {
+      setIsSupportActionLoading(null);
+    }
   };
 
   // Export CSV with Bearer auth (no window.open)
@@ -839,7 +971,7 @@ export const AdminView: React.FC = () => {
                             {t.approveSupermarket}
                           </button>
                           <button
-                            onClick={() => handleToggleSupermarketStatus(sm, 'suspended')}
+                            onClick={() => handleToggleSupermarketStatus(sm, 'rejected')}
                             className="px-3 py-1 rounded-lg text-xs font-semibold border border-rose-300 text-rose-600 hover:bg-rose-50 transition"
                           >
                             Reject
@@ -1698,13 +1830,14 @@ export const AdminView: React.FC = () => {
             </div>
 
             {/* Filter Bar: Status & Category */}
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <select
                 value={ticketCategoryFilter}
                 onChange={(e) => setTicketCategoryFilter(e.target.value)}
                 className="h-9 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-medium"
               >
                 <option value="all">All Categories</option>
+                <option value="password_reset">{t.catPasswordReset}</option>
                 <option value="scanner">{t.catScanner}</option>
                 <option value="pricing">{t.catPricing}</option>
                 <option value="stock">{t.catStock}</option>
@@ -1720,6 +1853,9 @@ export const AdminView: React.FC = () => {
               >
                 <option value="all">All Statuses</option>
                 <option value="open">{t.statusOpen}</option>
+                <option value="verified">{t.statusVerified}</option>
+                <option value="completed">{t.statusCompleted}</option>
+                <option value="rejected">{t.statusRejected}</option>
                 <option value="in_progress">{t.statusInProgress}</option>
                 <option value="resolved">{t.statusResolved}</option>
               </select>
@@ -1727,87 +1863,338 @@ export const AdminView: React.FC = () => {
           </div>
 
           <div className="space-y-3">
-            {filteredTickets.map((tkt) => (
-              <div
-                key={tkt.id}
-                className="p-5 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-2"
-              >
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span
-                      className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full ${
-                        tkt.status === 'resolved'
-                          ? 'bg-emerald-100 text-emerald-800'
-                          : tkt.status === 'in_progress'
-                          ? 'bg-blue-100 text-blue-800'
-                          : 'bg-amber-100 text-amber-800'
-                      }`}
-                    >
-                      {tkt.status}
-                    </span>
-                    <span className="text-[10px] font-semibold bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 px-2 py-0.5 rounded-full">
-                      Category: {tkt.category}
-                    </span>
-                    <h4 className="text-xs font-bold text-slate-900 dark:text-white">
-                      {tkt.subject}
-                    </h4>
-                  </div>
-                  <span className="text-[11px] text-slate-400 font-mono">
-                    {new Date(tkt.createdAt).toLocaleDateString()}
-                  </span>
-                </div>
-
-                <p className="text-xs text-slate-600 dark:text-slate-300">
-                  "{tkt.message}"
-                </p>
-                <p className="text-[11px] text-slate-400">
-                  Submitted by {tkt.userName} ({tkt.userEmail} · {tkt.userPhone})
-                </p>
-
-                {tkt.reply && (
-                  <div className="p-3 rounded-2xl bg-emerald-50 dark:bg-emerald-950/40 text-xs text-emerald-900 dark:text-emerald-300 border border-emerald-200">
-                    <strong>Admin Reply:</strong> {tkt.reply}
-                  </div>
-                )}
-
-                {!tkt.reply && (
-                  <div className="pt-2">
-                    {replyTicketId === tkt.id ? (
-                      <div className="space-y-2">
-                        <textarea
-                          rows={2}
-                          value={replyText}
-                          onChange={(e) => setReplyText(e.target.value)}
-                          placeholder="Type reply to user..."
-                          className="w-full p-2.5 rounded-xl border text-xs"
-                        />
-                        <div className="flex gap-2">
-                          <button
-                            onClick={() => setReplyTicketId(null)}
-                            className="px-3 py-1.5 rounded-lg border text-xs"
-                          >
-                            Cancel
-                          </button>
-                          <button
-                            onClick={() => handleReplyTicket(tkt.id)}
-                            className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-semibold"
-                          >
-                            Send Resolution
-                          </button>
-                        </div>
-                      </div>
-                    ) : (
-                      <button
-                        onClick={() => setReplyTicketId(tkt.id)}
-                        className="px-3 py-1 rounded-lg border border-slate-200 text-xs font-semibold text-slate-700 hover:bg-slate-50"
-                      >
-                        Reply
-                      </button>
-                    )}
-                  </div>
-                )}
+            {filteredTickets.length === 0 && (
+              <div className="p-8 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-center text-xs text-slate-500">
+                No support requests match the selected filters.
               </div>
-            ))}
+            )}
+
+            {filteredTickets.map((tkt) => {
+              const resetDetails = tkt.category === 'password_reset' ? tkt.passwordResetDetails : undefined;
+              const onceGenerated = generatedResetPasswords[tkt.id];
+              const actionErr = supportActionError[tkt.id];
+              const phoneChecked = Boolean(resetDetails?.identityChecked?.phoneConfirmed);
+              const secondaryChecked = Boolean(resetDetails?.identityChecked?.lastPurchaseOrPointsConfirmed);
+              const isResetActionable = tkt.status !== 'completed' && tkt.status !== 'rejected';
+
+              return (
+                <div
+                  key={tkt.id}
+                  className="p-5 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-3"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span
+                        className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full ${
+                          tkt.status === 'resolved' || tkt.status === 'completed'
+                            ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300'
+                            : tkt.status === 'verified'
+                            ? 'bg-indigo-100 text-indigo-800 dark:bg-indigo-950/60 dark:text-indigo-300'
+                            : tkt.status === 'rejected'
+                            ? 'bg-rose-100 text-rose-800 dark:bg-rose-950/60 dark:text-rose-300'
+                            : tkt.status === 'in_progress'
+                            ? 'bg-blue-100 text-blue-800 dark:bg-blue-950/60 dark:text-blue-300'
+                            : 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300'
+                        }`}
+                      >
+                        {tkt.status}
+                      </span>
+                      <span className="text-[10px] font-semibold bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 px-2 py-0.5 rounded-full">
+                        {tkt.category === 'password_reset' ? 'Password reset' : `Category: ${tkt.category}`}
+                      </span>
+                      <h4 className="text-xs font-bold text-slate-900 dark:text-white">
+                        {tkt.subject}
+                      </h4>
+                    </div>
+                    <span className="text-[11px] text-slate-400 font-mono">
+                      {new Date(tkt.createdAt).toLocaleString()}
+                    </span>
+                  </div>
+
+                  {resetDetails ? (
+                    <div className="space-y-3 text-xs">
+                      {/* Submitted Request Details */}
+                      <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700/80 space-y-1.5">
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                          <div>
+                            <span className="text-[10px] font-bold uppercase text-slate-400 block">Entered Name</span>
+                            <span className="font-semibold text-slate-900 dark:text-white">
+                              {resetDetails.requestedFullName}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="text-[10px] font-bold uppercase text-slate-400 block">Entered Email / Phone</span>
+                            <span className="font-mono text-slate-800 dark:text-slate-200 break-all">
+                              {resetDetails.requestedIdentifier}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="text-[10px] font-bold uppercase text-slate-400 block">Sign-In Portal</span>
+                            <span className="capitalize font-semibold text-slate-800 dark:text-slate-200">
+                              {resetDetails.portalRequested}
+                            </span>
+                          </div>
+                        </div>
+                        {resetDetails.note && (
+                          <p className="text-[11px] text-slate-600 dark:text-slate-300 pt-1 border-t border-slate-200/70 dark:border-slate-700/70">
+                            <strong>Note:</strong> {resetDetails.note}
+                          </p>
+                        )}
+                      </div>
+
+                      {/* Admin-Only Account Match + Masked Contacts & Verification Hints */}
+                      <div
+                        className={`p-3.5 rounded-2xl border space-y-1.5 ${
+                          resetDetails.matchedAccount
+                            ? 'bg-emerald-50/70 dark:bg-emerald-950/25 border-emerald-200 dark:border-emerald-800/80'
+                            : 'bg-slate-50 dark:bg-slate-800/40 border-slate-200 dark:border-slate-700'
+                        }`}
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span
+                            className={`text-[11px] font-bold ${
+                              resetDetails.matchedAccount
+                                ? 'text-emerald-800 dark:text-emerald-300'
+                                : 'text-rose-700 dark:text-rose-300'
+                            }`}
+                          >
+                            {resetDetails.matchedAccount
+                              ? `Matching Account Found (${resetDetails.matchedRole}${
+                                  resetDetails.matchedSupermarketName ? ` · ${resetDetails.matchedSupermarketName}` : ''
+                                })`
+                              : 'No Matching Non-Admin Account Found'}
+                          </span>
+                          {resetDetails.matchedAccount && (
+                            <span className="text-[11px] font-mono text-slate-700 dark:text-slate-300">
+                              {resetDetails.maskedEmail || '—'} · {resetDetails.maskedPhone || '—'}
+                            </span>
+                          )}
+                        </div>
+
+                        {resetDetails.matchedAccount && (
+                          <div className="text-[11px] text-slate-600 dark:text-slate-300 flex flex-wrap gap-x-4 gap-y-1 pt-1">
+                            <span>
+                              <strong>Points Balance:</strong> {resetDetails.identityHintPointsBalance ?? 0} pts
+                            </span>
+                            <span>
+                              <strong>Last Purchase:</strong> {resetDetails.identityHintLastPurchase || 'No completed carts'}
+                            </span>
+                          </div>
+                        )}
+                      </div>
+
+                      {actionErr && (
+                        <div className="p-2.5 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-[11px] text-rose-700 dark:text-rose-300">
+                          {actionErr}
+                        </div>
+                      )}
+
+                      {/* Generated Once-Only Temporary Password Display */}
+                      {onceGenerated && (
+                        <div className="p-3.5 rounded-2xl bg-amber-50 dark:bg-amber-950/35 border border-amber-300 dark:border-amber-800 space-y-2">
+                          <p className="text-[11px] font-semibold text-amber-900 dark:text-amber-200">
+                            {t.tempPasswordOneTimeWarning}
+                          </p>
+                          <div className="p-3 rounded-xl bg-slate-900 text-emerald-300 font-mono text-sm flex items-center justify-between gap-2">
+                            <span className="break-all select-all">{onceGenerated.tempPassword}</span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                navigator.clipboard?.writeText(onceGenerated.tempPassword);
+                                setCopiedTicketPassId(tkt.id);
+                              }}
+                              className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-white text-[11px] font-sans font-semibold flex items-center gap-1 shrink-0"
+                            >
+                              {copiedTicketPassId === tkt.id ? (
+                                <Check className="w-3.5 h-3.5 text-emerald-400" />
+                              ) : (
+                                <Copy className="w-3.5 h-3.5" />
+                              )}
+                              <span>{copiedTicketPassId === tkt.id ? t.passwordCopied : t.copyPassword}</span>
+                            </button>
+                          </div>
+                          <div className="flex items-center justify-between text-[11px] text-slate-600 dark:text-slate-300">
+                            <span>Expires: {new Date(onceGenerated.expiresAt).toLocaleString()}</span>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setGeneratedResetPasswords((prev) => {
+                                  const next = { ...prev };
+                                  delete next[tkt.id];
+                                  return next;
+                                })
+                              }
+                              className="font-semibold underline hover:text-slate-900 dark:hover:text-white"
+                            >
+                              Clear from screen
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Identity Verification Checklist + Actions */}
+                      {isResetActionable && (
+                        <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-700 space-y-3">
+                          <p className="text-[11px] font-bold text-slate-800 dark:text-slate-200">
+                            Identity Verification Checklist (complete before generating temporary password):
+                          </p>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            <label className="flex items-center gap-2 text-xs text-slate-700 dark:text-slate-300 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={phoneChecked}
+                                disabled={!resetDetails.matchedAccount || isSupportActionLoading === tkt.id}
+                                onChange={() => handleToggleIdentityCheck(tkt, 'phoneConfirmed')}
+                                className="rounded text-emerald-600"
+                              />
+                              <span>Confirmed phone number on call/message</span>
+                            </label>
+                            <label className="flex items-center gap-2 text-xs text-slate-700 dark:text-slate-300 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={secondaryChecked}
+                                disabled={!resetDetails.matchedAccount || isSupportActionLoading === tkt.id}
+                                onChange={() => handleToggleIdentityCheck(tkt, 'lastPurchaseOrPointsConfirmed')}
+                                className="rounded text-emerald-600"
+                              />
+                              <span>Confirmed last purchase or points balance</span>
+                            </label>
+                          </div>
+
+                          <div className="flex flex-wrap items-center gap-2 pt-1">
+                            {resetDetails.matchedAccount && (
+                              <button
+                                type="button"
+                                disabled={!phoneChecked || !secondaryChecked || isSupportActionLoading === tkt.id}
+                                onClick={() => handleGenerateResetTempPassword(tkt)}
+                                className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold flex items-center gap-1.5 transition"
+                              >
+                                <KeyRound className="w-3.5 h-3.5" />
+                                <span>Generate temporary password</span>
+                              </button>
+                            )}
+
+                            {rejectingTicketId === tkt.id ? (
+                              <div className="w-full space-y-2 pt-2 border-t border-slate-200 dark:border-slate-700">
+                                <input
+                                  type="text"
+                                  value={ticketRejectReason}
+                                  onChange={(e) => setTicketRejectReason(e.target.value)}
+                                  placeholder="Enter reason for rejecting this request..."
+                                  className="w-full h-9 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs"
+                                />
+                                <div className="flex gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setRejectingTicketId(null);
+                                      setTicketRejectReason('');
+                                    }}
+                                    className="px-3 py-1.5 rounded-lg border text-xs"
+                                  >
+                                    {t.cancel}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={isSupportActionLoading === tkt.id}
+                                    onClick={() => handleRejectResetRequest(tkt.id)}
+                                    className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold"
+                                  >
+                                    Confirm Reject
+                                  </button>
+                                </div>
+                              </div>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setRejectingTicketId(tkt.id);
+                                  setTicketRejectReason('');
+                                }}
+                                className="px-3 py-2 rounded-xl border border-rose-300 dark:border-rose-800 text-rose-700 dark:text-rose-300 hover:bg-rose-50 dark:hover:bg-rose-950/30 text-xs font-semibold"
+                              >
+                                Reject
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      )}
+
+                      {tkt.status === 'completed' && !onceGenerated && (
+                        <div className="p-3 rounded-2xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 text-[11px] text-emerald-900 dark:text-emerald-300">
+                          Temporary password issued by <strong>{resetDetails.resolvedByName || 'Admin'}</strong>
+                          {resetDetails.resolvedAt ? ` on ${new Date(resetDetails.resolvedAt).toLocaleString()}` : ''}.
+                          {resetDetails.tempPasswordExpiresAt
+                            ? ` Valid until ${new Date(resetDetails.tempPasswordExpiresAt).toLocaleString()}.`
+                            : ''}
+                        </div>
+                      )}
+
+                      {tkt.status === 'rejected' && resetDetails.rejectionReason && (
+                        <div className="p-3 rounded-2xl bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-800 text-[11px] text-rose-900 dark:text-rose-300">
+                          <strong>Rejected Reason:</strong> {resetDetails.rejectionReason}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <>
+                      <p className="text-xs text-slate-600 dark:text-slate-300">
+                        "{tkt.message}"
+                      </p>
+                      <p className="text-[11px] text-slate-400">
+                        Submitted by {tkt.userName} ({tkt.userEmail} · {tkt.userPhone})
+                      </p>
+
+                      {tkt.reply && (
+                        <div className="p-3 rounded-2xl bg-emerald-50 dark:bg-emerald-950/40 text-xs text-emerald-900 dark:text-emerald-300 border border-emerald-200">
+                          <strong>Admin Reply:</strong> {tkt.reply}
+                        </div>
+                      )}
+
+                      {!tkt.reply && (
+                        <div className="pt-2">
+                          {replyTicketId === tkt.id ? (
+                            <div className="space-y-2">
+                              <textarea
+                                rows={2}
+                                value={replyText}
+                                onChange={(e) => setReplyText(e.target.value)}
+                                placeholder="Type reply to user..."
+                                className="w-full p-2.5 rounded-xl border text-xs"
+                              />
+                              <div className="flex gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => setReplyTicketId(null)}
+                                  className="px-3 py-1.5 rounded-lg border text-xs"
+                                >
+                                  Cancel
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleReplyTicket(tkt.id)}
+                                  className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-semibold"
+                                >
+                                  Send Resolution
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => setReplyTicketId(tkt.id)}
+                              className="px-3 py-1 rounded-lg border border-slate-200 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                            >
+                              Reply
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
@@ -1843,92 +2230,116 @@ export const AdminView: React.FC = () => {
       {/* Modal: Broadcast Announcement with Optional Expiry Date */}
       {showAncModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in">
-          <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl p-5 shadow-2xl border border-slate-200 dark:border-slate-800 space-y-4">
-            <h3 className="text-base font-bold text-slate-900 dark:text-white">
-              {t.broadcastToChains}
-            </h3>
-            <form onSubmit={handleCreateAnnouncement} className="space-y-3">
-              <div>
-                <label className="text-xs font-semibold block mb-1">Title</label>
-                <input
-                  type="text"
-                  required
-                  value={newAnc.title}
-                  onChange={(e) => setNewAnc({ ...newAnc, title: e.target.value })}
-                  placeholder="e.g. Scheduled Network Maintenance"
-                  className="w-full h-10 px-3 rounded-xl border text-xs"
-                />
-              </div>
-              <div>
-                <label className="text-xs font-semibold block mb-1">Message</label>
-                <textarea
-                  rows={3}
-                  required
-                  value={newAnc.message}
-                  onChange={(e) => setNewAnc({ ...newAnc, message: e.target.value })}
-                  placeholder="Enter broadcast message details..."
-                  className="w-full p-3 rounded-xl border text-xs"
-                />
-              </div>
-              <div>
-                <label className="text-xs font-semibold block mb-1">Target Chain</label>
-                <select
-                  value={newAnc.targetSmId}
-                  onChange={(e) => setNewAnc({ ...newAnc, targetSmId: e.target.value })}
-                  className="w-full h-10 px-3 rounded-xl border text-xs"
-                >
-                  <option value="">All Supermarkets &amp; Branches</option>
-                  {supermarkets.map((s) => (
-                    <option key={s.id} value={s.id}>{s.name}</option>
-                  ))}
-                </select>
-              </div>
+          <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 max-h-[90dvh] flex flex-col overflow-hidden">
+            <div className="p-5 pb-3 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between shrink-0">
+              <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                {t.broadcastToChains}
+              </h3>
+              <button
+                type="button"
+                onClick={() => setShowAncModal(false)}
+                aria-label="Close"
+                className="p-1.5 rounded-xl text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-5 pt-4 overflow-y-auto overscroll-y-contain flex-1 min-h-0">
+              <form onSubmit={handleCreateAnnouncement} className="space-y-3">
+                <div>
+                  <label className="text-xs font-semibold block mb-1">Title</label>
+                  <input
+                    type="text"
+                    required
+                    value={newAnc.title}
+                    onChange={(e) => setNewAnc({ ...newAnc, title: e.target.value })}
+                    placeholder="e.g. Scheduled Network Maintenance"
+                    className="w-full h-10 px-3 rounded-xl border text-xs"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-semibold block mb-1">Message</label>
+                  <textarea
+                    rows={3}
+                    required
+                    value={newAnc.message}
+                    onChange={(e) => setNewAnc({ ...newAnc, message: e.target.value })}
+                    placeholder="Enter broadcast message details..."
+                    className="w-full p-3 rounded-xl border text-xs"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-semibold block mb-1">Target Chain</label>
+                  <select
+                    value={newAnc.targetSmId}
+                    onChange={(e) => setNewAnc({ ...newAnc, targetSmId: e.target.value })}
+                    className="w-full h-10 px-3 rounded-xl border text-xs"
+                  >
+                    <option value="">All Supermarkets &amp; Branches</option>
+                    {supermarkets.map((s) => (
+                      <option key={s.id} value={s.id}>{s.name}</option>
+                    ))}
+                  </select>
+                </div>
 
-              {/* Phase 2: Expiry Date */}
-              <div>
-                <label className="text-xs font-semibold block mb-1">{t.announcementExpiry}</label>
-                <input
-                  type="date"
-                  value={newAnc.expiryDate}
-                  onChange={(e) => setNewAnc({ ...newAnc, expiryDate: e.target.value })}
-                  className="w-full h-10 px-3 rounded-xl border text-xs font-mono"
-                />
-              </div>
+                {/* Phase 2: Expiry Date */}
+                <div>
+                  <label className="text-xs font-semibold block mb-1">{t.announcementExpiry}</label>
+                  <input
+                    type="date"
+                    value={newAnc.expiryDate}
+                    onChange={(e) => setNewAnc({ ...newAnc, expiryDate: e.target.value })}
+                    className="w-full h-10 px-3 rounded-xl border text-xs font-mono"
+                  />
+                </div>
 
-              <div className="flex gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setShowAncModal(false)}
-                  className="flex-1 py-2.5 rounded-xl border text-xs font-semibold"
-                >
-                  {t.cancel}
-                </button>
-                <button
-                  type="submit"
-                  className="flex-1 py-2.5 rounded-xl bg-emerald-600 text-white text-xs font-semibold"
-                >
-                  Broadcast
-                </button>
-              </div>
-            </form>
+                <div className="flex gap-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowAncModal(false)}
+                    className="flex-1 py-2.5 rounded-xl border text-xs font-semibold"
+                  >
+                    {t.cancel}
+                  </button>
+                  <button
+                    type="submit"
+                    className="flex-1 py-2.5 rounded-xl bg-emerald-600 text-white text-xs font-semibold"
+                  >
+                    Broadcast
+                  </button>
+                </div>
+              </form>
+            </div>
           </div>
         </div>
       )}
       {/* Modal: Update Single System Admin Email & Password */}
       {showAccountModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in">
-          <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl p-5 shadow-2xl border border-slate-200 dark:border-slate-800 space-y-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <ShieldCheck className="w-5 h-5 text-emerald-600" />
-                <h3 className="text-base font-bold text-slate-900 dark:text-white">
+          <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 max-h-[90dvh] flex flex-col overflow-hidden">
+            <div className="p-5 pb-3 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between gap-2 shrink-0">
+              <div className="flex items-center gap-2 min-w-0">
+                <ShieldCheck className="w-5 h-5 text-emerald-600 shrink-0" />
+                <h3 className="text-base font-bold text-slate-900 dark:text-white truncate">
                   Single System Admin Credentials
                 </h3>
               </div>
-              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300">
-                1 Account Only
-              </span>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300">
+                  1 Account Only
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setShowAccountModal(false)}
+                  aria-label="Close"
+                  className="p-1.5 rounded-xl text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
             </div>
+
+            <div className="p-5 pt-4 overflow-y-auto overscroll-y-contain flex-1 min-h-0 space-y-4">
 
             {acctStatus && (
               <div
@@ -2065,29 +2476,37 @@ export const AdminView: React.FC = () => {
                 </button>
               </div>
             </form>
+            </div>
           </div>
         </div>
       )}
       {/* Modal: Admin Password Reset Helper for Shoppers & Shops */}
       {resetTarget && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in">
-          <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl p-5 shadow-2xl border border-slate-200 dark:border-slate-800 space-y-4">
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <KeyRound className="w-5 h-5 text-emerald-600" />
-                <div>
+          <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 max-h-[90dvh] flex flex-col overflow-hidden">
+            <div className="p-5 pb-3 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between gap-2 shrink-0">
+              <div className="flex items-center gap-2 min-w-0">
+                <KeyRound className="w-5 h-5 text-emerald-600 shrink-0" />
+                <div className="min-w-0">
                   <h3 className="text-base font-bold text-slate-900 dark:text-white leading-tight">
                     Reset Account Password
                   </h3>
-                  <p className="text-[11px] text-slate-500">
-                    {resetTarget.name} · {resetTarget.roleLabel}
+                  <p className="text-[11px] text-slate-500 truncate">
+                    {resetTarget.name} · {resetTarget.roleLabel} ({resetTarget.subtitle})
                   </p>
                 </div>
               </div>
-              <span className="text-[10px] font-mono text-slate-400 truncate max-w-[140px]">
-                {resetTarget.subtitle}
-              </span>
+              <button
+                type="button"
+                onClick={() => setResetTarget(null)}
+                aria-label="Close"
+                className="p-1.5 rounded-xl text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
             </div>
+
+            <div className="p-5 pt-4 overflow-y-auto overscroll-y-contain flex-1 min-h-0 space-y-4">
 
             {resetStatus && (
               <div
@@ -2182,6 +2601,7 @@ export const AdminView: React.FC = () => {
                 Close
               </button>
             </div>
+            </div>
           </div>
         </div>
       )}
@@ -2189,49 +2609,56 @@ export const AdminView: React.FC = () => {
       {/* Modal: Reject / Cancel Redemption Order with Reason */}
       {rejectModalOrder && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in">
-          <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl p-5 shadow-2xl border border-slate-200 dark:border-slate-800 space-y-4">
-            <div className="flex items-center justify-between">
+          <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 max-h-[90dvh] flex flex-col overflow-hidden">
+            <div className="p-5 pb-3 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between shrink-0">
               <h3 className="text-sm font-bold text-slate-900 dark:text-white">
                 Reject / Cancel Order {rejectModalOrder.referenceCode}
               </h3>
-              <button type="button" onClick={() => setRejectModalOrder(null)}>
-                <X className="w-4 h-4 text-slate-400" />
-              </button>
-            </div>
-            <p className="text-xs text-slate-500">
-              Cancelling returns {rejectModalOrder.pointsCost.toLocaleString()} points to{' '}
-              <strong>{rejectModalOrder.shopperName}</strong> and restores size stock if previously approved.
-            </p>
-            <textarea
-              rows={3}
-              required
-              value={rejectReasonInput}
-              onChange={(e) => setRejectReasonInput(e.target.value)}
-              placeholder="Reason for rejection or cancellation..."
-              className="w-full p-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
-            />
-            <div className="flex gap-2">
               <button
                 type="button"
                 onClick={() => setRejectModalOrder(null)}
-                className="flex-1 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold"
+                aria-label="Close"
+                className="p-1.5 rounded-xl text-slate-400 hover:text-slate-700"
               >
-                {t.cancel}
+                <X className="w-4 h-4" />
               </button>
-              <button
-                type="button"
-                disabled={!rejectReasonInput.trim()}
-                onClick={() =>
-                  handleUpdateOrderStatus(
-                    rejectModalOrder.id,
-                    'cancelled',
-                    rejectReasonInput.trim()
-                  )
-                }
-                className="flex-1 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:opacity-45 text-white text-xs font-bold"
-              >
-                Confirm Rejection &amp; Refund Points
-              </button>
+            </div>
+            <div className="p-5 pt-4 overflow-y-auto overscroll-y-contain flex-1 min-h-0 space-y-4">
+              <p className="text-xs text-slate-500">
+                Cancelling returns {rejectModalOrder.pointsCost.toLocaleString()} points to{' '}
+                <strong>{rejectModalOrder.shopperName}</strong> and restores size stock if previously approved.
+              </p>
+              <textarea
+                rows={3}
+                required
+                value={rejectReasonInput}
+                onChange={(e) => setRejectReasonInput(e.target.value)}
+                placeholder="Reason for rejection or cancellation..."
+                className="w-full p-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
+              />
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setRejectModalOrder(null)}
+                  className="flex-1 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold"
+                >
+                  {t.cancel}
+                </button>
+                <button
+                  type="button"
+                  disabled={!rejectReasonInput.trim()}
+                  onClick={() =>
+                    handleUpdateOrderStatus(
+                      rejectModalOrder.id,
+                      'cancelled',
+                      rejectReasonInput.trim()
+                    )
+                  }
+                  className="flex-1 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:opacity-45 text-white text-xs font-bold"
+                >
+                  Confirm Rejection &amp; Refund Points
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -2240,15 +2667,21 @@ export const AdminView: React.FC = () => {
       {/* Modal: Create / Edit Reward Item */}
       {rewardEditor && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in">
-          <div className="w-full max-w-lg bg-white dark:bg-slate-900 rounded-3xl p-5 shadow-2xl border border-slate-200 dark:border-slate-800 space-y-4 max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between">
+          <div className="w-full max-w-lg bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 max-h-[90dvh] flex flex-col overflow-hidden">
+            <div className="p-5 pb-3 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between shrink-0">
               <h3 className="text-base font-bold text-slate-900 dark:text-white">
                 {rewardEditor.id ? 'Edit Reward Item' : 'Add New Reward Item'}
               </h3>
-              <button type="button" onClick={() => setRewardEditor(null)}>
-                <X className="w-4 h-4 text-slate-400" />
+              <button
+                type="button"
+                onClick={() => setRewardEditor(null)}
+                aria-label="Close"
+                className="p-1.5 rounded-xl text-slate-400 hover:text-slate-700"
+              >
+                <X className="w-4 h-4" />
               </button>
             </div>
+            <div className="p-5 pt-4 overflow-y-auto overscroll-y-contain flex-1 min-h-0">
 
             <form onSubmit={handleSaveReward} className="space-y-3 text-xs">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -2420,6 +2853,7 @@ export const AdminView: React.FC = () => {
                 </button>
               </div>
             </form>
+            </div>
           </div>
         </div>
       )}
