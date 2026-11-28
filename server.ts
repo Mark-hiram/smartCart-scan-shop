@@ -53,7 +53,11 @@ import {
   RedemptionStatus,
   StaffPermissions,
   STAFF_PRESETS,
+  PriceCheckProductInfo,
+  PriceCheckBranchCompareItem,
+  PriceCheckResponse,
 } from './src/types';
+import { computeBudgetSummary, doesProductMatchListItem } from './src/utils/shoppingHelpers';
 
 function getGeminiClient(): GoogleGenAI | null {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -177,6 +181,8 @@ const passwordResetRequestIpRateLimiter = createIpRateLimiter(3, 60 * 60 * 1000,
 const redemptionRateLimiter = createIpRateLimiter(12, 15 * 60 * 1000, 'redemption');
 // Admin analytics endpoints: max 60 requests per 5 minutes per IP
 const adminAnalyticsRateLimiter = createIpRateLimiter(60, 5 * 60 * 1000, 'admin_analytics');
+// Shopper price check & compare endpoint: max 25 requests per minute per IP
+const priceCheckRateLimiter = createIpRateLimiter(25, 60 * 1000, 'price_check');
 
 const TEMP_PASSWORD_TTL_MS = 24 * 60 * 60 * 1000;
 const PW_RESET_REQ_ONE_HOUR_MS = 60 * 60 * 1000;
@@ -501,7 +507,22 @@ function recalculateCart(cart: Cart, branchId: string, promotions: Promotion[]) 
   cart.subtotal = subtotal;
   cart.totalDiscount = totalDiscount;
   cart.finalTotal = subtotal - totalDiscount;
+  cart.budgetSummary = computeBudgetSummary(cart.finalTotal, cart.budgetLimit);
   cart.updatedAt = new Date().toISOString();
+}
+
+function computeSingleUnitPromoFinalPrice(
+  unitPrice: number,
+  promo: Promotion | null
+): number {
+  if (!promo) return unitPrice;
+  if (promo.type === 'percent_off' && promo.discountPercent) {
+    return Math.max(0, Math.round(unitPrice - (unitPrice * promo.discountPercent) / 100));
+  }
+  if (promo.type === 'fixed_price' && promo.fixedPrice && promo.fixedPrice < unitPrice) {
+    return promo.fixedPrice;
+  }
+  return unitPrice;
 }
 
 // ==========================================
@@ -1791,14 +1812,15 @@ app.get('/api/shopper/branch-products/:branchId', (req, res) => {
       const isLowStock = stock <= threshold;
       const promo = activePromos.find((pr) => pr.productBarcodes.includes(p.barcode)) || null;
 
-      const effectiveAisle = bp?.aisleOverride || p.aisle || 'Aisle 1';
-      const effectiveShelf = bp?.shelfOverride || p.shelf || 'Shelf A';
+      const effectiveAisle = (bp?.aisleOverride || p.aisle || '').trim();
+      const effectiveShelf = (bp?.shelfOverride || p.shelf || '').trim();
+      const aisleShelfDisplay = [effectiveAisle, effectiveShelf].filter(Boolean).join(', ');
 
       return {
         ...p,
         aisle: effectiveAisle,
         shelf: effectiveShelf,
-        aisleShelf: `${effectiveAisle}, ${effectiveShelf}`,
+        aisleShelf: aisleShelfDisplay,
         branchPrice: effectivePrice,
         effectivePrice,
         stock,
@@ -1905,6 +1927,165 @@ app.post('/api/shopper/scan-lookup', (req, res) => {
   });
 });
 
+// Signed-in shopper-only Price Check & Same-Supermarket Branch Compare endpoint
+// Strictly rate-limited, never exposes stock/cost data, and never shows other supermarkets' branches
+const handleShopperPriceCheck = (req: Request, res: Response) => {
+  const body = req.method === 'GET' ? req.query : req.body;
+  const branchId = typeof body?.branchId === 'string' ? body.branchId.trim() : '';
+  const barcode = typeof body?.barcode === 'string' ? body.barcode.trim() : '';
+
+  if (!branchId || !barcode) {
+    return res.status(400).json({ error: 'branchId and barcode are required' });
+  }
+
+  const data = db.getRaw();
+  const branch = data.branches.find((b) => b.id === branchId && b.isActive);
+
+  const valResult = validateBarcode(barcode);
+  if (!valResult.isValid) {
+    if (branch) {
+      recordScanEvent(data, {
+        createdAt: new Date().toISOString(),
+        branchId: branch.id,
+        supermarketId: branch.supermarketId,
+        success: false,
+      });
+      db.save();
+    }
+    return res.status(400).json({
+      error: valResult.error || 'Invalid barcode check digit or format',
+      format: valResult.format,
+    });
+  }
+
+  if (!branch) {
+    return res.status(404).json({ error: 'Active store branch not found' });
+  }
+
+  const supermarket = data.supermarkets.find((s) => s.id === branch.supermarketId);
+  if (!supermarket || supermarket.status !== 'active') {
+    return res.status(404).json({ error: 'Store branch is currently unavailable' });
+  }
+
+  const product = data.products.find(
+    (p) => p.supermarketId === branch.supermarketId && p.barcode === barcode
+  );
+
+  if (!product) {
+    recordScanEvent(data, {
+      createdAt: new Date().toISOString(),
+      branchId: branch.id,
+      supermarketId: branch.supermarketId,
+      success: false,
+    });
+    db.save();
+    return res.status(404).json({
+      error: `Product with barcode ${barcode} is not in ${branch.name}'s catalogue.`,
+      barcode,
+    });
+  }
+
+  const bp = data.branchProducts.find((b) => b.branchId === branch.id && b.productId === product.id);
+  const branchPrice = bp?.priceOverride ?? product.basePrice;
+  const now = new Date().toISOString();
+
+  const findActivePromoForBranch = (targetBranchId: string): Promotion | null =>
+    data.promotions.find(
+      (p) =>
+        p.isActive &&
+        p.supermarketId === branch.supermarketId &&
+        p.startDate <= now &&
+        p.endDate >= now &&
+        (!p.branchId || p.branchId === targetBranchId) &&
+        p.productBarcodes.includes(product.barcode)
+    ) || null;
+
+  const activePromotion = findActivePromoForBranch(branch.id);
+  const finalPrice = computeSingleUnitPromoFinalPrice(branchPrice, activePromotion);
+
+  const effectiveAisle = (bp?.aisleOverride || product.aisle || '').trim();
+  const effectiveShelf = (bp?.shelfOverride || product.shelf || '').trim();
+  const safeProduct: PriceCheckProductInfo = {
+    id: product.id,
+    supermarketId: product.supermarketId,
+    barcode: product.barcode,
+    barcodeFormat: product.barcodeFormat,
+    name: product.name,
+    nameSwahili: product.nameSwahili,
+    category: product.category,
+    basePrice: product.basePrice,
+    unit: product.unit,
+    aisle: effectiveAisle,
+    shelf: effectiveShelf,
+    aisleShelf: [effectiveAisle, effectiveShelf].filter(Boolean).join(', '),
+    imageUrl: product.imageUrl,
+  };
+
+  // Compare ONLY active branches within the SAME supermarket chain — never other supermarkets, never stock/cost
+  const sameChainBranches = data.branches.filter(
+    (b) => b.supermarketId === branch.supermarketId && b.isActive
+  );
+
+  const compareBranches: PriceCheckBranchCompareItem[] = sameChainBranches
+    .map((b) => {
+      const otherBp = data.branchProducts.find(
+        (entry) => entry.branchId === b.id && entry.productId === product.id
+      );
+      const bPrice = otherBp?.priceOverride ?? product.basePrice;
+      const bPromo = findActivePromoForBranch(b.id);
+      const bFinal = computeSingleUnitPromoFinalPrice(bPrice, bPromo);
+      return {
+        branchId: b.id,
+        branchName: b.name,
+        city: b.city,
+        branchPrice: bPrice,
+        finalPrice: bFinal,
+        activePromotion: bPromo,
+        isCurrentBranch: b.id === branch.id,
+      };
+    })
+    .sort((a, b) => {
+      if (a.isCurrentBranch !== b.isCurrentBranch) return a.isCurrentBranch ? -1 : 1;
+      if (a.finalPrice !== b.finalPrice) return a.finalPrice - b.finalPrice;
+      return a.branchName.localeCompare(b.branchName);
+    });
+
+  recordScanEvent(data, {
+    createdAt: now,
+    branchId: branch.id,
+    supermarketId: branch.supermarketId,
+    success: true,
+  });
+  db.save();
+
+  const responsePayload: PriceCheckResponse = {
+    product: safeProduct,
+    branchPrice,
+    effectivePrice: branchPrice,
+    finalPrice,
+    activePromotion,
+    compareBranches,
+  };
+
+  return res.json(responsePayload);
+};
+
+app.post(
+  '/api/shopper/price-check',
+  priceCheckRateLimiter,
+  requireAuth,
+  requireRole(['shopper']),
+  handleShopperPriceCheck
+);
+
+app.get(
+  '/api/shopper/price-check',
+  priceCheckRateLimiter,
+  requireAuth,
+  requireRole(['shopper']),
+  handleShopperPriceCheck
+);
+
 // ==========================================
 // 4. LIVE CART OPERATIONS & OFFLINE SYNC
 // ==========================================
@@ -1979,6 +2160,10 @@ app.get('/api/shopper/cart', (req, res) => {
   if (!cart && branchId) {
     const branch = data.branches.find((b) => b.id === branchId);
     if (branch) {
+      const defaultCap =
+        user?.role === 'shopper' && typeof user.defaultBudgetKes === 'number' && user.defaultBudgetKes > 0
+          ? user.defaultBudgetKes
+          : null;
       cart = {
         id: `cart_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
         shortCode: generateShortCode(branch.id),
@@ -1992,13 +2177,18 @@ app.get('/api/shopper/cart', (req, res) => {
         subtotal: 0,
         totalDiscount: 0,
         finalTotal: 0,
-        budgetLimit: null,
+        budgetLimit: defaultCap,
+        budgetSummary: computeBudgetSummary(0, defaultCap),
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
       data.carts.push(cart);
       db.save();
     }
+  }
+
+  if (cart && !cart.budgetSummary) {
+    cart.budgetSummary = computeBudgetSummary(cart.finalTotal, cart.budgetLimit);
   }
 
   res.json(cart || null);
@@ -2017,6 +2207,11 @@ app.post('/api/shopper/cart/new', (req, res) => {
   const branch = data.branches.find((b) => b.id === branchId);
   if (!branch) return res.status(404).json({ error: 'Branch not found' });
 
+  const defaultCap =
+    user?.role === 'shopper' && typeof user.defaultBudgetKes === 'number' && user.defaultBudgetKes > 0
+      ? user.defaultBudgetKes
+      : null;
+
   const existingEmpty = data.carts.find(
     (c) =>
       c.shopperId === callerId &&
@@ -2025,6 +2220,13 @@ app.post('/api/shopper/cart/new', (req, res) => {
       c.items.length === 0
   );
   if (existingEmpty) {
+    if ((existingEmpty.budgetLimit === null || existingEmpty.budgetLimit === undefined) && defaultCap !== null) {
+      existingEmpty.budgetLimit = defaultCap;
+      existingEmpty.budgetSummary = computeBudgetSummary(existingEmpty.finalTotal, defaultCap);
+      db.save();
+    } else if (!existingEmpty.budgetSummary) {
+      existingEmpty.budgetSummary = computeBudgetSummary(existingEmpty.finalTotal, existingEmpty.budgetLimit);
+    }
     return res.json(existingEmpty);
   }
 
@@ -2041,7 +2243,8 @@ app.post('/api/shopper/cart/new', (req, res) => {
     subtotal: 0,
     totalDiscount: 0,
     finalTotal: 0,
-    budgetLimit: null,
+    budgetLimit: defaultCap,
+    budgetSummary: computeBudgetSummary(0, defaultCap),
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
@@ -2138,6 +2341,10 @@ app.post('/api/shopper/cart/add', (req, res) => {
   }
 
   if (!cart) {
+    const defaultCap =
+      user?.role === 'shopper' && typeof user.defaultBudgetKes === 'number' && user.defaultBudgetKes > 0
+        ? user.defaultBudgetKes
+        : null;
     cart = {
       id: `cart_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
       shortCode: generateShortCode(branchId),
@@ -2151,13 +2358,16 @@ app.post('/api/shopper/cart/add', (req, res) => {
       subtotal: 0,
       totalDiscount: 0,
       finalTotal: 0,
-      budgetLimit: null,
+      budgetLimit: defaultCap,
+      budgetSummary: computeBudgetSummary(0, defaultCap),
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
     data.carts.push(cart);
   }
 
+  const effectiveAisle = (bp?.aisleOverride || product.aisle || '').trim();
+  const effectiveShelf = (bp?.shelfOverride || product.shelf || '').trim();
   const existingItem = cart.items.find((i) => i.barcode === cleanBarcode);
   if (existingItem) {
     existingItem.quantity += quantity;
@@ -2168,9 +2378,9 @@ app.post('/api/shopper/cart/add', (req, res) => {
       barcode: product.barcode,
       name: product.name,
       category: product.category,
-      aisle: bp?.aisleOverride || product.aisle || 'Aisle 1',
-      shelf: bp?.shelfOverride || product.shelf || 'Shelf A',
-      aisleShelf: `${bp?.aisleOverride || product.aisle || 'Aisle 1'}, ${bp?.shelfOverride || product.shelf || 'Shelf A'}`,
+      aisle: effectiveAisle,
+      shelf: effectiveShelf,
+      aisleShelf: [effectiveAisle, effectiveShelf].filter(Boolean).join(', '),
       quantity,
       lockedPrice: currentBranchPrice,
       originalBasePrice: product.basePrice,
@@ -2183,8 +2393,30 @@ app.post('/api/shopper/cart/add', (req, res) => {
   }
 
   recalculateCart(cart, branchId, data.promotions);
+
+  // Auto-tick matching unticked shopping list items owned/editable by this shopper
+  const nowIso = new Date().toISOString();
+  for (const list of data.shoppingLists || []) {
+    const canEditList =
+      list.userId === callerId ||
+      (list.canEdit && Array.isArray(list.collaboratorIds) && list.collaboratorIds.includes(callerId));
+    if (!canEditList) continue;
+
+    let listChanged = false;
+    for (const listItem of list.items) {
+      if (!listItem.completed && doesProductMatchListItem(listItem, product)) {
+        listItem.completed = true;
+        if (!listItem.barcode) listItem.barcode = product.barcode;
+        listChanged = true;
+      }
+    }
+    if (listChanged) {
+      list.updatedAt = nowIso;
+    }
+  }
+
   recordScanEvent(data, {
-    createdAt: new Date().toISOString(),
+    createdAt: nowIso,
     branchId: branch.id,
     supermarketId: branch.supermarketId,
     success: true,
@@ -2227,11 +2459,39 @@ app.put('/api/shopper/cart/quantity', (req, res) => {
   res.json(cart);
 });
 
-// Set daily budget limit with ownership verification & closed-cart guard
+// Get or save default shopper budget (signed-in shoppers only)
+app.get('/api/shopper/default-budget', requireAuth, requireRole(['shopper']), (req, res) => {
+  const user = (req as any).user as User;
+  res.json({ defaultBudgetKes: user.defaultBudgetKes ?? null });
+});
+
+app.put('/api/shopper/default-budget', requireAuth, requireRole(['shopper']), (req, res) => {
+  const user = (req as any).user as User;
+  const { defaultBudgetKes } = req.body || {};
+
+  let normalizedBudget: number | null = null;
+  if (defaultBudgetKes !== null && defaultBudgetKes !== undefined && defaultBudgetKes !== '') {
+    const parsed = Number(defaultBudgetKes);
+    if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 10000000) {
+      return res.status(400).json({ error: 'Default budget must be a positive number in KES.' });
+    }
+    normalizedBudget = Math.round(parsed * 100) / 100;
+  }
+
+  const data = db.getRaw();
+  const dbUser = data.users.find((u) => u.id === user.id);
+  if (!dbUser) return res.status(404).json({ error: 'User not found' });
+
+  dbUser.defaultBudgetKes = normalizedBudget;
+  db.save();
+  res.json({ defaultBudgetKes: normalizedBudget });
+});
+
+// Set daily budget limit with ownership verification, closed-cart guard, & server-computed budget summary
 app.post('/api/shopper/cart/budget', (req, res) => {
   const user = getAuthUser(req);
   const callerId = getShopperOrGuestId(req, user);
-  const { cartId, budgetLimit } = req.body;
+  const { cartId, budgetLimit } = req.body || {};
   const data = db.getRaw();
   const cart = data.carts.find((c) => c.id === cartId);
   if (!cart) return res.status(404).json({ error: 'Cart not found' });
@@ -2245,7 +2505,18 @@ app.post('/api/shopper/cart/budget', (req, res) => {
     return res.status(400).json({ error: 'This cart is closed and cannot be modified.' });
   }
 
-  cart.budgetLimit = budgetLimit ? parseFloat(budgetLimit) : null;
+  let normalizedLimit: number | null = null;
+  if (budgetLimit !== null && budgetLimit !== undefined && budgetLimit !== '') {
+    const parsed = Number(budgetLimit);
+    if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 10000000) {
+      return res.status(400).json({ error: 'Budget limit must be a positive number in KES.' });
+    }
+    normalizedLimit = Math.round(parsed * 100) / 100;
+  }
+
+  cart.budgetLimit = normalizedLimit;
+  // Always compute totals & budget status using server's locked prices (never browser values)
+  recalculateCart(cart, cart.branchId, data.promotions);
   db.save();
   res.json(cart);
 });
@@ -2389,6 +2660,53 @@ app.post('/api/shopper/cart/sync', (req, res) => {
     );
   }
 
+  const normalizeSyncedItems = (rawItems: any[]): CartItem[] => {
+    const sanitized: CartItem[] = [];
+    for (const raw of rawItems) {
+      if (!raw || typeof raw !== 'object') continue;
+      const qty = Math.max(1, Math.round(Number(raw.quantity) || 1));
+      const matchedProd = data.products.find(
+        (p) =>
+          p.supermarketId === branch.supermarketId &&
+          ((raw.barcode && p.barcode === String(raw.barcode).trim()) ||
+            (raw.productId && p.id === raw.productId))
+      );
+      if (matchedProd) {
+        const bp = data.branchProducts.find(
+          (b) => b.branchId === branch.id && b.productId === matchedProd.id
+        );
+        const authoritativePrice = bp?.priceOverride ?? matchedProd.basePrice;
+        const effectiveAisle = (bp?.aisleOverride || matchedProd.aisle || '').trim();
+        const effectiveShelf = (bp?.shelfOverride || matchedProd.shelf || '').trim();
+        sanitized.push({
+          id: typeof raw.id === 'string' && raw.id ? raw.id : `ci_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
+          productId: matchedProd.id,
+          barcode: matchedProd.barcode,
+          name: matchedProd.name,
+          category: matchedProd.category,
+          aisle: effectiveAisle,
+          shelf: effectiveShelf,
+          aisleShelf: [effectiveAisle, effectiveShelf].filter(Boolean).join(', '),
+          quantity: qty,
+          lockedPrice: authoritativePrice,
+          originalBasePrice: matchedProd.basePrice,
+          discount: 0,
+          effectiveTotal: authoritativePrice * qty,
+          scannedAt: typeof raw.scannedAt === 'string' ? raw.scannedAt : new Date().toISOString(),
+          verifiedByCashier: false,
+        });
+      }
+    }
+    return sanitized;
+  };
+
+  const parsedBudget =
+    payload.budgetLimit !== undefined && payload.budgetLimit !== null && payload.budgetLimit !== ''
+      ? Number(payload.budgetLimit)
+      : null;
+  const safeBudgetLimit =
+    parsedBudget !== null && Number.isFinite(parsedBudget) && parsedBudget > 0 ? parsedBudget : null;
+
   if (!serverCart) {
     serverCart = {
       id: requestedCartId && !String(requestedCartId).startsWith('offline-cart-')
@@ -2401,11 +2719,11 @@ app.post('/api/shopper/cart/sync', (req, res) => {
       supermarketId: branch.supermarketId,
       branchId: branch.id,
       status: safeClientStatus,
-      items: Array.isArray(payload.items) ? payload.items : [],
-      subtotal: payload.subtotal || 0,
-      totalDiscount: payload.totalDiscount || 0,
-      finalTotal: payload.finalTotal || 0,
-      budgetLimit: payload.budgetLimit ?? null,
+      items: Array.isArray(payload.items) ? normalizeSyncedItems(payload.items) : [],
+      subtotal: 0,
+      totalDiscount: 0,
+      finalTotal: 0,
+      budgetLimit: safeBudgetLimit,
       isOfflineCreated: true,
       syncedAt: new Date().toISOString(),
       createdAt: payload.createdAt || new Date().toISOString(),
@@ -2413,9 +2731,8 @@ app.post('/api/shopper/cart/sync', (req, res) => {
     };
     data.carts.push(serverCart);
   } else {
-    // Preserve the locked price the shopper saw when scanning offline!
-    if (Array.isArray(payload.items)) serverCart.items = payload.items;
-    if (payload.budgetLimit !== undefined) serverCart.budgetLimit = payload.budgetLimit;
+    if (Array.isArray(payload.items)) serverCart.items = normalizeSyncedItems(payload.items);
+    if (payload.budgetLimit !== undefined) serverCart.budgetLimit = safeBudgetLimit;
     serverCart.status = safeClientStatus;
     serverCart.isOfflineCreated = true;
     serverCart.syncedAt = new Date().toISOString();
@@ -2715,7 +3032,15 @@ function generateListShareCode(existingLists: ShoppingList[]): string {
 }
 
 function enrichListItemFromBranch(
-  rawItem: { barcode?: string; productName: string; quantity?: number; aisle?: string; shelf?: string; estimatedPrice?: number },
+  rawItem: {
+    barcode?: string;
+    productName: string;
+    category?: string;
+    quantity?: number;
+    aisle?: string;
+    shelf?: string;
+    estimatedPrice?: number;
+  },
   branchId: string | undefined,
   data: ReturnType<typeof db.getRaw>
 ) {
@@ -2725,19 +3050,29 @@ function enrichListItemFromBranch(
     product = branch
       ? data.products.find((p) => p.supermarketId === branch.supermarketId && p.barcode === rawItem.barcode)
       : data.products.find((p) => p.barcode === rawItem.barcode);
+  } else if (branch && rawItem.productName) {
+    const targetName = rawItem.productName.trim().toLowerCase();
+    product = data.products.find(
+      (p) => p.supermarketId === branch.supermarketId && p.name.trim().toLowerCase() === targetName
+    );
   }
   const bp = branch && product
     ? data.branchProducts.find((b) => b.branchId === branch.id && b.productId === product!.id)
     : undefined;
 
+  const resolvedAisle = (bp?.aisleOverride || product?.aisle || rawItem.aisle || '').trim();
+  const resolvedShelf = (bp?.shelfOverride || product?.shelf || rawItem.shelf || '').trim();
+  const resolvedCategory = (product?.category || rawItem.category || '').trim();
+
   return {
     id: `li_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
     barcode: rawItem.barcode || product?.barcode,
     productName: product?.name || rawItem.productName,
+    category: resolvedCategory || undefined,
     quantity: Math.max(1, Math.round(Number(rawItem.quantity) || 1)),
     completed: false,
-    aisle: bp?.aisleOverride || product?.aisle || rawItem.aisle || 'Aisle 1',
-    shelf: bp?.shelfOverride || product?.shelf || rawItem.shelf || 'Shelf A',
+    aisle: resolvedAisle || undefined,
+    shelf: resolvedShelf || undefined,
     estimatedPrice: bp?.priceOverride ?? product?.basePrice ?? rawItem.estimatedPrice ?? 0,
   };
 }
@@ -2997,6 +3332,10 @@ app.post('/api/shopper/shopping-lists/convert-to-cart', (req, res) => {
   );
 
   if (!activeCart) {
+    const defaultCap =
+      user?.role === 'shopper' && typeof user.defaultBudgetKes === 'number' && user.defaultBudgetKes > 0
+        ? user.defaultBudgetKes
+        : null;
     activeCart = {
       id: `cart_${Date.now()}`,
       shortCode: generateShortCode(branchId),
@@ -3010,7 +3349,8 @@ app.post('/api/shopper/shopping-lists/convert-to-cart', (req, res) => {
       subtotal: 0,
       totalDiscount: 0,
       finalTotal: 0,
-      budgetLimit: null,
+      budgetLimit: defaultCap,
+      budgetSummary: computeBudgetSummary(0, defaultCap),
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };

@@ -1804,7 +1804,7 @@ export const OwnerView: React.FC = () => {
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className="text-xs font-semibold block mb-1">
-                    {t.aisle}
+                    {t.aisleOptional}
                   </label>
                   <input
                     type="text"
@@ -1815,7 +1815,7 @@ export const OwnerView: React.FC = () => {
                         newAisle: e.target.value,
                       })
                     }
-                    placeholder="e.g. 3"
+                    placeholder="e.g. 3 (blank = category/Other)"
                     className="w-full h-10 px-3 rounded-xl border text-xs font-mono"
                   />
                 </div>

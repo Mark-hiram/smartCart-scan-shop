@@ -61,6 +61,7 @@ export interface User {
   tempPasswordExpiresAt?: number | null;
   tempPasswordConsumed?: boolean;
   isPermanentAdmin?: boolean;
+  defaultBudgetKes?: number | null;
   createdAt: string;
 }
 
@@ -144,6 +145,41 @@ export interface EnrichedProduct extends Product {
   isLowStock: boolean;
   activePromotion?: Promotion | null;
   isFavourite?: boolean;
+}
+
+export interface PriceCheckProductInfo {
+  id: string;
+  supermarketId: string;
+  barcode: string;
+  barcodeFormat: BarcodeFormat;
+  name: string;
+  nameSwahili?: string;
+  category: string;
+  basePrice: number;
+  unit: string;
+  aisle: string;
+  shelf: string;
+  aisleShelf: string;
+  imageUrl?: string;
+}
+
+export interface PriceCheckBranchCompareItem {
+  branchId: string;
+  branchName: string;
+  city: string;
+  branchPrice: number;
+  finalPrice: number;
+  activePromotion: Promotion | null;
+  isCurrentBranch: boolean;
+}
+
+export interface PriceCheckResponse {
+  product: PriceCheckProductInfo;
+  branchPrice: number;
+  effectivePrice: number;
+  finalPrice: number;
+  activePromotion: Promotion | null;
+  compareBranches: PriceCheckBranchCompareItem[];
 }
 
 export type PromotionType = 'percent_off' | 'fixed_price' | 'bundle';
@@ -334,6 +370,17 @@ export interface RewardRedemptionOrder {
   updatedAt: string;
 }
 
+export type BudgetAlertLevel = 'none' | 'normal' | 'near' | 'over';
+
+export interface CartBudgetSummary {
+  limit: number | null;
+  spent: number;
+  remaining: number | null;
+  overBy: number;
+  percent: number | null;
+  level: BudgetAlertLevel;
+}
+
 export interface Cart {
   id: string;
   shortCode: string; // e.g. "SC-8429"
@@ -348,6 +395,7 @@ export interface Cart {
   totalDiscount: number;
   finalTotal: number;
   budgetLimit?: number | null;
+  budgetSummary?: CartBudgetSummary;
   loyaltyPointsEarned?: number;
   loyaltyEvaluated?: boolean;
   isOfflineCreated?: boolean;
@@ -493,6 +541,7 @@ export interface ShoppingListItem {
   id: string;
   barcode?: string;
   productName: string;
+  category?: string;
   quantity: number;
   completed: boolean;
   aisle?: string;

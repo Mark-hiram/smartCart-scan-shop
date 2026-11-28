@@ -16,7 +16,8 @@
     "test:ai-email": "tsx scripts/ai-email-test.ts",
     "test:support-reset": "tsx scripts/support-reset-test.ts",
     "test:welcome-goodbye": "tsx scripts/welcome-goodbye-test.ts",
-    "test:analytics": "tsx scripts/analytics-test.ts"
+    "test:analytics": "tsx scripts/analytics-test.ts",
+    "test:shopper-features": "tsx scripts/shopper-features-test.ts"
   },
   "dependencies": {
     "@google/genai": "^3.6.1",

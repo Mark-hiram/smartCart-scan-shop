@@ -1,6 +1,6 @@
 // Copyright (c) 2026 SmartCart Owner. All rights reserved.
 
-import { Cart, EnrichedProduct } from '../types';
+import { Cart, EnrichedProduct, ShoppingList, ShoppingListItem } from '../types';
 
 export type OfflineQueueActionType =
   | 'scan_add'
@@ -8,7 +8,9 @@ export type OfflineQueueActionType =
   | 'set_budget'
   | 'clear_cart'
   | 'lock_cart'
-  | 'finish_cart';
+  | 'finish_cart'
+  | 'list_create'
+  | 'list_update';
 
 export interface OfflineQueueOperation {
   id: string;
@@ -21,6 +23,10 @@ export interface OfflineQueueOperation {
   itemId?: string;
   quantity?: number;
   budgetLimit?: number | null;
+  listId?: string;
+  listTitle?: string;
+  listCanEdit?: boolean;
+  listItems?: ShoppingListItem[];
   createdAt: string;
 }
 
@@ -40,15 +46,23 @@ interface ProductCacheRecord {
   updatedAt: string;
 }
 
+interface ShoppingListsCacheRecord {
+  callerId: string;
+  lists: ShoppingList[];
+  updatedAt: string;
+}
+
 const DB_NAME = 'smartcart_offline_db';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE_QUEUE = 'scan_queue';
 const STORE_CARTS = 'cart_snapshots';
 const STORE_PRODUCTS = 'product_cache';
+const STORE_LISTS = 'shopping_lists_cache';
 
 const FALLBACK_QUEUE_KEY = 'smartcart_idb_fallback_queue';
 const FALLBACK_CARTS_KEY = 'smartcart_idb_fallback_carts';
 const FALLBACK_PRODUCTS_KEY = 'smartcart_idb_fallback_products';
+const FALLBACK_LISTS_KEY = 'smartcart_idb_fallback_lists';
 
 let seqCounter = 0;
 
@@ -81,6 +95,9 @@ function openOfflineDB(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(STORE_PRODUCTS)) {
         db.createObjectStore(STORE_PRODUCTS, { keyPath: 'branchId' });
+      }
+      if (!db.objectStoreNames.contains(STORE_LISTS)) {
+        db.createObjectStore(STORE_LISTS, { keyPath: 'callerId' });
       }
     };
 
@@ -337,3 +354,64 @@ export async function loadOfflineBranchProducts(
 
   return null;
 }
+
+export async function saveOfflineShoppingLists(
+  callerId: string,
+  lists: ShoppingList[]
+): Promise<void> {
+  const record: ShoppingListsCacheRecord = {
+    callerId,
+    lists,
+    updatedAt: new Date().toISOString(),
+  };
+
+  try {
+    localStorage.setItem(`offline_lists_${callerId}`, JSON.stringify(lists));
+  } catch {
+    // Ignore storage quota failures
+  }
+
+  try {
+    const db = await openOfflineDB();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE_LISTS, 'readwrite');
+      tx.objectStore(STORE_LISTS).put(record);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+  } catch {
+    const map = readFallbackJson<Record<string, ShoppingListsCacheRecord>>(FALLBACK_LISTS_KEY, {});
+    map[callerId] = record;
+    writeFallbackJson(FALLBACK_LISTS_KEY, map);
+  }
+}
+
+export async function loadOfflineShoppingLists(
+  callerId: string
+): Promise<ShoppingList[] | null> {
+  try {
+    const db = await openOfflineDB();
+    const record = await new Promise<ShoppingListsCacheRecord | undefined>((resolve, reject) => {
+      const tx = db.transaction(STORE_LISTS, 'readonly');
+      const req = tx.objectStore(STORE_LISTS).get(callerId);
+      req.onsuccess = () => resolve(req.result as ShoppingListsCacheRecord | undefined);
+      req.onerror = () => reject(req.error);
+    });
+    db.close();
+    if (record?.lists) return record.lists;
+  } catch {
+    const map = readFallbackJson<Record<string, ShoppingListsCacheRecord>>(FALLBACK_LISTS_KEY, {});
+    if (map[callerId]?.lists) return map[callerId].lists;
+  }
+
+  try {
+    const legacyRaw = localStorage.getItem(`offline_lists_${callerId}`);
+    if (legacyRaw) return JSON.parse(legacyRaw) as ShoppingList[];
+  } catch {
+    // Ignore parse errors
+  }
+
+  return null;
+}
+

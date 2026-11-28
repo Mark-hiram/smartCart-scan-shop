@@ -264,7 +264,7 @@ async function runTests() {
       assert.ok(html.includes('Thank you for shopping with Smart Cart. Goodbye and see you soon!'));
       assert.ok(html.includes('SC-7721'));
       assert.ok(html.includes('390'));
-      assert.ok(html.includes('Show this code to the cashier to pay at the till. Smart Cart does not take payment.'));
+      assert.ok(html.includes('Show this code to the cashier and pay at the till (cash, card or M-Pesa at the cashier). Smart Cart does not take payment.'));
       assert.ok(
         html.includes("we&#x27;ll finish this when you&#x27;re back online") ||
           html.includes("we'll finish this when you're back online")

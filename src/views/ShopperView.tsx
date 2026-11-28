@@ -28,8 +28,16 @@ import {
   loadOfflineCartSnapshot,
   saveOfflineBranchProducts,
   loadOfflineBranchProducts,
+  saveOfflineShoppingLists,
+  loadOfflineShoppingLists,
   isNetworkOfflineError,
 } from '../utils/offlineQueue';
+import {
+  computeBudgetSummary,
+  doesProductMatchListItem,
+  formatAisleDisplayLabel,
+  groupAndOrderShoppingListItems,
+} from '../utils/shoppingHelpers';
 import {
   EnrichedProduct,
   Cart,
@@ -42,6 +50,9 @@ import {
   LoyaltyPointsSummary,
   ProductHistoryEntry,
   GoodbyeSummaryData,
+  PriceCheckProductInfo,
+  PriceCheckBranchCompareItem,
+  BudgetAlertLevel,
 } from '../types';
 import {
   ShoppingBag,
@@ -78,6 +89,7 @@ import {
   UserCheck,
   Award,
   ArrowLeft,
+  ShieldAlert,
 } from 'lucide-react';
 import { useBodyScrollLock } from '../hooks/useBodyScrollLock';
 
@@ -121,16 +133,23 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
   const [isFinishingCart, setIsFinishingCart] = useState(false);
   const [lastClosedCartId, setLastClosedCartId] = useState<string | null>(null);
   const [priceCheckData, setPriceCheckData] = useState<{
-    product: Product;
-    effectivePrice: number;
-    stock: number;
-    isLowStock: boolean;
+    product: PriceCheckProductInfo;
+    branchPrice: number;
+    finalPrice: number;
     promotion: Promotion | null;
+    compareBranches: PriceCheckBranchCompareItem[];
   } | null>(null);
 
-  // Budget limit input state (Phase 2 Daily Spending Cap)
+  // Budget limit & default budget state
   const [budgetInput, setBudgetInput] = useState<string>('');
-  const [isEditingBudget, setIsEditingBudget] = useState(false);
+  const [defaultBudgetKes, setDefaultBudgetKes] = useState<number | null>(null);
+  const [budgetToastWarning, setBudgetToastWarning] = useState<{
+    level: 'near' | 'over';
+    title: string;
+    detail: string;
+  } | null>(null);
+  const prevBudgetKeyRef = useRef<string | null>(null);
+  const warnedBudgetLevelsRef = useRef<{ near: boolean; over: boolean }>({ near: false, over: false });
 
   // Shopper history, receipts & lists
   const [history, setHistory] = useState<Cart[]>([]);
@@ -157,7 +176,8 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
   const [listNotice, setListNotice] = useState<string | null>(null);
   const [listError, setListError] = useState<string | null>(null);
   const [searchItemForList, setSearchItemForList] = useState('');
-  const [listSortByAisle, setListSortByAisle] = useState(false);
+  const [listSortByAisle, setListSortByAisle] = useState(true);
+  const [autoTickNotice, setAutoTickNotice] = useState<string | null>(null);
   const [reAddSuccessMsg, setReAddSuccessMsg] = useState<string | null>(null);
   const [copyShareSuccess, setCopyShareSuccess] = useState<string | null>(null);
 
@@ -334,8 +354,75 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
     }
   };
 
-  // Load shopping lists (owned + joined shared lists)
+  // Load saved default budget from server (signed-in shoppers) or localStorage fallback
+  const loadDefaultBudget = async () => {
+    try {
+      const savedLocal = localStorage.getItem(`smartcart_default_budget_${currentCallerId}`);
+      if (savedLocal) {
+        const parsed = Number(savedLocal);
+        if (Number.isFinite(parsed) && parsed > 0) {
+          setDefaultBudgetKes(parsed);
+        }
+      } else if (typeof user?.defaultBudgetKes === 'number' && user.defaultBudgetKes > 0) {
+        setDefaultBudgetKes(user.defaultBudgetKes);
+      }
+    } catch {
+      if (typeof user?.defaultBudgetKes === 'number' && user.defaultBudgetKes > 0) {
+        setDefaultBudgetKes(user.defaultBudgetKes);
+      }
+    }
+
+    if (user?.role === 'shopper' && token && navigator.onLine) {
+      try {
+        const res = await fetch('/api/shopper/default-budget', {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const serverDefault =
+            typeof data?.defaultBudgetKes === 'number' && data.defaultBudgetKes > 0
+              ? data.defaultBudgetKes
+              : null;
+          setDefaultBudgetKes(serverDefault);
+          try {
+            if (serverDefault) {
+              localStorage.setItem(
+                `smartcart_default_budget_${currentCallerId}`,
+                String(serverDefault)
+              );
+            } else {
+              localStorage.removeItem(`smartcart_default_budget_${currentCallerId}`);
+            }
+          } catch {}
+        }
+      } catch {}
+    }
+  };
+
+  // Load shopping lists (owned + joined shared lists, with offline IndexedDB cache support)
   const loadShoppingLists = async () => {
+    const cached = await loadOfflineShoppingLists(currentCallerId);
+    const pendingListOps = branch
+      ? (await getOfflineQueue(branch.id, currentCallerId)).some(
+          (op) => op.action === 'list_create' || op.action === 'list_update'
+        )
+      : false;
+
+    if (cached && cached.length > 0 && (!navigator.onLine || pendingListOps || shoppingLists.length === 0)) {
+      setShoppingLists(cached);
+      setSelectedList((prev) => {
+        if (prev) {
+          const refreshed = cached.find((l) => l.id === prev.id);
+          if (refreshed) return refreshed;
+        }
+        return cached[0] || null;
+      });
+    }
+
+    if (!navigator.onLine || pendingListOps) {
+      return;
+    }
+
     try {
       const res = await fetch('/api/shopper/shopping-lists', {
         headers: getGuestHeaders(),
@@ -343,6 +430,7 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
       if (res.ok) {
         const data: ShoppingList[] = await res.json();
         setShoppingLists(data);
+        await saveOfflineShoppingLists(currentCallerId, data);
         setSelectedList((prev) => {
           if (prev) {
             const refreshed = data.find((l) => l.id === prev.id);
@@ -351,7 +439,11 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
           return data.length > 0 ? data[0] : null;
         });
       }
-    } catch (e) {}
+    } catch {
+      if (cached) {
+        setShoppingLists(cached);
+      }
+    }
   };
 
   // Fetch completed/verified transaction receipts for logged-in shopper
@@ -471,6 +563,8 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
           ? cartRef.current
           : null;
       let completedCount = 0;
+      let syncedAnyListOp = false;
+      const offlineListIdMap = new Map<string, string>();
 
       const ensureServerCart = async (): Promise<Cart | null> => {
         if (workingCart && !workingCart.id.startsWith('offline-cart-')) {
@@ -492,6 +586,7 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
           }
 
           let res: Response | null = null;
+          let isListMutation = false;
 
           if (op.action === 'scan_add' && op.barcode) {
             const serverCart = workingCart && !workingCart.id.startsWith('offline-cart-') ? workingCart : null;
@@ -564,28 +659,65 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
                 body: JSON.stringify({ cartId: serverCart.id }),
               });
             }
+          } else if (op.action === 'list_create') {
+            isListMutation = true;
+            res = await fetch('/api/shopper/shopping-lists', {
+              method: 'POST',
+              headers: getGuestHeaders(),
+              body: JSON.stringify({
+                title: op.listTitle || 'Shopping List',
+                canEdit: op.listCanEdit ?? true,
+                branchId: activeBranchId,
+                sourceType: 'blank',
+                items: op.listItems || [],
+              }),
+            });
+          } else if (op.action === 'list_update') {
+            isListMutation = true;
+            const resolvedListId = (op.listId && offlineListIdMap.get(op.listId)) || op.listId;
+            if (resolvedListId && !resolvedListId.startsWith('offline-list-')) {
+              res = await fetch(`/api/shopper/shopping-lists/${resolvedListId}`, {
+                method: 'PUT',
+                headers: getGuestHeaders(),
+                body: JSON.stringify({
+                  items: op.listItems,
+                  canEdit: op.listCanEdit,
+                  title: op.listTitle,
+                }),
+              });
+            } else {
+              await removeOfflineQueueItem(op.id);
+            }
           }
 
           if (res) {
             if (res.ok) {
               const payload = await res.json();
-              const updatedCart: Cart = payload?.cart ? payload.cart : payload;
-              workingCart = updatedCart;
-              if (op.action === 'finish_cart') {
-                setLastClosedCartId(updatedCart.id);
-                if (payload?.summary && onOfflineFinishSynced) {
-                  onOfflineFinishSynced({
-                    ...payload.summary,
-                    pendingOfflineFinish: false,
-                    source: 'finish_button',
-                  });
+              if (isListMutation) {
+                syncedAnyListOp = true;
+                if (op.action === 'list_create' && op.listId && payload?.id) {
+                  offlineListIdMap.set(op.listId, payload.id);
                 }
-                setCart(null);
+                await removeOfflineQueueItem(op.id);
               } else {
-                setCart(updatedCart);
+                const updatedCart: Cart = payload?.cart ? payload.cart : payload;
+                workingCart = updatedCart;
+                if (op.action === 'finish_cart') {
+                  setLastClosedCartId(updatedCart.id);
+                  if (payload?.summary && onOfflineFinishSynced) {
+                    onOfflineFinishSynced({
+                      ...payload.summary,
+                      pendingOfflineFinish: false,
+                      source: 'finish_button',
+                    });
+                  }
+                  setCart(null);
+                } else {
+                  setCart(updatedCart);
+                }
+                await saveOfflineCartSnapshot(activeBranchId, callerIdSnapshot, updatedCart);
+                await removeOfflineQueueItem(op.id);
               }
-              await saveOfflineCartSnapshot(activeBranchId, callerIdSnapshot, updatedCart);
-              await removeOfflineQueueItem(op.id);
             } else if (res.status >= 400 && res.status < 500) {
               // Remove permanently invalid queued operation so queue does not stall
               await removeOfflineQueueItem(op.id);
@@ -609,6 +741,9 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
             await saveOfflineCartSnapshot(activeBranchId, callerIdSnapshot, workingCart);
           } else {
             await loadCart();
+          }
+          if (syncedAnyListOp) {
+            await loadShoppingLists();
           }
           setSyncStatus('synced');
           setSyncNotice(t.cartSyncSuccess);
@@ -681,7 +816,8 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
         subtotal: 0,
         totalDiscount: 0,
         finalTotal: 0,
-        budgetLimit: null,
+        budgetLimit: defaultBudgetKes,
+        budgetSummary: computeBudgetSummary(0, defaultBudgetKes),
         isOfflineCreated: true,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
@@ -711,7 +847,7 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
       await loadCart();
       setActiveTab('scan');
     }
-  }, [branch?.id, currentCallerId, user?.name, user?.phone, isOffline, token]);
+  }, [branch?.id, currentCallerId, user?.name, user?.phone, isOffline, token, defaultBudgetKes]);
 
   useEffect(() => {
     if (newCartNonce > 0) {
@@ -720,6 +856,7 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
   }, [newCartNonce]);
 
   useEffect(() => {
+    void loadDefaultBudget();
     if (user && token) {
       loadReceipts();
       loadHistory();
@@ -750,6 +887,7 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
       }
 
       if (!cancelled) {
+        loadDefaultBudget();
         loadFavourites();
         loadShoppingLists();
         loadHistory();
@@ -794,12 +932,76 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
     return () => window.removeEventListener('hashchange', checkHashForSharedList);
   }, [user?.id, token]);
 
+  // Helper: auto-tick matching shopping list items whenever a product is scanned/added to cart
+  const autoTickMatchingListItems = async (
+    barcode: string,
+    productName: string,
+    enqueueOfflineListUpdates: boolean
+  ) => {
+    if (!shoppingLists.length) return;
+    const matchedItemNames: string[] = [];
+    const updatedListsToQueue: ShoppingList[] = [];
+
+    const nextLists = shoppingLists.map((list) => {
+      const canModify = list.userId === currentCallerId || list.canEdit;
+      if (!canModify) return list;
+      let changed = false;
+      const nextItems = list.items.map((it) => {
+        if (!it.completed && doesProductMatchListItem(it, { barcode, name: productName })) {
+          changed = true;
+          matchedItemNames.push(it.productName);
+          return { ...it, completed: true };
+        }
+        return it;
+      });
+      if (!changed) return list;
+      const updatedList: ShoppingList = {
+        ...list,
+        items: nextItems,
+        updatedAt: new Date().toISOString(),
+      };
+      updatedListsToQueue.push(updatedList);
+      return updatedList;
+    });
+
+    if (updatedListsToQueue.length === 0) return;
+
+    setShoppingLists(nextLists);
+    if (selectedList) {
+      const refreshedSelected = nextLists.find((l) => l.id === selectedList.id);
+      if (refreshedSelected) setSelectedList(refreshedSelected);
+    }
+    await saveOfflineShoppingLists(currentCallerId, nextLists);
+
+    if (enqueueOfflineListUpdates && branch) {
+      for (const ul of updatedListsToQueue) {
+        await enqueueOfflineOperation({
+          branchId: branch.id,
+          callerId: currentCallerId,
+          action: 'list_update',
+          listId: ul.id,
+          listItems: ul.items,
+        });
+      }
+      setQueuedOps(await getOfflineQueue(branch.id, currentCallerId));
+      setSyncStatus('queued');
+    }
+
+    const previewNames = Array.from(new Set(matchedItemNames)).slice(0, 2).join(', ');
+    setAutoTickNotice(`${t.autoTickedListNotice} ${previewNames}`);
+    setTimeout(() => setAutoTickNotice(null), 3500);
+  };
+
   // Local helper: apply offline scanned/voice item to local cart snapshot & IndexedDB queue
   const queueOfflineProductAdd = async (
     product: EnrichedProduct,
     quantityToAdd: number
   ): Promise<Cart> => {
     const activeBranch = branch!;
+    const resolvedBudget =
+      cartRef.current?.budgetLimit ??
+      (budgetInput ? parseFloat(budgetInput) : defaultBudgetKes);
+
     const baseCart: Cart = cartRef.current
       ? { ...cartRef.current, items: cartRef.current.items.map((it) => ({ ...it })) }
       : {
@@ -815,7 +1017,7 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
           subtotal: 0,
           totalDiscount: 0,
           finalTotal: 0,
-          budgetLimit: budgetInput ? parseFloat(budgetInput) : null,
+          budgetLimit: resolvedBudget,
           isOfflineCreated: true,
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
@@ -854,6 +1056,7 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
     baseCart.subtotal = subtotal;
     baseCart.finalTotal = finalTotal;
     baseCart.totalDiscount = Math.max(0, subtotal - finalTotal);
+    baseCart.budgetSummary = computeBudgetSummary(finalTotal, baseCart.budgetLimit);
     baseCart.isOfflineCreated = true;
     baseCart.updatedAt = new Date().toISOString();
 
@@ -870,12 +1073,13 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
     const nextQueue = await getOfflineQueue(activeBranch.id, currentCallerId);
     setQueuedOps(nextQueue);
     setSyncStatus('queued');
+    await autoTickMatchingListItems(product.barcode, product.name, true);
     triggerScanSuccessHaptic();
     return baseCart;
   };
 
-  // Handle scanned barcode (Works seamlessly online and offline via IndexedDB queue)
-  const handleBarcodeScanned = async (barcode: string) => {
+  // Dedicated Add-to-Cart action by barcode (works online & offline regardless of activeTab)
+  const addBarcodeToCart = async (barcode: string, quantity = 1) => {
     if (!branch) {
       onOpenStoreModal();
       return;
@@ -883,69 +1087,26 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
 
     const localProd = products.find((p) => p.barcode === barcode);
 
-    if (activeTab === 'price_check') {
-      if (localProd) {
-        setPriceCheckData({
-          product: localProd,
-          effectivePrice: localProd.effectivePrice,
-          stock: localProd.stock,
-          isLowStock: localProd.isLowStock,
-          promotion: localProd.activePromotion || null,
-        });
-        setIsPriceCheckModalOpen(true);
-        triggerPriceCheckHaptic();
-        return;
-      }
-
-      if (!isOffline && navigator.onLine) {
-        try {
-          const res = await fetch('/api/shopper/scan-lookup', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ branchId: branch.id, barcode }),
-          });
-          const data = await res.json();
-          if (res.ok) {
-            setPriceCheckData({
-              product: data.product,
-              effectivePrice: data.effectivePrice,
-              stock: data.stock,
-              isLowStock: data.isLowStock,
-              promotion: data.activePromotion,
-            });
-            setIsPriceCheckModalOpen(true);
-            triggerPriceCheckHaptic();
-            return;
-          }
-        } catch {
-          // Network failure handled below
-        }
-      }
-      showScanError(t.noProductFound);
-      return;
-    }
-
-    // Offline or pending queue: persist scanned item into IndexedDB queue immediately
     if (isOffline || !navigator.onLine || queuedOps.length > 0) {
       if (!localProd) {
         showScanError(t.noProductFound);
         return;
       }
-      await queueOfflineProductAdd(localProd, 1);
+      await queueOfflineProductAdd(localProd, quantity);
       return;
     }
 
-    // Online Add to Cart (with seamless network-failure fallback to IndexedDB queue)
     try {
       const res = await fetch('/api/shopper/cart/add', {
         method: 'POST',
         headers: getGuestHeaders(),
-        body: JSON.stringify({ branchId: branch.id, barcode, quantity: 1, cartId: cart?.id }),
+        body: JSON.stringify({ branchId: branch.id, barcode, quantity, cartId: cart?.id }),
       });
       const updatedCart = await res.json();
       if (res.ok) {
         setCart(updatedCart);
         await saveOfflineCartSnapshot(branch.id, currentCallerId, updatedCart);
+        await autoTickMatchingListItems(barcode, localProd?.name || '', false);
         triggerScanSuccessHaptic();
       } else {
         showScanError(updatedCart.error || t.noProductFound);
@@ -953,11 +1114,100 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
     } catch (err: any) {
       if (isNetworkOfflineError(err) && localProd) {
         setIsOffline(true);
-        await queueOfflineProductAdd(localProd, 1);
+        await queueOfflineProductAdd(localProd, quantity);
       } else {
         showScanError(err?.message || t.noProductFound);
       }
     }
+  };
+
+  // Price-check & branch-compare lookup (strictly signed-in shopper only, never adds to cart)
+  const runPriceCheckLookup = async (barcode: string) => {
+    if (!branch) {
+      onOpenStoreModal();
+      return;
+    }
+
+    if (!user || user.role !== 'shopper' || !token) {
+      showScanError(t.priceCheckSignInRequired);
+      return;
+    }
+
+    const localProd = products.find((p) => p.barcode === barcode);
+
+    if (!isOffline && navigator.onLine) {
+      try {
+        const res = await fetch('/api/shopper/price-check', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ branchId: branch.id, barcode }),
+        });
+        const data = await res.json();
+        if (res.ok) {
+          setPriceCheckData({
+            product: data.product,
+            branchPrice: data.branchPrice,
+            finalPrice: data.finalPrice,
+            promotion: data.activePromotion || null,
+            compareBranches: Array.isArray(data.compareBranches) ? data.compareBranches : [],
+          });
+          setIsPriceCheckModalOpen(true);
+          triggerPriceCheckHaptic();
+          return;
+        } else {
+          showScanError(data?.error || t.noProductFound);
+          return;
+        }
+      } catch {
+        // Fallback to cached local catalog if offline
+      }
+    }
+
+    if (localProd) {
+      const strippedProduct: PriceCheckProductInfo = {
+        id: localProd.id,
+        supermarketId: localProd.supermarketId,
+        barcode: localProd.barcode,
+        barcodeFormat: localProd.barcodeFormat,
+        name: localProd.name,
+        unit: localProd.unit,
+        basePrice: localProd.basePrice,
+        category: localProd.category,
+        aisle: localProd.aisle,
+        shelf: localProd.shelf,
+        aisleShelf: localProd.aisleShelf,
+      };
+      setPriceCheckData({
+        product: strippedProduct,
+        branchPrice: localProd.branchPrice ?? localProd.effectivePrice,
+        finalPrice: localProd.effectivePrice,
+        promotion: localProd.activePromotion || null,
+        compareBranches: [],
+      });
+      setIsPriceCheckModalOpen(true);
+      triggerPriceCheckHaptic();
+      return;
+    }
+
+    showScanError(t.noProductFound);
+  };
+
+  // Handle scanned barcode (Routes to Price Check vs Cart Add seamlessly online & offline)
+  const handleBarcodeScanned = async (barcode: string) => {
+    if (!branch) {
+      onOpenStoreModal();
+      return;
+    }
+
+    if (activeTab === 'price_check') {
+      await runPriceCheckLookup(barcode);
+      return;
+    }
+
+    await addBarcodeToCart(barcode, 1);
   };
 
   // Handle Web Speech API voice commands (e.g. "Add milk to cart", "Add 2 bread")
@@ -978,15 +1228,10 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
     }
 
     if (command.action === 'price_check') {
-      setPriceCheckData({
-        product: matchedProduct,
-        effectivePrice: matchedProduct.effectivePrice,
-        stock: matchedProduct.stock,
-        isLowStock: matchedProduct.isLowStock,
-        promotion: matchedProduct.activePromotion || null,
-      });
-      setIsPriceCheckModalOpen(true);
-      triggerPriceCheckHaptic();
+      if (!user || user.role !== 'shopper' || !token) {
+        return { ok: false, message: t.priceCheckSignInRequired };
+      }
+      await runPriceCheckLookup(matchedProduct.barcode);
       return {
         ok: true,
         message: `${matchedProduct.name} — KES ${matchedProduct.effectivePrice.toLocaleString()}`,
@@ -1036,6 +1281,7 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
       if (res.ok) {
         setCart(updatedCart);
         await saveOfflineCartSnapshot(branch.id, currentCallerId, updatedCart);
+        await autoTickMatchingListItems(matchedProduct.barcode, matchedProduct.name, false);
         triggerScanSuccessHaptic();
         return {
           ok: true,
@@ -1137,11 +1383,39 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
     }
   };
 
-  // Update budget limit (Phase 2 Daily Spending Cap) via BudgetAlert component
-  const handleUpdateBudgetLimit = async (limit: number | null) => {
+  // Update budget limit & optional saved default budget via BudgetAlert
+  const handleUpdateBudgetLimit = async (limit: number | null, saveAsDefault = false) => {
+    if (saveAsDefault) {
+      setDefaultBudgetKes(limit);
+      try {
+        if (limit && limit > 0) {
+          localStorage.setItem(`smartcart_default_budget_${currentCallerId}`, String(limit));
+        } else {
+          localStorage.removeItem(`smartcart_default_budget_${currentCallerId}`);
+        }
+      } catch {}
+
+      if (user?.role === 'shopper' && token && navigator.onLine) {
+        try {
+          await fetch('/api/shopper/default-budget', {
+            method: 'PUT',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify({ defaultBudgetKes: limit }),
+          });
+        } catch {}
+      }
+    }
+
     if (!cart) return;
     const branchKey = branch?.id || cart.branchId;
-    const updatedCart = { ...cart, budgetLimit: limit };
+    const updatedCart: Cart = {
+      ...cart,
+      budgetLimit: limit,
+      budgetSummary: computeBudgetSummary(cart.finalTotal, limit),
+    };
     setCart(updatedCart);
     await saveOfflineCartSnapshot(branchKey, currentCallerId, updatedCart);
 
@@ -1162,11 +1436,16 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
     }
 
     try {
-      await fetch('/api/shopper/cart/budget', {
+      const res = await fetch('/api/shopper/cart/budget', {
         method: 'POST',
         headers: getGuestHeaders(),
         body: JSON.stringify({ cartId: cart.id, budgetLimit: limit }),
       });
+      if (res.ok) {
+        const serverCart: Cart = await res.json();
+        setCart(serverCart);
+        await saveOfflineCartSnapshot(branchKey, currentCallerId, serverCart);
+      }
     } catch (err) {
       if (isNetworkOfflineError(err)) {
         setIsOffline(true);
@@ -1414,7 +1693,7 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
     setShowCreateListModal(true);
   };
 
-  // Create new shopping list (blank, from previous purchase, or from product history)
+  // Create new shopping list (blank, from previous purchase, or from product history; works offline too)
   const handleCreateList = async (e: React.FormEvent) => {
     e.preventDefault();
     setListError(null);
@@ -1429,6 +1708,70 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
     }
     if (createListMode === 'blank' && !newListTitle.trim()) {
       setListError(t.listName);
+      return;
+    }
+
+    const createLocallyOffline = async () => {
+      const resolvedTitle =
+        newListTitle.trim() ||
+        (createListMode === 'previous_purchase' ? 'Restock List' : 'My Shopping List');
+      const nowIso = new Date().toISOString();
+      const offlineItems: ShoppingListItem[] =
+        createListMode === 'product_history'
+          ? selectedHistoryBarcodes.map((bc) => {
+              const entry = productHistory.find((p) => p.barcode === bc);
+              return {
+                id: `li-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                barcode: bc,
+                productName: entry?.name || bc,
+                quantity: 1,
+                completed: false,
+                aisle: entry?.aisle || '',
+                shelf: entry?.shelf || '',
+                estimatedPrice: entry?.currentBranchPrice || 0,
+              };
+            })
+          : [];
+
+      const offlineList: ShoppingList = {
+        id: `offline-list-${Date.now()}`,
+        userId: currentCallerId,
+        title: resolvedTitle,
+        shareCode: `OFF-${Math.floor(1000 + Math.random() * 9000)}`,
+        canEdit: newListCanEdit,
+        collaboratorIds: [],
+        sourceType: createListMode,
+        items: offlineItems,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
+      const nextLists = [offlineList, ...shoppingLists];
+      setShoppingLists(nextLists);
+      setSelectedList(offlineList);
+      await saveOfflineShoppingLists(currentCallerId, nextLists);
+      if (branch) {
+        await enqueueOfflineOperation({
+          branchId: branch.id,
+          callerId: currentCallerId,
+          action: 'list_create',
+          listId: offlineList.id,
+          listTitle: resolvedTitle,
+          listCanEdit: newListCanEdit,
+          listItems: offlineItems,
+        });
+        setQueuedOps(await getOfflineQueue(branch.id, currentCallerId));
+        setSyncStatus('queued');
+      }
+      setNewListTitle('');
+      setSelectedHistoryBarcodes([]);
+      setQuickHistorySelection([]);
+      setShowCreateListModal(false);
+      setActiveTab('lists');
+      setListsSubTab('lists');
+    };
+
+    if (isOffline || !navigator.onLine) {
+      await createLocallyOffline();
       return;
     }
 
@@ -1459,7 +1802,9 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
         return;
       }
 
-      setShoppingLists((prev) => [created, ...prev]);
+      const nextLists = [created, ...shoppingLists];
+      setShoppingLists(nextLists);
+      await saveOfflineShoppingLists(currentCallerId, nextLists);
       setSelectedList(created);
       setNewListTitle('');
       setSelectedHistoryBarcodes([]);
@@ -1468,18 +1813,43 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
       setActiveTab('lists');
       setListsSubTab('lists');
     } catch (e: any) {
-      setListError(e.message || 'Could not create list.');
+      if (isNetworkOfflineError(e)) {
+        setIsOffline(true);
+        await createLocallyOffline();
+      } else {
+        setListError(e.message || 'Could not create list.');
+      }
     } finally {
       setIsCreatingList(false);
     }
   };
 
-  // Persist list updates (handles owner / collaborator permissions cleanly)
+  // Persist list updates (handles offline IndexedDB queue + online owner/collaborator permissions)
   const persistSelectedListUpdate = async (
     listId: string,
     payload: { items?: ShoppingListItem[]; canEdit?: boolean; title?: string }
   ) => {
     setListError(null);
+    const applyOfflineListMutation = async () => {
+      if (!branch) return;
+      await enqueueOfflineOperation({
+        branchId: branch.id,
+        callerId: currentCallerId,
+        action: 'list_update',
+        listId,
+        listItems: payload.items,
+        listCanEdit: payload.canEdit,
+        listTitle: payload.title,
+      });
+      setQueuedOps(await getOfflineQueue(branch.id, currentCallerId));
+      setSyncStatus('queued');
+    };
+
+    if (isOffline || !navigator.onLine || listId.startsWith('offline-list-')) {
+      await applyOfflineListMutation();
+      return;
+    }
+
     try {
       const res = await fetch(`/api/shopper/shopping-lists/${listId}`, {
         method: 'PUT',
@@ -1493,14 +1863,28 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
         return;
       }
       setSelectedList(data);
-      setShoppingLists((prev) => prev.map((l) => (l.id === data.id ? data : l)));
-    } catch (e) {}
+      const nextLists = shoppingLists.map((l) => (l.id === data.id ? data : l));
+      setShoppingLists(nextLists);
+      await saveOfflineShoppingLists(currentCallerId, nextLists);
+    } catch (e) {
+      if (isNetworkOfflineError(e)) {
+        setIsOffline(true);
+        await applyOfflineListMutation();
+      }
+    }
   };
 
-  // Add item to shopping list
+  // Add store product to shopping list
   const handleAddItemToCurrentList = async (product: EnrichedProduct) => {
     if (!selectedList) return;
-    const existing = selectedList.items.find((it) => it.barcode && it.barcode === product.barcode);
+    const isOwner = selectedList.userId === currentCallerId;
+    if (!isOwner && !selectedList.canEdit) {
+      setListError(t.viewOnlyList);
+      return;
+    }
+    const existing = selectedList.items.find(
+      (it) => (it.barcode && it.barcode === product.barcode) || doesProductMatchListItem(it, product)
+    );
     const updatedItems: ShoppingListItem[] = existing
       ? selectedList.items.map((it) =>
           it.id === existing.id ? { ...it, quantity: it.quantity + 1 } : it
@@ -1511,18 +1895,188 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
             id: `li-${Date.now()}-${Math.random().toString(36).substring(2, 5)}`,
             barcode: product.barcode,
             productName: product.name,
+            category: product.category,
             quantity: 1,
             completed: false,
-            aisle: product.aisle,
-            shelf: product.shelf,
+            aisle: product.aisle || '',
+            shelf: product.shelf || '',
             estimatedPrice: product.effectivePrice,
           },
         ];
 
     const updatedList = { ...selectedList, items: updatedItems };
+    const nextLists = shoppingLists.map((l) => (l.id === updatedList.id ? updatedList : l));
     setSelectedList(updatedList);
-    setShoppingLists((prev) => prev.map((l) => (l.id === updatedList.id ? updatedList : l)));
+    setShoppingLists(nextLists);
+    await saveOfflineShoppingLists(currentCallerId, nextLists);
     await persistSelectedListUpdate(selectedList.id, { items: updatedItems });
+  };
+
+  // Add typed free-text item (or matching store product) to active shopping list
+  const handleAddTypedItemToList = async (rawName: string) => {
+    const trimmed = rawName.trim();
+    if (!trimmed || !selectedList) return;
+    const isOwner = selectedList.userId === currentCallerId;
+    if (!isOwner && !selectedList.canEdit) {
+      setListError(t.viewOnlyList);
+      return;
+    }
+
+    const matchedStoreProduct =
+      products.find((p) => p.barcode === trimmed) ||
+      products.find((p) => p.name.toLowerCase() === trimmed.toLowerCase()) ||
+      products.find((p) => doesProductMatchListItem({ barcode: '', productName: trimmed }, p));
+
+    if (matchedStoreProduct && matchedStoreProduct.name.toLowerCase() === trimmed.toLowerCase()) {
+      await handleAddItemToCurrentList(matchedStoreProduct);
+      setSearchItemForList('');
+      return;
+    }
+
+    const existingTyped = selectedList.items.find(
+      (it) => it.productName.toLowerCase() === trimmed.toLowerCase()
+    );
+    const updatedItems: ShoppingListItem[] = existingTyped
+      ? selectedList.items.map((it) =>
+          it.id === existingTyped.id ? { ...it, quantity: it.quantity + 1 } : it
+        )
+      : [
+          ...selectedList.items,
+          {
+            id: `li-${Date.now()}-${Math.random().toString(36).substring(2, 5)}`,
+            barcode: '',
+            productName: trimmed,
+            category: matchedStoreProduct?.category || '',
+            quantity: 1,
+            completed: false,
+            aisle: matchedStoreProduct?.aisle || '',
+            shelf: matchedStoreProduct?.shelf || '',
+            estimatedPrice: matchedStoreProduct?.effectivePrice || 0,
+          },
+        ];
+
+    const updatedList = { ...selectedList, items: updatedItems };
+    const nextLists = shoppingLists.map((l) => (l.id === updatedList.id ? updatedList : l));
+    setSelectedList(updatedList);
+    setShoppingLists(nextLists);
+    setSearchItemForList('');
+    await saveOfflineShoppingLists(currentCallerId, nextLists);
+    await persistSelectedListUpdate(selectedList.id, { items: updatedItems });
+  };
+
+  // Add item inspected in PriceCheckModal directly to active list (or create a list if none exists)
+  const handleAddPriceCheckProductToList = async (
+    item: PriceCheckProductInfo,
+    resolvedFinalPrice: number
+  ) => {
+    const editableTarget =
+      selectedList && (selectedList.userId === currentCallerId || selectedList.canEdit)
+        ? selectedList
+        : shoppingLists.find((l) => l.userId === currentCallerId || l.canEdit) || null;
+
+    if (editableTarget) {
+      const existing = editableTarget.items.find((it) => it.barcode && it.barcode === item.barcode);
+      const updatedItems: ShoppingListItem[] = existing
+        ? editableTarget.items.map((it) =>
+            it.id === existing.id ? { ...it, quantity: it.quantity + 1 } : it
+          )
+        : [
+            ...editableTarget.items,
+            {
+              id: `li-${Date.now()}-${Math.random().toString(36).substring(2, 5)}`,
+              barcode: item.barcode,
+              productName: item.name,
+              category: item.category,
+              quantity: 1,
+              completed: false,
+              aisle: item.aisle || '',
+              shelf: item.shelf || '',
+              estimatedPrice: resolvedFinalPrice,
+            },
+          ];
+
+      const updatedList = { ...editableTarget, items: updatedItems };
+      const nextLists = shoppingLists.map((l) => (l.id === updatedList.id ? updatedList : l));
+      setSelectedList(updatedList);
+      setShoppingLists(nextLists);
+      await saveOfflineShoppingLists(currentCallerId, nextLists);
+      await persistSelectedListUpdate(editableTarget.id, { items: updatedItems });
+      setAutoTickNotice(`${t.addedToListNotice} ${item.name}`);
+      setTimeout(() => setAutoTickNotice(null), 3500);
+      return;
+    }
+
+    // Create a fresh list with this item
+    const newItem: ShoppingListItem = {
+      id: `li-${Date.now()}-${Math.random().toString(36).substring(2, 5)}`,
+      barcode: item.barcode,
+      productName: item.name,
+      category: item.category,
+      quantity: 1,
+      completed: false,
+      aisle: item.aisle || '',
+      shelf: item.shelf || '',
+      estimatedPrice: resolvedFinalPrice,
+    };
+
+    if (!isOffline && navigator.onLine) {
+      try {
+        const res = await fetch('/api/shopper/shopping-lists', {
+          method: 'POST',
+          headers: getGuestHeaders(),
+          body: JSON.stringify({
+            title: 'My Shopping List',
+            canEdit: true,
+            branchId: branch?.id,
+            sourceType: 'blank',
+            items: [newItem],
+          }),
+        });
+        if (res.ok) {
+          const created: ShoppingList = await res.json();
+          const nextLists = [created, ...shoppingLists];
+          setShoppingLists(nextLists);
+          setSelectedList(created);
+          await saveOfflineShoppingLists(currentCallerId, nextLists);
+          setAutoTickNotice(`${t.addedToListNotice} ${item.name}`);
+          setTimeout(() => setAutoTickNotice(null), 3500);
+          return;
+        }
+      } catch {}
+    }
+
+    const nowIso = new Date().toISOString();
+    const offlineList: ShoppingList = {
+      id: `offline-list-${Date.now()}`,
+      userId: currentCallerId,
+      title: 'My Shopping List',
+      shareCode: `OFF-${Math.floor(1000 + Math.random() * 9000)}`,
+      canEdit: true,
+      collaboratorIds: [],
+      sourceType: 'blank',
+      items: [newItem],
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+    const nextLists = [offlineList, ...shoppingLists];
+    setShoppingLists(nextLists);
+    setSelectedList(offlineList);
+    await saveOfflineShoppingLists(currentCallerId, nextLists);
+    if (branch) {
+      await enqueueOfflineOperation({
+        branchId: branch.id,
+        callerId: currentCallerId,
+        action: 'list_create',
+        listId: offlineList.id,
+        listTitle: offlineList.title,
+        listCanEdit: true,
+        listItems: [newItem],
+      });
+      setQueuedOps(await getOfflineQueue(branch.id, currentCallerId));
+      setSyncStatus('queued');
+    }
+    setAutoTickNotice(`${t.addedToListNotice} ${item.name}`);
+    setTimeout(() => setAutoTickNotice(null), 3500);
   };
 
   // Toggle item completion in shopping list
@@ -1537,21 +2091,30 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
       it.id === itemId ? { ...it, completed: !it.completed } : it
     );
     const updatedList = { ...selectedList, items: updatedItems };
+    const nextLists = shoppingLists.map((l) => (l.id === updatedList.id ? updatedList : l));
     setSelectedList(updatedList);
-    setShoppingLists((prev) => prev.map((l) => (l.id === updatedList.id ? updatedList : l)));
+    setShoppingLists(nextLists);
+    await saveOfflineShoppingLists(currentCallerId, nextLists);
     await persistSelectedListUpdate(selectedList.id, { items: updatedItems });
   };
 
   // Adjust item quantity or remove item from shopping list
   const handleUpdateListItemQuantity = async (itemId: string, nextQty: number) => {
     if (!selectedList) return;
+    const isOwner = selectedList.userId === currentCallerId;
+    if (!isOwner && !selectedList.canEdit) {
+      setListError(t.viewOnlyList);
+      return;
+    }
     const updatedItems =
       nextQty <= 0
         ? selectedList.items.filter((it) => it.id !== itemId)
         : selectedList.items.map((it) => (it.id === itemId ? { ...it, quantity: nextQty } : it));
     const updatedList = { ...selectedList, items: updatedItems };
+    const nextLists = shoppingLists.map((l) => (l.id === updatedList.id ? updatedList : l));
     setSelectedList(updatedList);
-    setShoppingLists((prev) => prev.map((l) => (l.id === updatedList.id ? updatedList : l)));
+    setShoppingLists(nextLists);
+    await saveOfflineShoppingLists(currentCallerId, nextLists);
     await persistSelectedListUpdate(selectedList.id, { items: updatedItems });
   };
 
@@ -1564,6 +2127,14 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
   // Delete shopping list (owner only)
   const handleDeleteList = async (listId: string) => {
     setListError(null);
+    if (listId.startsWith('offline-list-')) {
+      const remaining = shoppingLists.filter((l) => l.id !== listId);
+      setConfirmDeleteListId(null);
+      setShoppingLists(remaining);
+      setSelectedList(remaining.length > 0 ? remaining[0] : null);
+      await saveOfflineShoppingLists(currentCallerId, remaining);
+      return;
+    }
     try {
       const res = await fetch(`/api/shopper/shopping-lists/${listId}`, {
         method: 'DELETE',
@@ -1578,6 +2149,7 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
       setShoppingLists((prev) => {
         const remaining = prev.filter((l) => l.id !== listId);
         setSelectedList(remaining.length > 0 ? remaining[0] : null);
+        void saveOfflineShoppingLists(currentCallerId, remaining);
         return remaining;
       });
     } catch (e) {}
@@ -1603,8 +2175,8 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
           productName: entry.name,
           quantity: 1,
           completed: false,
-          aisle: entry.aisle,
-          shelf: entry.shelf,
+          aisle: entry.aisle || '',
+          shelf: entry.shelf || '',
           estimatedPrice: entry.currentBranchPrice,
         });
       }
@@ -1636,16 +2208,14 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
     } catch (e) {}
   };
 
-  // Phase 2: Sort list items by Aisle sequence
-  const sortedListItems = useMemo(() => {
+  // Group & sort list items by aisle -> category -> Other
+  const groupedListSections = useMemo(() => {
     if (!selectedList) return [];
-    if (!listSortByAisle) return selectedList.items;
-    return [...selectedList.items].sort((a, b) => {
-      const aisleA = parseInt(a.aisle || '999', 10);
-      const aisleB = parseInt(b.aisle || '999', 10);
-      return aisleA - aisleB;
-    });
-  }, [selectedList, listSortByAisle]);
+    if (!listSortByAisle) {
+      return [{ groupLabel: '', items: selectedList.items }];
+    }
+    return groupAndOrderShoppingListItems(selectedList.items, products, t.otherAisleGroup);
+  }, [selectedList, listSortByAisle, products, t.otherAisleGroup]);
 
   // Expected total for selected shopping list
   const listExpectedTotal = useMemo(() => {
@@ -1653,12 +2223,72 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
     return selectedList.items.reduce((sum, item) => sum + (item.estimatedPrice || 0) * item.quantity, 0);
   }, [selectedList]);
 
-  // Budget calculations (Daily Spending Cap)
-  const budgetLimit = cart?.budgetLimit || 0;
-  const currentTotal = cart?.finalTotal || 0;
-  const budgetRatio = budgetLimit > 0 ? currentTotal / budgetLimit : 0;
-  const isBudgetApproaching = budgetLimit > 0 && budgetRatio >= 0.85 && budgetRatio < 1;
-  const isBudgetExceeded = budgetLimit > 0 && budgetRatio >= 1;
+  // Unticked list items for finish reminder & found progress count
+  const selectedListProgress = useMemo(() => {
+    if (!selectedList || selectedList.items.length === 0) {
+      return { found: 0, total: 0, unticked: [] as ShoppingListItem[] };
+    }
+    const unticked = selectedList.items.filter((it) => !it.completed);
+    return {
+      found: selectedList.items.length - unticked.length,
+      total: selectedList.items.length,
+      unticked,
+    };
+  }, [selectedList]);
+
+  // Server-consistent Budget Summary + One-time 80% / >100% Non-blocking Warnings
+  const cartBudgetSummary = useMemo(
+    () =>
+      cart?.budgetSummary ??
+      computeBudgetSummary(cart?.finalTotal || 0, cart?.budgetLimit),
+    [cart?.budgetSummary, cart?.finalTotal, cart?.budgetLimit]
+  );
+
+  useEffect(() => {
+    if (!cart || !cart.budgetLimit || cart.budgetLimit <= 0) {
+      prevBudgetKeyRef.current = null;
+      warnedBudgetLevelsRef.current = { near: false, over: false };
+      setBudgetToastWarning(null);
+      return;
+    }
+
+    const budgetKey = `${cart.id}:${cart.budgetLimit}`;
+    if (prevBudgetKeyRef.current !== budgetKey) {
+      prevBudgetKeyRef.current = budgetKey;
+      warnedBudgetLevelsRef.current = {
+        near: cartBudgetSummary.level === 'near' || cartBudgetSummary.level === 'over',
+        over: cartBudgetSummary.level === 'over',
+      };
+      return;
+    }
+
+    if (cartBudgetSummary.level === 'over' && !warnedBudgetLevelsRef.current.over) {
+      warnedBudgetLevelsRef.current.near = true;
+      warnedBudgetLevelsRef.current.over = true;
+      setBudgetToastWarning({
+        level: 'over',
+        title: `${t.budgetWarning100Title} (+KES ${cartBudgetSummary.overBy.toLocaleString()})`,
+        detail: t.budgetNonBlockingHint,
+      });
+    } else if (cartBudgetSummary.level === 'near' && !warnedBudgetLevelsRef.current.near) {
+      warnedBudgetLevelsRef.current.near = true;
+      setBudgetToastWarning({
+        level: 'near',
+        title: `${t.budgetWarning80Title} (KES ${(cartBudgetSummary.remaining ?? 0).toLocaleString()} ${t.budgetRemaining})`,
+        detail: t.budgetNonBlockingHint,
+      });
+    }
+  }, [
+    cart?.id,
+    cart?.budgetLimit,
+    cartBudgetSummary.level,
+    cartBudgetSummary.overBy,
+    cartBudgetSummary.remaining,
+    t.budgetWarning80Title,
+    t.budgetWarning100Title,
+    t.budgetRemaining,
+    t.budgetNonBlockingHint,
+  ]);
 
   // Total items in cart
   const totalItemCount = cart?.items.reduce((sum, item) => sum + item.quantity, 0) || 0;
@@ -1769,9 +2399,63 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
 
       {/* Re-add Notification */}
       {reAddSuccessMsg && (
-        <div className="mb-3 p-3 rounded-2xl bg-emerald-600 text-white text-xs font-semibold flex items-center gap-2 shadow-sm animate-in fade-in">
+        <div className="mb-3 p-3 rounded-2xl bg-emerald-600 text-white text-xs font-semibold flex items-center gap-2 shadow-sm animate-in fade-in motion-reduce:animate-none">
           <CheckCircle className="w-4 h-4 shrink-0" />
           <span>{reAddSuccessMsg}</span>
+        </div>
+      )}
+
+      {/* Auto-tick / List Addition Toast */}
+      {autoTickNotice && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="mb-3 p-3 rounded-2xl bg-emerald-700 text-white text-xs font-semibold flex items-center justify-between gap-2 shadow-sm animate-in fade-in motion-reduce:animate-none"
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            <ListChecks className="w-4 h-4 shrink-0" aria-hidden="true" />
+            <span className="truncate">{autoTickNotice}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setAutoTickNotice(null)}
+            aria-label={t.closeLabel}
+            className="p-1 rounded-lg hover:bg-emerald-800 shrink-0"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* One-Time Non-Blocking Budget Threshold Warning (80% Near / >100% Over) */}
+      {budgetToastWarning && (
+        <div
+          role="alert"
+          className={`mb-3 p-3 rounded-2xl text-xs font-semibold flex items-start justify-between gap-2 shadow-sm animate-in fade-in motion-reduce:animate-none ${
+            budgetToastWarning.level === 'over'
+              ? 'bg-rose-600 text-white'
+              : 'bg-amber-500 text-slate-950'
+          }`}
+        >
+          <div className="flex items-start gap-2 min-w-0">
+            {budgetToastWarning.level === 'over' ? (
+              <ShieldAlert className="w-4 h-4 shrink-0 mt-0.5" aria-hidden="true" />
+            ) : (
+              <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" aria-hidden="true" />
+            )}
+            <div className="min-w-0">
+              <p className="font-bold leading-snug">{budgetToastWarning.title}</p>
+              <p className="text-[11px] opacity-90">{budgetToastWarning.detail}</p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setBudgetToastWarning(null)}
+            aria-label={t.closeLabel}
+            className="p-1 rounded-lg hover:bg-black/10 shrink-0"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
         </div>
       )}
 
@@ -1842,16 +2526,39 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
         </div>
       )}
 
-      {/* New BudgetAlert component displaying cart total against user-configurable limit with approach warnings */}
+      {/* BudgetAlert component displaying server-computed total against configurable & default budget limit */}
       {branch && (
         <div className="mb-3">
           <BudgetAlert
             cartTotal={cart?.finalTotal || 0}
             budgetLimit={cart?.budgetLimit}
+            defaultBudget={defaultBudgetKes}
             onUpdateBudget={handleUpdateBudgetLimit}
             currency="KES"
           />
         </div>
+      )}
+
+      {/* Compact Active List Progress Pill while shopping */}
+      {branch && selectedList && selectedListProgress.total > 0 && activeTab !== 'lists' && activeTab !== 'history' && activeTab !== 'rewards' && (
+        <button
+          type="button"
+          onClick={() => {
+            setActiveTab('lists');
+            setListsSubTab('lists');
+          }}
+          className="w-full mb-3 px-3.5 py-2 rounded-2xl border border-emerald-200 dark:border-emerald-900 bg-emerald-50/80 dark:bg-emerald-950/30 flex items-center justify-between gap-2 text-xs font-semibold text-emerald-900 dark:text-emerald-200 hover:border-emerald-400 transition"
+        >
+          <span className="flex items-center gap-2 truncate">
+            <ListChecks className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" aria-hidden="true" />
+            <span className="truncate">{selectedList.title}</span>
+          </span>
+          <span className="px-2 py-0.5 rounded-full bg-white dark:bg-slate-900 text-emerald-700 dark:text-emerald-300 font-bold tabular-nums shrink-0">
+            {t.listItemsFoundProgress
+              .replace('{found}', String(selectedListProgress.found))
+              .replace('{total}', String(selectedListProgress.total))}
+          </span>
+        </button>
       )}
 
       {/* Loyalty Points Summary Banner */}
@@ -1917,32 +2624,73 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
             onExecuteCommand={handleVoiceCommand}
           />
 
-          {/* Quick Mini Running Total Bar */}
-          {cart && cart.items.length > 0 && (
-            <div
-              onClick={() => setActiveTab('cart')}
-              className="p-3.5 rounded-2xl bg-slate-900 dark:bg-slate-800 text-white flex items-center justify-between cursor-pointer active:scale-98 transition shadow-lg shadow-slate-900/10"
-            >
-              <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded-xl bg-emerald-600 flex items-center justify-center">
-                  <ShoppingBag className="w-4 h-4 text-white" />
+          {/* Quick Mini Running Total Bar with Budget Threshold Colors & Non-Color Labels */}
+          {cart && cart.items.length > 0 && (() => {
+            const isOver = cartBudgetSummary.level === 'over';
+            const isNear = cartBudgetSummary.level === 'near';
+            const hasCap = cartBudgetSummary.level !== 'none' && cartBudgetSummary.limit !== null;
+            return (
+              <div
+                onClick={() => setActiveTab('cart')}
+                className={`p-3.5 rounded-2xl flex items-center justify-between gap-3 cursor-pointer active:scale-98 transition shadow-lg ${
+                  isOver
+                    ? 'bg-rose-950 text-white border border-rose-500/60 shadow-rose-900/20'
+                    : isNear
+                    ? 'bg-amber-950 text-white border border-amber-400/60 shadow-amber-900/20'
+                    : 'bg-slate-900 dark:bg-slate-800 text-white shadow-slate-900/10'
+                }`}
+              >
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <div
+                    className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${
+                      isOver ? 'bg-rose-600' : isNear ? 'bg-amber-500 text-slate-950' : 'bg-emerald-600'
+                    }`}
+                  >
+                    {isOver ? (
+                      <ShieldAlert className="w-4 h-4" aria-hidden="true" />
+                    ) : isNear ? (
+                      <AlertTriangle className="w-4 h-4" aria-hidden="true" />
+                    ) : (
+                      <ShoppingBag className="w-4 h-4 text-white" aria-hidden="true" />
+                    )}
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-xs font-semibold truncate">
+                      {totalItemCount} {t.itemsCount} in cart
+                    </p>
+                    <p
+                      className={`text-[10px] font-semibold truncate ${
+                        isOver
+                          ? 'text-rose-200'
+                          : isNear
+                          ? 'text-amber-200'
+                          : 'text-slate-300'
+                      }`}
+                    >
+                      {hasCap
+                        ? isOver
+                          ? `${t.overBudgetByPrefix} KES ${cartBudgetSummary.overBy.toLocaleString()}`
+                          : isNear
+                          ? `${t.nearBudgetLabel} · KES ${(cartBudgetSummary.remaining ?? 0).toLocaleString()} ${t.budgetRemaining}`
+                          : `KES ${(cartBudgetSummary.remaining ?? 0).toLocaleString()} ${t.budgetRemaining}`
+                        : 'Tap to review cart items'}
+                    </p>
+                  </div>
                 </div>
-                <div>
-                  <p className="text-xs font-semibold">
-                    {totalItemCount} {t.itemsCount} in cart
-                  </p>
-                  <p className="text-[10px] text-slate-400">Tap to review cart items</p>
-                </div>
-              </div>
 
-              <div className="text-right">
-                <p className="text-xs text-slate-400">{t.runningTotal}</p>
-                <p className="text-base font-black text-emerald-400 tabular-nums">
-                  KES {cart.finalTotal.toLocaleString()}
-                </p>
+                <div className="text-right shrink-0">
+                  <p className="text-xs text-slate-300">{t.runningTotal}</p>
+                  <p
+                    className={`text-base font-black tabular-nums ${
+                      isOver ? 'text-rose-300' : isNear ? 'text-amber-300' : 'text-emerald-400'
+                    }`}
+                  >
+                    KES {cart.finalTotal.toLocaleString()}
+                  </p>
+                </div>
               </div>
-            </div>
-          )}
+            );
+          })()}
         </div>
       )}
 
@@ -2012,7 +2760,8 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
                         <span>·</span>
                         <span className="flex items-center gap-1 font-medium text-slate-600 dark:text-slate-300">
                           <MapPin className="w-3 h-3 text-slate-400" />
-                          Aisle {item.aisle || '—'} · Shelf {item.shelf || '—'}
+                          {formatAisleDisplayLabel(item.aisle) || item.category || t.otherAisleGroup}
+                          {item.shelf ? ` · Shelf ${item.shelf}` : ''}
                         </span>
                       </div>
                       {item.promoName && (
@@ -2134,7 +2883,7 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
         </div>
       )}
 
-      {/* TAB 3: PRICE CHECK VIEW */}
+      {/* TAB 3: PRICE CHECK & COMPARE VIEW (Signed-in Shopper Only) */}
       {branch && activeTab === 'price_check' && (
         <div className="space-y-4">
           <div className="flex items-center justify-between">
@@ -2159,17 +2908,38 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
             </div>
           </div>
 
-          <BarcodeScanner
-            onScan={handleBarcodeScanned}
-            isPriceCheckMode={true}
-            onTogglePriceCheckMode={() => setActiveTab('scan')}
-            onOpenManualInput={() => setIsManualModalOpen(true)}
-            sampleBarcodes={products.map((p) => ({
-              name: p.name,
-              barcode: p.barcode,
-              price: p.effectivePrice,
-            }))}
-          />
+          {!user || user.role !== 'shopper' || !token ? (
+            <div className="p-7 text-center bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-xs space-y-3">
+              <EmptySearchIllustration className="w-28 h-20" />
+              <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                {t.priceCheckMode}
+              </h3>
+              <p className="text-xs text-slate-500 dark:text-slate-400 max-w-sm mx-auto leading-relaxed">
+                {t.priceCheckSignInRequired}
+              </p>
+              {onRequestSignIn && (
+                <button
+                  type="button"
+                  onClick={onRequestSignIn}
+                  className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold transition shadow-sm"
+                >
+                  {t.receiptSignInBtn}
+                </button>
+              )}
+            </div>
+          ) : (
+            <BarcodeScanner
+              onScan={handleBarcodeScanned}
+              isPriceCheckMode={true}
+              onTogglePriceCheckMode={() => setActiveTab('scan')}
+              onOpenManualInput={() => setIsManualModalOpen(true)}
+              sampleBarcodes={products.map((p) => ({
+                name: p.name,
+                barcode: p.barcode,
+                price: p.effectivePrice,
+              }))}
+            />
+          )}
         </div>
       )}
 
@@ -2452,6 +3222,12 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
                       </div>
 
                       <div className="flex flex-wrap items-center gap-2">
+                        <span className="py-1 px-2.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300 text-xs font-bold tabular-nums">
+                          {t.listItemsFoundProgress
+                            .replace('{found}', String(selectedListProgress.found))
+                            .replace('{total}', String(selectedListProgress.total))}
+                        </span>
+
                         <button
                           type="button"
                           onClick={() => {
@@ -2474,7 +3250,7 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
                               ? 'bg-emerald-50 text-emerald-700 border-emerald-300 dark:bg-emerald-950/60 dark:text-emerald-300'
                               : 'border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300'
                           }`}
-                          title="Sort items by aisle number so you walk the store in order"
+                          title="Group and sort items by aisle or category"
                         >
                           <ArrowUpDown className="w-3.5 h-3.5" />
                           <span>{t.sortByAisle}</span>
@@ -2504,19 +3280,38 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
                       </div>
                     )}
 
-                    {/* Add item to list search input (editable lists only) */}
+                    {/* Add typed item OR pick from branch products (editable lists only) */}
                     {canUserEdit ? (
                       <div className="space-y-2">
-                        <label className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                        <label
+                          htmlFor="add-list-item-input"
+                          className="text-xs font-bold text-slate-700 dark:text-slate-300"
+                        >
                           {t.addItemToList}
                         </label>
-                        <input
-                          type="text"
-                          value={searchItemForList}
-                          onChange={(e) => setSearchItemForList(e.target.value)}
-                          placeholder={t.searchProductToAdd}
-                          className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs focus:outline-emerald-500"
-                        />
+                        <form
+                          onSubmit={(e) => {
+                            e.preventDefault();
+                            void handleAddTypedItemToList(searchItemForList);
+                          }}
+                          className="flex gap-2"
+                        >
+                          <input
+                            id="add-list-item-input"
+                            type="text"
+                            value={searchItemForList}
+                            onChange={(e) => setSearchItemForList(e.target.value)}
+                            placeholder={t.typeOrSearchItemPlaceholder}
+                            className="flex-1 h-10 px-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs focus:outline-emerald-500"
+                          />
+                          <button
+                            type="submit"
+                            disabled={!searchItemForList.trim()}
+                            className="px-3.5 h-10 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white text-xs font-bold shrink-0 transition"
+                          >
+                            {t.addTypedItemBtn}
+                          </button>
+                        </form>
 
                         {searchItemForList.trim() && (
                           <div className="max-h-36 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-sm">
@@ -2528,24 +3323,26 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
                               )
                               .slice(0, 6)
                               .map((p) => (
-                                <div
+                                <button
+                                  type="button"
                                   key={p.id}
                                   onClick={() => {
-                                    handleAddItemToCurrentList(p);
+                                    void handleAddItemToCurrentList(p);
                                     setSearchItemForList('');
                                   }}
-                                  className="p-2.5 flex items-center justify-between text-xs hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
+                                  className="w-full p-2.5 flex items-center justify-between text-xs hover:bg-slate-50 dark:hover:bg-slate-800 text-left"
                                 >
                                   <div>
-                                    <p className="font-semibold">{p.name}</p>
+                                    <p className="font-semibold text-slate-900 dark:text-white">{p.name}</p>
                                     <p className="text-[10px] text-slate-400">
-                                      Aisle {p.aisle || '—'} · Shelf {p.shelf || '—'}
+                                      {formatAisleDisplayLabel(p.aisle) || p.category || t.otherAisleGroup}
+                                      {p.shelf ? ` · Shelf ${p.shelf}` : ''}
                                     </p>
                                   </div>
                                   <span className="font-mono text-emerald-600 font-bold">
                                     KES {p.effectivePrice}
                                   </span>
-                                </div>
+                                </button>
                               ))}
                           </div>
                         )}
@@ -2557,92 +3354,119 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
                       </div>
                     )}
 
-                    {/* Checkable items in Aisle order with quantities */}
-                    <div className="space-y-2">
-                      {sortedListItems.length === 0 ? (
+                    {/* Checkable items grouped by Aisle / Category / Other */}
+                    <div className="space-y-3">
+                      {selectedList.items.length === 0 ? (
                         <div className="p-6 text-center rounded-2xl bg-slate-50 dark:bg-slate-800/40 border border-dashed border-slate-200 dark:border-slate-700 text-xs text-slate-400">
-                          {t.searchProductToAdd}
+                          {t.typeOrSearchItemPlaceholder}
                         </div>
                       ) : (
-                        sortedListItems.map((it) => (
-                          <div
-                            key={it.id}
-                            className={`p-3 rounded-2xl border transition flex items-center justify-between gap-2 ${
-                              it.completed
-                                ? 'bg-slate-50 dark:bg-slate-800/40 border-slate-200 dark:border-slate-800 opacity-65'
-                                : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 shadow-xs'
-                            }`}
-                          >
-                            <div
-                              onClick={() => handleToggleListItemDone(it.id)}
-                              className={`flex items-center gap-2.5 min-w-0 flex-1 ${
-                                canUserEdit ? 'cursor-pointer' : ''
-                              }`}
-                            >
-                              <input
-                                type="checkbox"
-                                checked={it.completed}
-                                onChange={() => {}}
-                                className="w-4 h-4 rounded text-emerald-600 pointer-events-none shrink-0"
-                              />
-                              <div className="min-w-0">
-                                <p
-                                  className={`text-xs font-bold truncate ${
+                        groupedListSections.map((group) => (
+                          <div key={group.groupLabel || 'all-items'} className="space-y-1.5">
+                            {group.groupLabel && (
+                              <div className="flex items-center justify-between px-1">
+                                <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 flex items-center gap-1">
+                                  <MapPin className="w-3 h-3 text-emerald-600 shrink-0" aria-hidden="true" />
+                                  <span>{group.groupLabel}</span>
+                                </span>
+                                <span className="text-[10px] text-slate-400 tabular-nums">
+                                  {group.items.filter((i) => i.completed).length}/{group.items.length}
+                                </span>
+                              </div>
+                            )}
+
+                            {group.items.map((it) => {
+                              const aisleText = formatAisleDisplayLabel(it.aisle);
+                              return (
+                                <div
+                                  key={it.id}
+                                  className={`p-3 rounded-2xl border transition flex items-center justify-between gap-2 ${
                                     it.completed
-                                      ? 'line-through text-slate-400'
-                                      : 'text-slate-900 dark:text-white'
+                                      ? 'bg-slate-50 dark:bg-slate-800/40 border-slate-200 dark:border-slate-800 opacity-65'
+                                      : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 shadow-xs'
                                   }`}
                                 >
-                                  {it.productName}
-                                </p>
-                                <p className="text-[10px] text-slate-400 flex items-center gap-1 mt-0.5 font-medium">
-                                  <MapPin className="w-3 h-3 shrink-0" />
-                                  Aisle {it.aisle || '—'} · Shelf {it.shelf || '—'}
-                                </p>
-                              </div>
-                            </div>
+                                  <div
+                                    onClick={() => void handleToggleListItemDone(it.id)}
+                                    className={`flex items-center gap-2.5 min-w-0 flex-1 ${
+                                      canUserEdit ? 'cursor-pointer' : ''
+                                    }`}
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={it.completed}
+                                      onChange={() => {}}
+                                      aria-label={it.productName}
+                                      className="w-4 h-4 rounded text-emerald-600 pointer-events-none shrink-0"
+                                    />
+                                    <div className="min-w-0">
+                                      <p
+                                        className={`text-xs font-bold truncate ${
+                                          it.completed
+                                            ? 'line-through text-slate-400'
+                                            : 'text-slate-900 dark:text-white'
+                                        }`}
+                                      >
+                                        {it.productName}
+                                      </p>
+                                      {(aisleText || it.shelf || it.category) && (
+                                        <p className="text-[10px] text-slate-400 flex items-center gap-1 mt-0.5 font-medium truncate">
+                                          <MapPin className="w-3 h-3 shrink-0" aria-hidden="true" />
+                                          <span>
+                                            {aisleText || it.category}
+                                            {it.shelf ? ` · Shelf ${it.shelf}` : ''}
+                                          </span>
+                                        </p>
+                                      )}
+                                    </div>
+                                  </div>
 
-                            <div className="flex items-center gap-2 shrink-0">
-                              {canUserEdit ? (
-                                <div className="flex items-center border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden bg-slate-50 dark:bg-slate-800">
-                                  <button
-                                    type="button"
-                                    onClick={() => handleUpdateListItemQuantity(it.id, it.quantity - 1)}
-                                    className="w-6 h-6 flex items-center justify-center text-slate-600 dark:text-slate-300"
-                                  >
-                                    <Minus className="w-3 h-3" />
-                                  </button>
-                                  <span className="w-6 text-center text-[11px] font-bold font-mono tabular-nums">
-                                    {it.quantity}
-                                  </span>
-                                  <button
-                                    type="button"
-                                    onClick={() => handleUpdateListItemQuantity(it.id, it.quantity + 1)}
-                                    className="w-6 h-6 flex items-center justify-center text-slate-600 dark:text-slate-300"
-                                  >
-                                    <Plus className="w-3 h-3" />
-                                  </button>
+                                  <div className="flex items-center gap-2 shrink-0">
+                                    {canUserEdit ? (
+                                      <div className="flex items-center border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden bg-slate-50 dark:bg-slate-800">
+                                        <button
+                                          type="button"
+                                          onClick={() => void handleUpdateListItemQuantity(it.id, it.quantity - 1)}
+                                          className="w-6 h-6 flex items-center justify-center text-slate-600 dark:text-slate-300"
+                                        >
+                                          <Minus className="w-3 h-3" />
+                                        </button>
+                                        <span className="w-6 text-center text-[11px] font-bold font-mono tabular-nums">
+                                          {it.quantity}
+                                        </span>
+                                        <button
+                                          type="button"
+                                          onClick={() => void handleUpdateListItemQuantity(it.id, it.quantity + 1)}
+                                          className="w-6 h-6 flex items-center justify-center text-slate-600 dark:text-slate-300"
+                                        >
+                                          <Plus className="w-3 h-3" />
+                                        </button>
+                                      </div>
+                                    ) : (
+                                      <span className="text-[11px] font-mono font-semibold text-slate-500">
+                                        x{it.quantity}
+                                      </span>
+                                    )}
+
+                                    {(it.estimatedPrice || 0) > 0 && (
+                                      <span className="text-xs font-mono font-bold text-slate-700 dark:text-slate-300 min-w-[58px] text-right tabular-nums">
+                                        KES {((it.estimatedPrice || 0) * it.quantity).toLocaleString()}
+                                      </span>
+                                    )}
+
+                                    {canUserEdit && (
+                                      <button
+                                        type="button"
+                                        onClick={() => void handleUpdateListItemQuantity(it.id, 0)}
+                                        className="p-1 text-slate-400 hover:text-rose-600"
+                                      >
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                      </button>
+                                    )}
+                                  </div>
                                 </div>
-                              ) : (
-                                <span className="text-[11px] font-mono font-semibold text-slate-500">
-                                  x{it.quantity}
-                                </span>
-                              )}
-
-                              <span className="text-xs font-mono font-bold text-slate-700 dark:text-slate-300 min-w-[58px] text-right tabular-nums">
-                                KES {((it.estimatedPrice || 0) * it.quantity).toLocaleString()}
-                              </span>
-
-                              {canUserEdit && (
-                                <button
-                                  type="button"
-                                  onClick={() => handleUpdateListItemQuantity(it.id, 0)}
-                                  className="p-1 text-slate-400 hover:text-rose-600"
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                </button>
-                              )}
-                            </div>
+                              );
+                            })}
                           </div>
                         ))
                       )}
@@ -2659,7 +3483,7 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
 
                       <button
                         type="button"
-                        onClick={() => handleConvertListToCart(selectedList.id)}
+                        onClick={() => void handleConvertListToCart(selectedList.id)}
                         disabled={selectedList.items.length === 0}
                         className="py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white text-xs font-semibold flex items-center gap-1.5 transition active:scale-95"
                       >
@@ -3429,15 +4253,21 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
         isPriceCheckMode={activeTab === 'price_check'}
       />
 
-      {/* Price Check Result Modal */}
+      {/* Price Check & Branch Compare Modal */}
       <PriceCheckModal
-        product={priceCheckData?.product || null}
-        effectivePrice={priceCheckData?.effectivePrice || 0}
-        stock={priceCheckData?.stock || 0}
-        isLowStock={priceCheckData?.isLowStock || false}
+        product={isPriceCheckModalOpen ? priceCheckData?.product || null : null}
+        branchPrice={priceCheckData?.branchPrice || 0}
+        finalPrice={priceCheckData?.finalPrice || 0}
         promotion={priceCheckData?.promotion || null}
+        compareBranches={priceCheckData?.compareBranches || []}
+        isOffline={isOffline}
         onClose={() => setIsPriceCheckModalOpen(false)}
-        onAddToCart={handleBarcodeScanned}
+        onAddToCart={(bc) => {
+          void addBarcodeToCart(bc, 1);
+        }}
+        onAddToList={(item, resolvedPrice) => {
+          void handleAddPriceCheckProductToList(item, resolvedPrice);
+        }}
       />
 
       {/* Cart Till Checkout Code & QR Modal */}
@@ -3496,15 +4326,15 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
         onOpenRewards={() => setActiveTab('rewards')}
       />
 
-      {/* Finish Shopping Confirmation Modal */}
+      {/* Finish Shopping Confirmation Modal (includes Unticked List Reminder & Pay-at-Till Reminder) */}
       {showFinishConfirmModal && (
         <div
           role="dialog"
           aria-modal="true"
           aria-labelledby="finish-confirm-title"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in motion-reduce:animate-none"
         >
-          <div className="w-full max-w-sm rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl p-6 space-y-4">
+          <div className="w-full max-w-sm rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl p-6 space-y-4 max-h-[90dvh] overflow-y-auto">
             <div className="flex items-start justify-between gap-2">
               <div className="space-y-1">
                 <h3
@@ -3538,6 +4368,31 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
               </div>
             )}
 
+            {/* Gentle reminder if active list still has unticked items */}
+            {selectedListProgress.unticked.length > 0 && (
+              <div className="rounded-2xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 p-3 space-y-1.5">
+                <p className="text-xs font-bold text-amber-900 dark:text-amber-200 flex items-center gap-1.5">
+                  <AlertTriangle className="w-4 h-4 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden="true" />
+                  <span>{t.forgottenItemsPromptTitle}</span>
+                </p>
+                <ul className="text-[11px] text-amber-900/90 dark:text-amber-100 list-disc pl-5 space-y-0.5">
+                  {selectedListProgress.unticked.slice(0, 6).map((item) => (
+                    <li key={item.id}>{item.productName}</li>
+                  ))}
+                  {selectedListProgress.unticked.length > 6 && (
+                    <li className="italic">
+                      +{selectedListProgress.unticked.length - 6} more
+                    </li>
+                  )}
+                </ul>
+              </div>
+            )}
+
+            {/* Explicit Pay-at-the-Till Reminder (Smart Cart does not take payment) */}
+            <div className="rounded-2xl bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-900/50 p-3 text-[11px] text-emerald-950 dark:text-emerald-200 leading-relaxed">
+              {t.checkoutNotice}
+            </div>
+
             <div className="flex flex-col sm:flex-row gap-2 pt-1">
               <button
                 type="button"
@@ -3545,7 +4400,9 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
                 onClick={() => setShowFinishConfirmModal(false)}
                 className="flex-1 min-h-[42px] px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 text-xs font-semibold transition"
               >
-                {t.finishConfirmKeep}
+                {selectedListProgress.unticked.length > 0
+                  ? t.forgottenItemsContinue
+                  : t.finishConfirmKeep}
               </button>
               <button
                 type="button"
@@ -3553,7 +4410,11 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
                 onClick={handleConfirmFinishShopping}
                 className="flex-1 min-h-[42px] px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white text-xs font-extrabold transition shadow-sm"
               >
-                {isFinishingCart ? t.finishingCartProgress : t.finishConfirmYes}
+                {isFinishingCart
+                  ? t.finishingCartProgress
+                  : selectedListProgress.unticked.length > 0
+                  ? t.forgottenItemsFinishAnyway
+                  : t.finishConfirmYes}
               </button>
             </div>
           </div>

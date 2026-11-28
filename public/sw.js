@@ -1,5 +1,5 @@
 // Smart Cart Service Worker — Offline & Flaky-Network Caching for Critical Assets, Images, and Fonts
-const CACHE_VERSION = 'v10';
+const CACHE_VERSION = 'v11';
 const STATIC_CACHE = `smartcart-static-${CACHE_VERSION}`;
 const FONTS_CACHE = `smartcart-fonts-${CACHE_VERSION}`;
 const IMAGES_CACHE = `smartcart-images-${CACHE_VERSION}`;
