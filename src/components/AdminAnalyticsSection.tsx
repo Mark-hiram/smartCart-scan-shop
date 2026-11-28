@@ -5,6 +5,8 @@ import {
   ResponsiveContainer,
   AreaChart,
   Area,
+  LineChart,
+  Line,
   BarChart,
   Bar,
   PieChart,
@@ -39,6 +41,13 @@ import {
 
 interface AdminAnalyticsSectionProps {
   token: string | null;
+  range?: AnalyticsRange;
+  onRangeChange?: (range: AnalyticsRange) => void;
+  onAnalyticsLoaded?: (payload: AdminAnalyticsPayload) => void;
+  onFilterChange?: (supermarketId: string, branchId: string) => void;
+  onExportCsv?: (supermarketId: string, branchId: string) => void;
+  isExportingCsv?: boolean;
+  hideExportButton?: boolean;
 }
 
 // Consistent semantic colors shared across all charts
@@ -271,11 +280,28 @@ const ChartCard: React.FC<ChartCardProps> = ({
   );
 };
 
-export const AdminAnalyticsSection: React.FC<AdminAnalyticsSectionProps> = ({ token }) => {
+export const AdminAnalyticsSection: React.FC<AdminAnalyticsSectionProps> = ({
+  token,
+  range: controlledRange,
+  onRangeChange,
+  onAnalyticsLoaded,
+  onFilterChange,
+  onExportCsv,
+  isExportingCsv: controlledExportingCsv,
+  hideExportButton = false,
+}) => {
   const { t } = useTranslation();
   const reducedMotion = usePrefersReducedMotion();
 
-  const [range, setRange] = useState<AnalyticsRange>('30d');
+  const [uncontrolledRange, setUncontrolledRange] = useState<AnalyticsRange>('30d');
+  const range = controlledRange ?? uncontrolledRange;
+  const setRange = (next: AnalyticsRange) => {
+    if (onRangeChange) {
+      onRangeChange(next);
+    } else {
+      setUncontrolledRange(next);
+    }
+  };
   const [supermarketId, setSupermarketId] = useState<string>('');
   const [branchId, setBranchId] = useState<string>('');
   const [analytics, setAnalytics] = useState<AdminAnalyticsPayload | null>(null);
@@ -283,6 +309,7 @@ export const AdminAnalyticsSection: React.FC<AdminAnalyticsSectionProps> = ({ to
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [isExportingCsv, setIsExportingCsv] = useState<boolean>(false);
+  const [activityChartMode, setActivityChartMode] = useState<'area' | 'line'>('area');
 
   const buildQueryString = (r: AnalyticsRange, smId: string, brId: string) => {
     const params = new URLSearchParams();
@@ -313,6 +340,7 @@ export const AdminAnalyticsSection: React.FC<AdminAnalyticsSectionProps> = ({ to
         setErrorMsg(data?.error || 'Could not load platform analytics.');
       } else {
         setAnalytics(data);
+        onAnalyticsLoaded?.(data);
       }
     } catch {
       setErrorMsg('Network error loading platform analytics.');
@@ -324,9 +352,14 @@ export const AdminAnalyticsSection: React.FC<AdminAnalyticsSectionProps> = ({ to
 
   useEffect(() => {
     fetchAnalytics(range, supermarketId, branchId);
+    onFilterChange?.(supermarketId, branchId);
   }, [token, range, supermarketId, branchId]);
 
   const handleExportCsv = async () => {
+    if (onExportCsv) {
+      onExportCsv(supermarketId, branchId);
+      return;
+    }
     if (!token || isExportingCsv) return;
     setIsExportingCsv(true);
     try {
@@ -386,13 +419,13 @@ export const AdminAnalyticsSection: React.FC<AdminAnalyticsSectionProps> = ({ to
           {Array.from({ length: 6 }).map((_, idx) => (
             <div
               key={idx}
-              className="h-28 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-4 animate-pulse"
+              className="h-28 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-4 animate-pulse motion-reduce:animate-none"
             />
           ))}
         </div>
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <div className="h-72 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 animate-pulse" />
-          <div className="h-72 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 animate-pulse" />
+          <div className="h-72 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 animate-pulse motion-reduce:animate-none" />
+          <div className="h-72 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 animate-pulse motion-reduce:animate-none" />
         </div>
       </div>
     );
@@ -481,20 +514,22 @@ export const AdminAnalyticsSection: React.FC<AdminAnalyticsSectionProps> = ({ to
               className="min-h-10 px-3.5 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 inline-flex items-center gap-1.5 transition whitespace-nowrap"
             >
               <RefreshCw
-                className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`}
+                className={`w-3.5 h-3.5 ${isRefreshing && !reducedMotion ? 'animate-spin' : ''}`}
                 aria-hidden="true"
               />
               <span>Refresh</span>
             </button>
-            <button
-              type="button"
-              onClick={handleExportCsv}
-              disabled={isExportingCsv}
-              className="min-h-10 px-4 py-2 rounded-xl bg-slate-900 dark:bg-emerald-600 hover:bg-slate-800 dark:hover:bg-emerald-500 text-white text-xs font-semibold inline-flex items-center gap-1.5 transition whitespace-nowrap"
-            >
-              <Download className="w-3.5 h-3.5" aria-hidden="true" />
-              <span>{t.analyticsExportCsv}</span>
-            </button>
+            {!hideExportButton && (
+              <button
+                type="button"
+                onClick={handleExportCsv}
+                disabled={controlledExportingCsv ?? isExportingCsv}
+                className="min-h-10 px-4 py-2 rounded-xl bg-slate-900 dark:bg-emerald-600 hover:bg-slate-800 dark:hover:bg-emerald-500 text-white text-xs font-semibold inline-flex items-center gap-1.5 transition whitespace-nowrap"
+              >
+                <Download className="w-3.5 h-3.5" aria-hidden="true" />
+                <span>{t.analyticsExportCsv}</span>
+              </button>
+            )}
           </div>
         </div>
 
@@ -617,74 +652,157 @@ export const AdminAnalyticsSection: React.FC<AdminAnalyticsSectionProps> = ({ to
         isEmpty={!hasActivityTimeSeries}
         emptyLabel={t.analyticsNoDataYet}
         reducedMotion={reducedMotion}
+        headerRight={
+          <div
+            role="group"
+            aria-label="Chart style"
+            className="flex items-center gap-1 p-1 rounded-xl bg-slate-100 dark:bg-slate-800"
+          >
+            {(['area', 'line'] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                onClick={() => setActivityChartMode(mode)}
+                className={`min-h-8 px-2.5 py-1 rounded-lg text-xs font-semibold capitalize transition whitespace-nowrap motion-reduce:transition-none ${
+                  activityChartMode === mode
+                    ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
+                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                }`}
+              >
+                {mode}
+              </button>
+            ))}
+          </div>
+        }
       >
         {() => (
           <ResponsiveContainer width="100%" height="100%">
-            <AreaChart
-              data={analytics.activityOverTime}
-              margin={{ top: 10, right: 16, left: 0, bottom: 8 }}
-            >
-              <defs>
-                <linearGradient id="gradSignups" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor={COLORS.signups} stopOpacity={0.28} />
-                  <stop offset="95%" stopColor={COLORS.signups} stopOpacity={0.02} />
-                </linearGradient>
-                <linearGradient id="gradCartsFinished" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor={COLORS.cartsFinished} stopOpacity={0.28} />
-                  <stop offset="95%" stopColor={COLORS.cartsFinished} stopOpacity={0.02} />
-                </linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.22)" />
-              <XAxis
-                dataKey="label"
-                tick={{ fontSize: 11, fill: '#94a3b8' }}
-                tickLine={false}
-                axisLine={false}
-              />
-              <YAxis
-                allowDecimals={false}
-                tick={{ fontSize: 11, fill: '#94a3b8' }}
-                tickLine={false}
-                axisLine={false}
-                width={38}
-              />
-              <Tooltip
-                contentStyle={TOOLTIP_STYLE}
-                itemStyle={TOOLTIP_ITEM_STYLE}
-                labelStyle={TOOLTIP_LABEL_STYLE}
-              />
-              <Legend wrapperStyle={{ fontSize: '12px' }} />
-              <Area
-                type="monotone"
-                dataKey="signups"
-                name="New Sign-Ups (accounts)"
-                stroke={COLORS.signups}
-                strokeWidth={2}
-                fill="url(#gradSignups)"
-                isAnimationActive={!reducedMotion}
-                animationDuration={700}
-              />
-              <Area
-                type="monotone"
-                dataKey="cartsStarted"
-                name="Carts Started (carts)"
-                stroke={COLORS.cartsStarted}
-                strokeWidth={2}
-                fillOpacity={0}
-                isAnimationActive={!reducedMotion}
-                animationDuration={750}
-              />
-              <Area
-                type="monotone"
-                dataKey="cartsFinished"
-                name="Carts Finished (carts)"
-                stroke={COLORS.cartsFinished}
-                strokeWidth={2}
-                fill="url(#gradCartsFinished)"
-                isAnimationActive={!reducedMotion}
-                animationDuration={800}
-              />
-            </AreaChart>
+            {activityChartMode === 'area' ? (
+              <AreaChart
+                data={analytics.activityOverTime}
+                margin={{ top: 10, right: 16, left: 0, bottom: 8 }}
+              >
+                <defs>
+                  <linearGradient id="gradSignups" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor={COLORS.signups} stopOpacity={0.28} />
+                    <stop offset="95%" stopColor={COLORS.signups} stopOpacity={0.02} />
+                  </linearGradient>
+                  <linearGradient id="gradCartsFinished" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor={COLORS.cartsFinished} stopOpacity={0.28} />
+                    <stop offset="95%" stopColor={COLORS.cartsFinished} stopOpacity={0.02} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.22)" />
+                <XAxis
+                  dataKey="label"
+                  tick={{ fontSize: 11, fill: '#94a3b8' }}
+                  tickLine={false}
+                  axisLine={false}
+                />
+                <YAxis
+                  allowDecimals={false}
+                  tick={{ fontSize: 11, fill: '#94a3b8' }}
+                  tickLine={false}
+                  axisLine={false}
+                  width={38}
+                />
+                <Tooltip
+                  contentStyle={TOOLTIP_STYLE}
+                  itemStyle={TOOLTIP_ITEM_STYLE}
+                  labelStyle={TOOLTIP_LABEL_STYLE}
+                />
+                <Legend wrapperStyle={{ fontSize: '12px' }} />
+                <Area
+                  type="monotone"
+                  dataKey="signups"
+                  name="New Sign-Ups (accounts)"
+                  stroke={COLORS.signups}
+                  strokeWidth={2}
+                  fill="url(#gradSignups)"
+                  isAnimationActive={!reducedMotion}
+                  animationDuration={reducedMotion ? 0 : 700}
+                />
+                <Area
+                  type="monotone"
+                  dataKey="cartsStarted"
+                  name="Carts Started (carts)"
+                  stroke={COLORS.cartsStarted}
+                  strokeWidth={2}
+                  fillOpacity={0}
+                  isAnimationActive={!reducedMotion}
+                  animationDuration={reducedMotion ? 0 : 750}
+                />
+                <Area
+                  type="monotone"
+                  dataKey="cartsFinished"
+                  name="Carts Finished (carts)"
+                  stroke={COLORS.cartsFinished}
+                  strokeWidth={2}
+                  fill="url(#gradCartsFinished)"
+                  isAnimationActive={!reducedMotion}
+                  animationDuration={reducedMotion ? 0 : 800}
+                />
+              </AreaChart>
+            ) : (
+              <LineChart
+                data={analytics.activityOverTime}
+                margin={{ top: 10, right: 16, left: 0, bottom: 8 }}
+              >
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.22)" />
+                <XAxis
+                  dataKey="label"
+                  tick={{ fontSize: 11, fill: '#94a3b8' }}
+                  tickLine={false}
+                  axisLine={false}
+                />
+                <YAxis
+                  allowDecimals={false}
+                  tick={{ fontSize: 11, fill: '#94a3b8' }}
+                  tickLine={false}
+                  axisLine={false}
+                  width={38}
+                />
+                <Tooltip
+                  contentStyle={TOOLTIP_STYLE}
+                  itemStyle={TOOLTIP_ITEM_STYLE}
+                  labelStyle={TOOLTIP_LABEL_STYLE}
+                />
+                <Legend wrapperStyle={{ fontSize: '12px' }} />
+                <Line
+                  type="monotone"
+                  dataKey="signups"
+                  name="New Sign-Ups (accounts)"
+                  stroke={COLORS.signups}
+                  strokeWidth={2.5}
+                  dot={{ r: 3 }}
+                  activeDot={{ r: 5 }}
+                  isAnimationActive={!reducedMotion}
+                  animationDuration={reducedMotion ? 0 : 700}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="cartsStarted"
+                  name="Carts Started (carts)"
+                  stroke={COLORS.cartsStarted}
+                  strokeWidth={2.5}
+                  dot={{ r: 3 }}
+                  activeDot={{ r: 5 }}
+                  isAnimationActive={!reducedMotion}
+                  animationDuration={reducedMotion ? 0 : 750}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="cartsFinished"
+                  name="Carts Finished (carts)"
+                  stroke={COLORS.cartsFinished}
+                  strokeWidth={2.5}
+                  dot={{ r: 3 }}
+                  activeDot={{ r: 5 }}
+                  isAnimationActive={!reducedMotion}
+                  animationDuration={reducedMotion ? 0 : 800}
+                />
+              </LineChart>
+            )}
           </ResponsiveContainer>
         )}
       </ChartCard>

@@ -48,17 +48,76 @@ import {
   X,
 } from 'lucide-react';
 import { useBodyScrollLock } from '../hooks/useBodyScrollLock';
+import { usePrefersReducedMotion } from '../hooks/useAnalyticsMotion';
 import { AdminAnalyticsSection } from '../components/AdminAnalyticsSection';
+import {
+  ResponsiveContainer,
+  AreaChart,
+  Area,
+  LineChart,
+  Line,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+} from 'recharts';
+import type { AdminAnalyticsPayload, AnalyticsRange } from '../types';
+
+function getDateRangeBounds(range: AnalyticsRange): { startDate: string; endDate: string } {
+  const now = new Date();
+  const endDate = now.toISOString();
+  const DAY_MS = 24 * 60 * 60 * 1000;
+
+  if (range === 'today') {
+    const startToday = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate(),
+      0,
+      0,
+      0,
+      0
+    );
+    return { startDate: startToday.toISOString(), endDate };
+  }
+
+  if (range === 'year') {
+    const startYear = new Date(now.getFullYear(), 0, 1, 0, 0, 0, 0);
+    return { startDate: startYear.toISOString(), endDate };
+  }
+
+  const days = range === '7d' ? 7 : range === '90d' ? 90 : 30;
+  return {
+    startDate: new Date(now.getTime() - days * DAY_MS).toISOString(),
+    endDate,
+  };
+}
 
 export const AdminView: React.FC = () => {
   const { token, user, reloadUser } = useAuth();
   const { t, language } = useTranslation();
 
+  const reducedMotion = usePrefersReducedMotion();
+
   const [activeTab, setActiveTab] = useState<
     'analytics' | 'metrics' | 'reports' | 'supermarkets' | 'users' | 'rewards' | 'loyalty_settings' | 'announcements' | 'support' | 'audit'
   >('analytics');
 
+  const [dateRange, setDateRange] = useState<AnalyticsRange>('30d');
+  const [isRangeLoading, setIsRangeLoading] = useState(false);
+  const [analyticsFilters, setAnalyticsFilters] = useState<{
+    supermarketId: string;
+    branchId: string;
+  }>({ supermarketId: '', branchId: '' });
+  const [isExportingAnalyticsCsv, setIsExportingAnalyticsCsv] = useState(false);
+  const [analyticsCsvError, setAnalyticsCsvError] = useState<string | null>(null);
+
   const [metrics, setMetrics] = useState<any>(null);
+  const [overviewActivity, setOverviewActivity] = useState<AdminAnalyticsPayload['activityOverTime']>([]);
+  const [overviewChartMode, setOverviewChartMode] = useState<'area' | 'line'>('area');
   const [reportsData, setReportsData] = useState<any>(null);
   const [supermarkets, setSupermarkets] = useState<Supermarket[]>([]);
   const [users, setUsers] = useState<User[]>([]);
@@ -172,20 +231,29 @@ export const AdminView: React.FC = () => {
       Boolean(rewardEditor)
   );
 
-  const loadAdminData = async () => {
+  const loadAdminData = async (targetRange: AnalyticsRange = dateRange) => {
     if (!token) return;
     try {
-      const [mRes, sRes, uRes, aRes, tRes, lRes, rRes, rewRes, ordRes, setRes] = await Promise.all([
+      const bounds = getDateRangeBounds(targetRange);
+      const reportQs = new URLSearchParams({
+        startDate: bounds.startDate,
+        endDate: bounds.endDate,
+      }).toString();
+
+      const [mRes, sRes, uRes, aRes, tRes, lRes, rRes, rewRes, ordRes, setRes, anRes] = await Promise.all([
         fetch('/api/admin/metrics', { headers: { Authorization: `Bearer ${token}` } }),
         fetch('/api/supermarkets', { headers: { Authorization: `Bearer ${token}` } }),
         fetch('/api/admin/users', { headers: { Authorization: `Bearer ${token}` } }),
         fetch('/api/announcements', { headers: { Authorization: `Bearer ${token}` } }),
         fetch('/api/support', { headers: { Authorization: `Bearer ${token}` } }),
         fetch('/api/audit-logs', { headers: { Authorization: `Bearer ${token}` } }),
-        fetch('/api/reports', { headers: { Authorization: `Bearer ${token}` } }),
+        fetch(`/api/reports?${reportQs}`, { headers: { Authorization: `Bearer ${token}` } }),
         fetch('/api/admin/rewards', { headers: { Authorization: `Bearer ${token}` } }),
         fetch('/api/admin/redemptions', { headers: { Authorization: `Bearer ${token}` } }),
         fetch('/api/admin/loyalty/settings', { headers: { Authorization: `Bearer ${token}` } }),
+        fetch(`/api/admin/analytics?range=${encodeURIComponent(targetRange)}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        }),
       ]);
 
       if (mRes.ok) setMetrics(await mRes.json());
@@ -222,14 +290,73 @@ export const AdminView: React.FC = () => {
       if (setRes.ok) {
         setLoyaltySettings(await setRes.json());
       }
+      if (anRes.ok) {
+        const d = await anRes.json();
+        if (Array.isArray(d?.activityOverTime)) setOverviewActivity(d.activityOverTime);
+      }
     } catch (e) {
       console.error(e);
     }
   };
 
   useEffect(() => {
-    loadAdminData();
+    loadAdminData(dateRange);
   }, [token]);
+
+  const handleDateRangeChange = async (nextRange: AnalyticsRange) => {
+    setDateRange(nextRange);
+    if (!token) return;
+    setIsRangeLoading(true);
+    try {
+      const bounds = getDateRangeBounds(nextRange);
+      const reportQs = new URLSearchParams({
+        startDate: bounds.startDate,
+        endDate: bounds.endDate,
+      }).toString();
+
+      const requests: Array<Promise<Response>> = [
+        fetch(`/api/reports?${reportQs}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+      ];
+
+      // When Analytics tab is active, AdminAnalyticsSection performs the /api/admin/analytics fetch
+      // and propagates activityOverTime back via onAnalyticsLoaded to avoid duplicate requests.
+      if (activeTab !== 'analytics') {
+        requests.push(
+          fetch(`/api/admin/analytics?range=${encodeURIComponent(nextRange)}`, {
+            headers: { Authorization: `Bearer ${token}` },
+          })
+        );
+      }
+
+      const [rRes, anRes] = await Promise.all(requests);
+      if (rRes?.ok) {
+        setReportsData(await rRes.json());
+      }
+      if (anRes?.ok) {
+        const d = await anRes.json();
+        if (Array.isArray(d?.activityOverTime)) {
+          setOverviewActivity(d.activityOverTime);
+        }
+      }
+    } catch (e) {
+      console.error('Failed to fetch date-scoped analytics:', e);
+    } finally {
+      setIsRangeLoading(false);
+    }
+  };
+
+  const selectedRangeLabel =
+    dateRange === 'today'
+      ? t.analyticsRangeToday
+      : dateRange === '7d'
+      ? t.analyticsRange7d
+      : dateRange === '90d'
+      ? t.analyticsRange90d
+      : dateRange === 'year'
+      ? t.analyticsRangeYear
+      : t.analyticsRange30d;
 
   // Supermarket toggle/set status (approve / reject / suspend)
   const handleToggleSupermarketStatus = async (
@@ -475,11 +602,56 @@ export const AdminView: React.FC = () => {
     }
   };
 
-  // Export CSV with Bearer auth (no window.open)
+  // Export server-aggregated, zero-PII analytics CSV with Bearer auth
+  const handleExportAnalyticsCsv = async (
+    overrideFilters?: { supermarketId?: string; branchId?: string }
+  ) => {
+    if (!token || isExportingAnalyticsCsv) return;
+    setIsExportingAnalyticsCsv(true);
+    setAnalyticsCsvError(null);
+    try {
+      const params = new URLSearchParams();
+      params.set('range', dateRange);
+      const smId = overrideFilters?.supermarketId ?? analyticsFilters.supermarketId;
+      const brId = overrideFilters?.branchId ?? analyticsFilters.branchId;
+      if (smId) params.set('supermarketId', smId);
+      if (brId) params.set('branchId', brId);
+
+      const res = await fetch(`/api/admin/analytics/csv?${params.toString()}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        setAnalyticsCsvError(data?.error || 'Could not export analytics CSV.');
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `smartcart_admin_analytics_${dateRange}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      setAnalyticsCsvError('Network error exporting analytics CSV.');
+    } finally {
+      setIsExportingAnalyticsCsv(false);
+    }
+  };
+
+  // Export Traffic/Products CSV with Bearer auth scoped to active date range (no window.open)
   const handleExportReportCsv = async (type: 'traffic' | 'products' | 'branches') => {
     if (!token) return;
     try {
-      const res = await fetch(`/api/reports/csv?type=${type}`, {
+      const bounds = getDateRangeBounds(dateRange);
+      const qs = new URLSearchParams({
+        type,
+        startDate: bounds.startDate,
+        endDate: bounds.endDate,
+      }).toString();
+      const res = await fetch(`/api/reports/csv?${qs}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) return;
@@ -487,7 +659,7 @@ export const AdminView: React.FC = () => {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `smartcart_${type}_report.csv`;
+      a.download = `smartcart_${type}_report_${dateRange}.csv`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -735,54 +907,125 @@ export const AdminView: React.FC = () => {
         </button>
       </div>
 
-      {/* Admin Navigation Tabs */}
-      <div
-        role="tablist"
-        aria-label="Admin sections"
-        className="flex items-center gap-1.5 p-1.5 bg-slate-100 dark:bg-slate-800 rounded-2xl overflow-x-auto"
-      >
-        {[
-          { id: 'analytics', label: t.adminTabAnalytics, icon: <TrendingUp className="w-4 h-4 shrink-0" /> },
-          { id: 'metrics', label: t.platformReports, icon: <BarChart2 className="w-4 h-4 shrink-0" /> },
-          { id: 'reports', label: 'Traffic Reports', icon: <Calendar className="w-4 h-4 shrink-0" /> },
-          { id: 'supermarkets', label: t.allSupermarkets, icon: <Building2 className="w-4 h-4 shrink-0" /> },
-          { id: 'users', label: t.allUsers, icon: <Users className="w-4 h-4 shrink-0" /> },
-          { id: 'rewards', label: t.adminTabRewards, icon: <Gift className="w-4 h-4 shrink-0" /> },
-          { id: 'loyalty_settings', label: t.adminTabLoyaltySettings, icon: <Sliders className="w-4 h-4 shrink-0" /> },
-          { id: 'announcements', label: t.announcements, icon: <Bell className="w-4 h-4 shrink-0" /> },
-          { id: 'support', label: t.supportInbox, icon: <MessageSquare className="w-4 h-4 shrink-0" /> },
-          { id: 'audit', label: t.auditLog, icon: <History className="w-4 h-4 shrink-0" /> },
-        ].map((tab) => (
-          <button
-            key={tab.id}
-            type="button"
-            role="tab"
-            aria-selected={activeTab === tab.id}
-            onClick={() => setActiveTab(tab.id as any)}
-            className={`min-h-10 flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap shrink-0 transition active:scale-95 ${
-              activeTab === tab.id
-                ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
-                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-            }`}
+      {/* Admin Navigation Tabs + Unified Date Range Filter Dropdown */}
+      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+        <div
+          role="tablist"
+          aria-label="Admin sections"
+          className="flex items-center gap-1.5 p-1.5 bg-slate-100 dark:bg-slate-800 rounded-2xl overflow-x-auto flex-1 min-w-0"
+        >
+          {[
+            { id: 'analytics', label: t.adminTabAnalytics, icon: <TrendingUp className="w-4 h-4 shrink-0" /> },
+            { id: 'metrics', label: t.platformReports, icon: <BarChart2 className="w-4 h-4 shrink-0" /> },
+            { id: 'reports', label: 'Traffic Reports', icon: <Calendar className="w-4 h-4 shrink-0" /> },
+            { id: 'supermarkets', label: t.allSupermarkets, icon: <Building2 className="w-4 h-4 shrink-0" /> },
+            { id: 'users', label: t.allUsers, icon: <Users className="w-4 h-4 shrink-0" /> },
+            { id: 'rewards', label: t.adminTabRewards, icon: <Gift className="w-4 h-4 shrink-0" /> },
+            { id: 'loyalty_settings', label: t.adminTabLoyaltySettings, icon: <Sliders className="w-4 h-4 shrink-0" /> },
+            { id: 'announcements', label: t.announcements, icon: <Bell className="w-4 h-4 shrink-0" /> },
+            { id: 'support', label: t.supportInbox, icon: <MessageSquare className="w-4 h-4 shrink-0" /> },
+            { id: 'audit', label: t.auditLog, icon: <History className="w-4 h-4 shrink-0" /> },
+          ].map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              role="tab"
+              aria-selected={activeTab === tab.id}
+              onClick={() => setActiveTab(tab.id as any)}
+              className={`min-h-10 flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap shrink-0 transition active:scale-95 motion-reduce:transition-none motion-reduce:active:scale-100 ${
+                activeTab === tab.id
+                  ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+              }`}
+            >
+              {tab.icon}
+              <span>{tab.label}</span>
+              {tab.id === 'supermarkets' && pendingSupermarketCount > 0 && (
+                <span className="px-1.5 py-0.5 rounded-full bg-amber-500 text-white text-[10px] font-black leading-none tabular-nums">
+                  {pendingSupermarketCount}
+                </span>
+              )}
+              {tab.id === 'rewards' && requestedOrdersCount > 0 && (
+                <span className="px-1.5 py-0.5 rounded-full bg-emerald-600 text-white text-[10px] font-black leading-none tabular-nums">
+                  {requestedOrdersCount}
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2 shrink-0 self-end lg:self-auto">
+          <label
+            htmlFor="admin-unified-date-range"
+            className="text-xs font-semibold text-slate-600 dark:text-slate-400 whitespace-nowrap flex items-center gap-1.5"
           >
-            {tab.icon}
-            <span>{tab.label}</span>
-            {tab.id === 'supermarkets' && pendingSupermarketCount > 0 && (
-              <span className="px-1.5 py-0.5 rounded-full bg-amber-500 text-white text-[10px] font-black leading-none tabular-nums">
-                {pendingSupermarketCount}
-              </span>
-            )}
-            {tab.id === 'rewards' && requestedOrdersCount > 0 && (
-              <span className="px-1.5 py-0.5 rounded-full bg-emerald-600 text-white text-[10px] font-black leading-none tabular-nums">
-                {requestedOrdersCount}
-              </span>
-            )}
+            <Calendar className="w-4 h-4 text-slate-500 dark:text-slate-400" aria-hidden="true" />
+            <span>Date Range</span>
+          </label>
+          <select
+            id="admin-unified-date-range"
+            aria-label="Unified dashboard date range filter"
+            value={dateRange}
+            disabled={isRangeLoading}
+            onChange={(e) => handleDateRangeChange(e.target.value as AnalyticsRange)}
+            className="min-h-10 px-3.5 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs font-semibold text-slate-900 dark:text-white shadow-xs focus:outline-none focus:ring-2 focus:ring-emerald-500/40 disabled:opacity-60"
+          >
+            <option value="today">{t.analyticsRangeToday}</option>
+            <option value="7d">{t.analyticsRange7d}</option>
+            <option value="30d">{t.analyticsRange30d}</option>
+            <option value="90d">{t.analyticsRange90d}</option>
+            <option value="year">{t.analyticsRangeYear}</option>
+          </select>
+          <button
+            type="button"
+            onClick={() => handleExportAnalyticsCsv()}
+            disabled={isExportingAnalyticsCsv}
+            aria-label={t.analyticsExportCsv}
+            className="min-h-10 px-4 py-2 rounded-xl bg-slate-900 dark:bg-emerald-600 hover:bg-slate-800 dark:hover:bg-emerald-500 text-white text-xs font-semibold inline-flex items-center gap-1.5 transition whitespace-nowrap shrink-0 disabled:opacity-60 motion-reduce:transition-none"
+          >
+            <Download className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+            <span>{t.analyticsExportCsv}</span>
           </button>
-        ))}
+        </div>
       </div>
 
+      {analyticsCsvError && (
+        <div
+          role="alert"
+          className="px-4 py-2.5 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/60 text-xs font-medium text-rose-700 dark:text-rose-300 flex items-center justify-between gap-2"
+        >
+          <span>{analyticsCsvError}</span>
+          <button
+            type="button"
+            onClick={() => setAnalyticsCsvError(null)}
+            className="text-rose-700 dark:text-rose-300 hover:underline font-semibold"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {/* 1. ANALYTICS DASHBOARD TAB */}
-      {activeTab === 'analytics' && <AdminAnalyticsSection token={token} />}
+      {activeTab === 'analytics' && (
+        <AdminAnalyticsSection
+          token={token}
+          range={dateRange}
+          onRangeChange={handleDateRangeChange}
+          onFilterChange={(smId, brId) =>
+            setAnalyticsFilters({ supermarketId: smId, branchId: brId })
+          }
+          onExportCsv={(smId, brId) =>
+            handleExportAnalyticsCsv({ supermarketId: smId, branchId: brId })
+          }
+          isExportingCsv={isExportingAnalyticsCsv}
+          hideExportButton
+          onAnalyticsLoaded={(payload) => {
+            if (Array.isArray(payload?.activityOverTime)) {
+              setOverviewActivity(payload.activityOverTime);
+            }
+          }}
+        />
+      )}
 
       {/* 1B. PLATFORM OVERVIEW METRICS TAB */}
       {activeTab === 'metrics' && metrics && (
@@ -819,27 +1062,188 @@ export const AdminView: React.FC = () => {
               </p>
             </div>
           </div>
+
+          {/* Date-Range-Scoped Sign-Ups & Cart Activity Recharts Trend */}
+          <section className="p-5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-4 min-w-0">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h2 className="text-sm font-bold text-slate-900 dark:text-white">
+                  Sign-Ups &amp; Cart Activity ({selectedRangeLabel})
+                </h2>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                  Aggregated shopper registrations, carts started, and carts finished
+                </p>
+              </div>
+              <div
+                role="group"
+                aria-label="Overview chart style"
+                className="flex items-center gap-1 p-1 rounded-xl bg-slate-100 dark:bg-slate-800"
+              >
+                {(['area', 'line'] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setOverviewChartMode(mode)}
+                    className={`min-h-8 px-2.5 py-1 rounded-lg text-xs font-semibold capitalize transition whitespace-nowrap motion-reduce:transition-none ${
+                      overviewChartMode === mode
+                        ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
+                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                    }`}
+                  >
+                    {mode}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {overviewActivity.length === 0 ? (
+              <div className="h-64 flex items-center justify-center rounded-xl border border-dashed border-slate-200 dark:border-slate-800 text-xs text-slate-500 dark:text-slate-400">
+                {t.analyticsNoDataYet}
+              </div>
+            ) : (
+              <div className="h-72 w-full min-w-0">
+                <ResponsiveContainer width="100%" height="100%">
+                  {overviewChartMode === 'area' ? (
+                    <AreaChart
+                      data={overviewActivity}
+                      margin={{ top: 10, right: 16, left: 0, bottom: 8 }}
+                    >
+                      <defs>
+                        <linearGradient id="adminOverviewSignups" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#0ea5e9" stopOpacity={0.28} />
+                          <stop offset="95%" stopColor="#0ea5e9" stopOpacity={0.02} />
+                        </linearGradient>
+                        <linearGradient id="adminOverviewCarts" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#10b981" stopOpacity={0.28} />
+                          <stop offset="95%" stopColor="#10b981" stopOpacity={0.02} />
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.22)" />
+                      <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#94a3b8' }} tickLine={false} axisLine={false} />
+                      <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: '#94a3b8' }} tickLine={false} axisLine={false} width={36} />
+                      <Tooltip
+                        contentStyle={{
+                          borderRadius: '12px',
+                          border: '1px solid rgba(148,163,184,0.3)',
+                          backgroundColor: 'rgba(15,23,42,0.96)',
+                          color: '#f8fafc',
+                          fontSize: '12px',
+                        }}
+                      />
+                      <Legend wrapperStyle={{ fontSize: '12px' }} />
+                      <Area
+                        type="monotone"
+                        dataKey="signups"
+                        name="New Sign-Ups"
+                        stroke="#0ea5e9"
+                        strokeWidth={2}
+                        fill="url(#adminOverviewSignups)"
+                        isAnimationActive={!reducedMotion}
+                        animationDuration={reducedMotion ? 0 : 700}
+                      />
+                      <Area
+                        type="monotone"
+                        dataKey="cartsStarted"
+                        name="Carts Started"
+                        stroke="#6366f1"
+                        strokeWidth={2}
+                        fillOpacity={0}
+                        isAnimationActive={!reducedMotion}
+                        animationDuration={reducedMotion ? 0 : 750}
+                      />
+                      <Area
+                        type="monotone"
+                        dataKey="cartsFinished"
+                        name="Carts Finished"
+                        stroke="#10b981"
+                        strokeWidth={2}
+                        fill="url(#adminOverviewCarts)"
+                        isAnimationActive={!reducedMotion}
+                        animationDuration={reducedMotion ? 0 : 800}
+                      />
+                    </AreaChart>
+                  ) : (
+                    <LineChart
+                      data={overviewActivity}
+                      margin={{ top: 10, right: 16, left: 0, bottom: 8 }}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.22)" />
+                      <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#94a3b8' }} tickLine={false} axisLine={false} />
+                      <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: '#94a3b8' }} tickLine={false} axisLine={false} width={36} />
+                      <Tooltip
+                        contentStyle={{
+                          borderRadius: '12px',
+                          border: '1px solid rgba(148,163,184,0.3)',
+                          backgroundColor: 'rgba(15,23,42,0.96)',
+                          color: '#f8fafc',
+                          fontSize: '12px',
+                        }}
+                      />
+                      <Legend wrapperStyle={{ fontSize: '12px' }} />
+                      <Line
+                        type="monotone"
+                        dataKey="signups"
+                        name="New Sign-Ups"
+                        stroke="#0ea5e9"
+                        strokeWidth={2.5}
+                        dot={{ r: 3 }}
+                        isAnimationActive={!reducedMotion}
+                        animationDuration={reducedMotion ? 0 : 700}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="cartsStarted"
+                        name="Carts Started"
+                        stroke="#6366f1"
+                        strokeWidth={2.5}
+                        dot={{ r: 3 }}
+                        isAnimationActive={!reducedMotion}
+                        animationDuration={reducedMotion ? 0 : 750}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="cartsFinished"
+                        name="Carts Finished"
+                        stroke="#10b981"
+                        strokeWidth={2.5}
+                        dot={{ r: 3 }}
+                        isAnimationActive={!reducedMotion}
+                        animationDuration={reducedMotion ? 0 : 800}
+                      />
+                    </LineChart>
+                  )}
+                </ResponsiveContainer>
+              </div>
+            )}
+          </section>
         </div>
       )}
 
       {/* 2. PLATFORM-WIDE REPORTS (PHASE 2) */}
       {activeTab === 'reports' && reportsData && (
         <div className="space-y-6">
-          <div className="flex items-center justify-between">
-            <h2 className="text-base font-bold text-slate-900 dark:text-white">
-              Platform-Wide Analytics &amp; Performance
-            </h2>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h2 className="text-base font-bold text-slate-900 dark:text-white">
+                Platform-Wide Analytics &amp; Performance ({selectedRangeLabel})
+              </h2>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                Hourly and weekday cart checkout distribution for the selected date range
+              </p>
+            </div>
             <div className="flex gap-2">
               <button
+                type="button"
                 onClick={() => handleExportReportCsv('traffic')}
-                className="py-1.5 px-3 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold flex items-center gap-1 text-slate-700 dark:text-slate-300"
+                className="min-h-9 py-1.5 px-3 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold flex items-center gap-1 text-slate-700 dark:text-slate-300"
               >
                 <Download className="w-3.5 h-3.5" />
                 <span>Export Traffic</span>
               </button>
               <button
+                type="button"
                 onClick={() => handleExportReportCsv('products')}
-                className="py-1.5 px-3 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold flex items-center gap-1 text-slate-700 dark:text-slate-300"
+                className="min-h-9 py-1.5 px-3 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold flex items-center gap-1 text-slate-700 dark:text-slate-300"
               >
                 <Download className="w-3.5 h-3.5" />
                 <span>Export Products</span>
@@ -848,57 +1252,103 @@ export const AdminView: React.FC = () => {
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            {/* Hourly chart */}
-            <div className="p-5 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-3">
+            {/* Hourly cart activity Recharts AreaChart */}
+            <div className="p-5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-3 min-w-0">
               <h3 className="text-xs font-bold text-slate-900 dark:text-white">
                 {t.bsyHours} (All Supermarkets)
               </h3>
-              <div className="h-40 flex items-end gap-1 pt-4">
-                {(reportsData.busiestHours || (reportsData.hourCounts || []).map((count: number, hour: number) => ({ hour, count }))).map((item: any, _idx: number, arr: any[]) => {
-                  const max = Math.max(...arr.map((h: any) => h.count || 0), 1);
-                  const heightPct = Math.round(((item.count || 0) / max) * 100);
-                  return (
-                    <div key={item.hour} className="flex-1 flex flex-col items-center gap-1 group">
-                      <div
-                        className="w-full bg-emerald-500 rounded-t-sm transition-all group-hover:bg-emerald-400 min-h-[4px]"
-                        style={{ height: `${Math.max(4, heightPct)}%` }}
-                        title={`${item.hour}:00 — ${item.count} carts`}
-                      />
-                      {item.hour % 3 === 0 && (
-                        <span className="text-[9px] text-slate-400 font-mono">
-                          {item.hour}h
-                        </span>
-                      )}
-                    </div>
-                  );
-                })}
+              <div className="h-56 w-full min-w-0">
+                <ResponsiveContainer width="100%" height="100%">
+                  <AreaChart
+                    data={(
+                      reportsData.busiestHours ||
+                      (reportsData.hourCounts || []).map((count: number, hour: number) => ({
+                        hour,
+                        count,
+                      }))
+                    ).map((item: any) => ({
+                      label: `${String(item.hour).padStart(2, '0')}:00`,
+                      carts: item.count || 0,
+                    }))}
+                    margin={{ top: 8, right: 12, left: 0, bottom: 4 }}
+                  >
+                    <defs>
+                      <linearGradient id="adminHourlyCartsGrad" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#10b981" stopOpacity={0.32} />
+                        <stop offset="95%" stopColor="#10b981" stopOpacity={0.02} />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.22)" />
+                    <XAxis dataKey="label" tick={{ fontSize: 10, fill: '#94a3b8' }} tickLine={false} axisLine={false} interval={2} />
+                    <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: '#94a3b8' }} tickLine={false} axisLine={false} width={32} />
+                    <Tooltip
+                      contentStyle={{
+                        borderRadius: '12px',
+                        border: '1px solid rgba(148,163,184,0.3)',
+                        backgroundColor: 'rgba(15,23,42,0.96)',
+                        color: '#f8fafc',
+                        fontSize: '12px',
+                      }}
+                    />
+                    <Area
+                      type="monotone"
+                      dataKey="carts"
+                      name="Carts"
+                      stroke="#10b981"
+                      strokeWidth={2}
+                      fill="url(#adminHourlyCartsGrad)"
+                      isAnimationActive={!reducedMotion}
+                      animationDuration={reducedMotion ? 0 : 650}
+                    />
+                  </AreaChart>
+                </ResponsiveContainer>
               </div>
             </div>
 
-            {/* Days of week chart */}
-            <div className="p-5 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-3">
+            {/* Days of week Recharts BarChart */}
+            <div className="p-5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-3 min-w-0">
               <h3 className="text-xs font-bold text-slate-900 dark:text-white">
                 {t.bsyDays} (All Supermarkets)
               </h3>
-              <div className="h-40 flex items-end gap-3 pt-4">
-                {(reportsData.busiestDays || ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'].map((day: string, idx: number) => ({ day, count: (reportsData.dayCounts || [])[idx] || 0 }))).map((item: any, _idx: number, arr: any[]) => {
-                  const max = Math.max(...arr.map((d: any) => d.count || 0), 1);
-                  const heightPct = Math.round(((item.count || 0) / max) * 100);
-                  return (
-                    <div key={item.day} className="flex-1 flex flex-col items-center gap-1 group">
-                      <span className="text-[10px] font-mono font-bold text-slate-700 dark:text-slate-300">
-                        {item.count}
-                      </span>
-                      <div
-                        className="w-full bg-teal-500 rounded-t-md transition-all group-hover:bg-teal-400 min-h-[6px]"
-                        style={{ height: `${Math.max(6, heightPct)}%` }}
-                      />
-                      <span className="text-[10px] text-slate-500 font-semibold truncate">
-                        {String(item.day || '').slice(0, 3)}
-                      </span>
-                    </div>
-                  );
-                })}
+              <div className="h-56 w-full min-w-0">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart
+                    data={(
+                      reportsData.busiestDays ||
+                      ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'].map(
+                        (day: string, idx: number) => ({
+                          day,
+                          count: (reportsData.dayCounts || [])[idx] || 0,
+                        })
+                      )
+                    ).map((item: any) => ({
+                      label: String(item.day || '').slice(0, 3),
+                      carts: item.count || 0,
+                    }))}
+                    margin={{ top: 8, right: 12, left: 0, bottom: 4 }}
+                  >
+                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.22)" />
+                    <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#94a3b8' }} tickLine={false} axisLine={false} />
+                    <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: '#94a3b8' }} tickLine={false} axisLine={false} width={32} />
+                    <Tooltip
+                      contentStyle={{
+                        borderRadius: '12px',
+                        border: '1px solid rgba(148,163,184,0.3)',
+                        backgroundColor: 'rgba(15,23,42,0.96)',
+                        color: '#f8fafc',
+                        fontSize: '12px',
+                      }}
+                    />
+                    <Bar
+                      dataKey="carts"
+                      name="Carts"
+                      fill="#14b8a6"
+                      radius={[4, 4, 0, 0]}
+                      isAnimationActive={!reducedMotion}
+                      animationDuration={reducedMotion ? 0 : 650}
+                    />
+                  </BarChart>
+                </ResponsiveContainer>
               </div>
             </div>
           </div>

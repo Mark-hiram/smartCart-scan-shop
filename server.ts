@@ -4409,6 +4409,21 @@ app.get('/api/reports/csv', requireAuth, (req, res) => {
   let csvContent = '';
   let filename = 'smartcart_report.csv';
 
+  const safeCell = (raw: unknown) => {
+    const str = String(raw ?? '');
+    const trimmed = str.trimStart();
+    const guarded =
+      trimmed.startsWith('=') ||
+      trimmed.startsWith('+') ||
+      trimmed.startsWith('-') ||
+      trimmed.startsWith('@') ||
+      trimmed.startsWith('\t') ||
+      trimmed.startsWith('\r')
+        ? `'${str}`
+        : str;
+    return `"${guarded.replace(/"/g, '""')}"`;
+  };
+
   if (resolvedType === 'busiest_hours' || resolvedType === 'traffic') {
     filename = 'busiest_hours_report.csv';
     csvContent = 'hour_of_day,carts_checked_out\n' + reports.hourCounts.map((count: number, hr: number) => `${hr}:00,${count}`).join('\n');
@@ -4418,13 +4433,41 @@ app.get('/api/reports/csv', requireAuth, (req, res) => {
     csvContent = 'day_of_week,carts_checked_out\n' + reports.dayCounts.map((count: number, d: number) => `${days[d]},${count}`).join('\n');
   } else if (resolvedType === 'most_scanned' || resolvedType === 'products') {
     filename = 'most_scanned_products.csv';
-    csvContent = 'barcode,name,aisle,shelf,scans_count,total_revenue_kes\n' + reports.topProducts.map((p: any) => `${p.barcode},"${p.name.replace(/"/g, '""')}",${p.aisle},${p.shelf},${p.count},${p.totalValue}`).join('\n');
+    if (user.role === 'admin') {
+      csvContent =
+        'name,aisle,shelf,scans_count,total_cart_value_kes\n' +
+        reports.topProducts
+          .map((p: any) => [p.name, p.aisle, p.shelf, p.count, p.totalValue].map(safeCell).join(','))
+          .join('\n');
+    } else {
+      csvContent =
+        'barcode,name,aisle,shelf,scans_count,total_revenue_kes\n' +
+        reports.topProducts
+          .map((p: any) => `${p.barcode},"${p.name.replace(/"/g, '""')}",${p.aisle},${p.shelf},${p.count},${p.totalValue}`)
+          .join('\n');
+    }
   } else {
     filename = 'branch_comparison_report.csv';
-    csvContent = 'branch_id,branch_name,completed_carts,items_scanned,total_revenue_kes,avg_cart_value_kes,avg_cart_size\n' + reports.branchStats.map((b: any) => `${b.branchId},"${b.branchName.replace(/"/g, '""')}",${b.cartsCount},${b.totalItemsScanned},${b.revenue},${b.avgCartValue},${b.avgCartSize}`).join('\n');
+    if (user.role === 'admin') {
+      csvContent =
+        'branch_id,branch_name,completed_carts,items_scanned,total_cart_value_kes,avg_cart_value_kes,avg_cart_size\n' +
+        reports.branchStats
+          .map((b: any) =>
+            [b.branchId, b.branchName, b.cartsCount, b.totalItemsScanned, b.revenue, b.avgCartValue, b.avgCartSize]
+              .map(safeCell)
+              .join(',')
+          )
+          .join('\n');
+    } else {
+      csvContent =
+        'branch_id,branch_name,completed_carts,items_scanned,total_revenue_kes,avg_cart_value_kes,avg_cart_size\n' +
+        reports.branchStats
+          .map((b: any) => `${b.branchId},"${b.branchName.replace(/"/g, '""')}",${b.cartsCount},${b.totalItemsScanned},${b.revenue},${b.avgCartValue},${b.avgCartSize}`)
+          .join('\n');
+    }
   }
 
-  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
   res.send(csvContent);
 });
