@@ -522,6 +522,69 @@ export const translations = {
     statusVerified: 'Verified',
     statusCompleted: 'Completed',
     statusRejected: 'Rejected',
+
+    // Welcome Screen
+    welcomeHeadline: 'Welcome to Smart Cart',
+    welcomeSubtitle: 'Scan as you shop and know your total before you reach the cashier.',
+    welcomeHighlightScan: 'Scan barcodes',
+    welcomeHighlightTotal: 'See your running total',
+    welcomeHighlightLoyalty: 'Earn loyalty points',
+    welcomeGetStarted: 'Get started',
+    welcomeStoreOrStaffLink: "I'm a supermarket or staff member",
+    welcomeStoreOrStaffPrompt: 'Choose your workplace sign-in portal:',
+    welcomeOwnerChoice: 'Supermarket Owner',
+    welcomeOwnerDesc: 'Branches, stock & chain overview',
+    welcomeStaffChoice: 'Branch Staff / Cashier',
+    welcomeStaffDesc: 'Verify carts at the till & check stock',
+    aboutSmartCartLink: 'About Smart Cart',
+
+    // Goodbye Screen & Finish Shopping
+    finishShoppingBtn: 'Finish shopping',
+    showTillQrBtn: 'Show Till QR Code',
+    finishConfirmTitle: 'Are you done shopping?',
+    finishConfirmDesc: 'Closing your cart keeps your till code ready for the cashier and locks items from changes.',
+    finishConfirmYes: 'Yes, finish',
+    finishConfirmKeep: 'Keep shopping',
+    finishingCartProgress: 'Closing your cart...',
+    goodbyeHeadline: 'Goodbye & see you soon!',
+    goodbyeMessage: 'Thank you for shopping with Smart Cart. Goodbye and see you soon!',
+    goodbyeItemsLabel: 'Items',
+    goodbyeFinalTotalLabel: 'Final total',
+    goodbyeCartCodeLabel: 'Cart code',
+    goodbyeCashierInstruction: 'Show this code to the cashier to pay at the till. Smart Cart does not take payment.',
+    goodbyeEarnedPrefix: 'You earned',
+    goodbyeNewBalanceLabel: 'New balance',
+    goodbyePointsBalanceLabel: 'Points balance',
+    goodbyePointsPendingTill: 'Points are awarded once a cashier verifies your cart at the till.',
+    goodbyeOfflineNotice: "You're offline; we'll finish this when you're back online",
+    goodbyeStartNewCart: 'Start a new cart',
+    goodbyeViewRewards: 'View my rewards',
+    goodbyeSignOut: 'Sign out',
+    goodbyeSignIn: 'Sign in',
+    goodbyeBackDashboard: 'Back to dashboard',
+
+    // Admin Analytics Dashboard
+    adminTabAnalytics: 'Analytics',
+    analyticsTitle: 'Platform Analytics',
+    analyticsSubtitle: 'Aggregated activity across supermarkets, branches, scanning, loyalty, support, and security. Totals reflect shopper cart values only — no payments are collected in Smart Cart.',
+    analyticsRangeToday: 'Today',
+    analyticsRange7d: '7 days',
+    analyticsRange30d: '30 days',
+    analyticsRange90d: '90 days',
+    analyticsRangeYear: 'This year',
+    analyticsAllSupermarkets: 'All Supermarkets',
+    analyticsAllBranches: 'All Branches',
+    analyticsExportCsv: 'Export CSV',
+    analyticsNoDataYet: 'No data yet for this period',
+    analyticsLoading: 'Loading analytics...',
+    analyticsVsPrev: 'vs previous period',
+    analyticsKpiActiveShoppers: 'Active Shoppers',
+    analyticsKpiNewSignups: 'New Sign-Ups',
+    analyticsKpiCartsStarted: 'Carts Started',
+    analyticsKpiItemsScanned: 'Items Scanned',
+    analyticsKpiAvgCartValue: 'Avg. Cart Value',
+    analyticsKpiLoyaltyIssued: 'Loyalty Points Issued',
+    analyticsSecurityPanelTitle: 'Security: Sign-In Failures & Lockouts',
   },
   sw: {
     // App
@@ -1041,6 +1104,69 @@ export const translations = {
     statusVerified: 'Imethibitishwa',
     statusCompleted: 'Imekamilika',
     statusRejected: 'Imekataliwa',
+
+    // Welcome Screen (Swahili)
+    welcomeHeadline: 'Karibu Smart Cart',
+    welcomeSubtitle: 'Changanua bidhaa unaponunua na ujue jumla yako kabla hujafika kwa keshia.',
+    welcomeHighlightScan: 'Changanua misimbo pau',
+    welcomeHighlightTotal: 'Ona jumla yako papo hapo',
+    welcomeHighlightLoyalty: 'Pata pointi za uaminifu',
+    welcomeGetStarted: 'Anza sasa',
+    welcomeStoreOrStaffLink: 'Mimi ni mmiliki wa duka au mfanyakazi',
+    welcomeStoreOrStaffPrompt: 'Chagua mlango wako wa kuingia kazini:',
+    welcomeOwnerChoice: 'Mmiliki wa Duka Kuu',
+    welcomeOwnerDesc: 'Matawi, bidhaa na usimamizi wa msururu',
+    welcomeStaffChoice: 'Mfanyakazi / Keshia',
+    welcomeStaffDesc: 'Hakiki matoroli kwenye kaunta na stoki',
+    aboutSmartCartLink: 'Kuhusu Smart Cart',
+
+    // Goodbye Screen & Finish Shopping (Swahili)
+    finishShoppingBtn: 'Maliza ununuzi',
+    showTillQrBtn: 'Onyesha QR ya Keshia',
+    finishConfirmTitle: 'Je, umemaliza kufanya ununuzi?',
+    finishConfirmDesc: 'Kufunga toroli kunahifadhi msimbo wako wa keshia na kuzuia mabadiliko zaidi kwenye toroli.',
+    finishConfirmYes: 'Ndiyo, maliza',
+    finishConfirmKeep: 'Endelea kununua',
+    finishingCartProgress: 'Inafunga toroli lako...',
+    goodbyeHeadline: 'Kwaheri na tutaonana tena!',
+    goodbyeMessage: 'Asante kwa kufanya ununuzi na Smart Cart. Kwaheri na tutaonana tena hivi karibuni!',
+    goodbyeItemsLabel: 'Bidhaa',
+    goodbyeFinalTotalLabel: 'Jumla kuu',
+    goodbyeCartCodeLabel: 'Msimbo wa toroli',
+    goodbyeCashierInstruction: 'Onyesha msimbo huu kwa keshia ili ulipe kwenye kaunta. Smart Cart haipokei malipo.',
+    goodbyeEarnedPrefix: 'Umepata',
+    goodbyeNewBalanceLabel: 'Salio jipya',
+    goodbyePointsBalanceLabel: 'Salio la pointi',
+    goodbyePointsPendingTill: 'Pointi huongezwa punde tu keshia anapohakiki toroli lako kwenye kaunta.',
+    goodbyeOfflineNotice: 'Uko nje ya mtandao; tutamaliza hili utakaporudi mtandaoni',
+    goodbyeStartNewCart: 'Anza toroli jipya',
+    goodbyeViewRewards: 'Tazama zawadi zangu',
+    goodbyeSignOut: 'Ondoka',
+    goodbyeSignIn: 'Ingia',
+    goodbyeBackDashboard: 'Rudi kwenye dashibodi',
+
+    // Admin Analytics Dashboard (Swahili)
+    adminTabAnalytics: 'Takwimu',
+    analyticsTitle: 'Takwimu za Mfumo',
+    analyticsSubtitle: 'Muhtasari wa jumla wa shughuli za maduka makuu, matawi, uchanganuzi wa bidhaa, pointi, msaada na usalama. Jumla zinaonyesha thamani ya matoroli pekee — hakuna malipo ndani ya programu.',
+    analyticsRangeToday: 'Leo',
+    analyticsRange7d: 'Siku 7',
+    analyticsRange30d: 'Siku 30',
+    analyticsRange90d: 'Siku 90',
+    analyticsRangeYear: 'Mwaka huu',
+    analyticsAllSupermarkets: 'Maduka Yote',
+    analyticsAllBranches: 'Matawi Yote',
+    analyticsExportCsv: 'Pakua CSV',
+    analyticsNoDataYet: 'Hakuna data bado kwa kipindi hiki',
+    analyticsLoading: 'Inapakia takwimu...',
+    analyticsVsPrev: 'dhidi ya kipindi kilichopita',
+    analyticsKpiActiveShoppers: 'Wateja Hai',
+    analyticsKpiNewSignups: 'Usajili Mpya',
+    analyticsKpiCartsStarted: 'Matoroli Yaliyoanza',
+    analyticsKpiItemsScanned: 'Bidhaa Zilizochanganuliwa',
+    analyticsKpiAvgCartValue: 'Wastani wa Toroli',
+    analyticsKpiLoyaltyIssued: 'Pointi Zilizotolewa',
+    analyticsSecurityPanelTitle: 'Usalama: Majaribio Yaliyoshindwa & Kufungiwa',
   },
 };
 
@@ -1058,13 +1184,23 @@ const LanguageContext = createContext<LanguageContextType>({
 
 export const LanguageProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [language, setLanguageState] = useState<Language>(() => {
-    const saved = localStorage.getItem('smartcart_lang');
-    return (saved === 'sw' ? 'sw' : 'en') as Language;
+    try {
+      const saved = typeof window !== 'undefined' ? window.localStorage?.getItem('smartcart_lang') : null;
+      return (saved === 'sw' ? 'sw' : 'en') as Language;
+    } catch {
+      return 'en';
+    }
   });
 
   const setLanguage = (lang: Language) => {
     setLanguageState(lang);
-    localStorage.setItem('smartcart_lang', lang);
+    try {
+      if (typeof window !== 'undefined') {
+        window.localStorage?.setItem('smartcart_lang', lang);
+      }
+    } catch {
+      // Ignore storage errors if localStorage is unavailable
+    }
   };
 
   const t = translations[language];

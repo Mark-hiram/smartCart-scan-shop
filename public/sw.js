@@ -1,5 +1,5 @@
 // Smart Cart Service Worker — Offline & Flaky-Network Caching for Critical Assets, Images, and Fonts
-const CACHE_VERSION = 'v8';
+const CACHE_VERSION = 'v10';
 const STATIC_CACHE = `smartcart-static-${CACHE_VERSION}`;
 const FONTS_CACHE = `smartcart-fonts-${CACHE_VERSION}`;
 const IMAGES_CACHE = `smartcart-images-${CACHE_VERSION}`;
@@ -19,6 +19,7 @@ const MAX_CATALOG_ENTRIES = 40;
 // Critical shell assets & PWA icons pre-cached during install
 const CORE_ASSETS = [
   '/',
+  '/login',
   '/about',
   '/index.html',
   '/offline.html',

@@ -3,7 +3,19 @@
 import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
 import crypto from 'crypto';
-import { db, hashPassword, verifyPassword, createDefaultLoyaltySettings } from './src/server/db';
+import {
+  db,
+  hashPassword,
+  verifyPassword,
+  createDefaultLoyaltySettings,
+  recordScanEvent,
+  recordSecurityEvent,
+} from './src/server/db';
+import {
+  getAdminAnalytics,
+  buildAnalyticsCsv,
+  normalizeAnalyticsRange,
+} from './src/server/analytics';
 import {
   sendEmail,
   normalizeAndValidateEmail,
@@ -163,6 +175,8 @@ const forgotPasswordIpRateLimiter = createIpRateLimiter(5, 60 * 60 * 1000, 'forg
 const passwordResetRequestIpRateLimiter = createIpRateLimiter(3, 60 * 60 * 1000, 'pw_reset_req_ip');
 // Rewards redemption requests: max 12 attempts per 15 minutes per IP
 const redemptionRateLimiter = createIpRateLimiter(12, 15 * 60 * 1000, 'redemption');
+// Admin analytics endpoints: max 60 requests per 5 minutes per IP
+const adminAnalyticsRateLimiter = createIpRateLimiter(60, 5 * 60 * 1000, 'admin_analytics');
 
 const TEMP_PASSWORD_TTL_MS = 24 * 60 * 60 * 1000;
 const PW_RESET_REQ_ONE_HOUR_MS = 60 * 60 * 1000;
@@ -914,11 +928,26 @@ app.post('/api/auth/login', loginRateLimiter, async (req, res) => {
   }
 
   if (!isValid) {
+    const safePortal = (['shopper', 'staff', 'management', 'admin'].includes(selectedPortal)
+      ? selectedPortal
+      : 'shopper') as PortalType | 'admin';
+    const nowIso = new Date().toISOString();
+    recordSecurityEvent(data, {
+      createdAt: nowIso,
+      type: 'login_failure',
+      portal: safePortal,
+    });
+
     // Increment failed attempts for account lock limit (5 attempts = 15 minute lock)
     if (user) {
       user.failedAttempts = (user.failedAttempts || 0) + 1;
       if (user.failedAttempts >= 5) {
         user.lockedUntil = Date.now() + 15 * 60 * 1000;
+        recordSecurityEvent(data, {
+          createdAt: nowIso,
+          type: 'lockout',
+          portal: safePortal,
+        });
       }
       db.save();
     } else {
@@ -926,8 +955,14 @@ app.post('/api/auth/login', loginRateLimiter, async (req, res) => {
       rec.count += 1;
       if (rec.count >= 5) {
         rec.lockedUntil = Date.now() + 15 * 60 * 1000;
+        recordSecurityEvent(data, {
+          createdAt: nowIso,
+          type: 'lockout',
+          portal: safePortal,
+        });
       }
       memoryFailedAttempts.set(cleanIdentifier, rec);
+      db.save();
     }
 
     // Uniform timing (~200ms delay) to prevent user/portal enumeration
@@ -1787,17 +1822,27 @@ app.post('/api/shopper/scan-lookup', (req, res) => {
   }
 
   const cleanBarcode = barcode.trim();
+  const data = db.getRaw();
+  const branch = data.branches.find((b) => b.id === branchId);
+
   const valResult = validateBarcode(cleanBarcode);
   if (!valResult.isValid) {
+    if (branch) {
+      recordScanEvent(data, {
+        createdAt: new Date().toISOString(),
+        branchId: branch.id,
+        supermarketId: branch.supermarketId,
+        success: false,
+      });
+      db.save();
+    }
     return res.status(400).json({
       error: valResult.error || 'Invalid barcode check digit or format',
       format: valResult.format,
     });
   }
 
-  const data = db.getRaw();
   const caller = getAuthUser(req);
-  const branch = data.branches.find((b) => b.id === branchId);
   if (!branch) return res.status(404).json({ error: 'Branch not found' });
 
   const supermarket = data.supermarkets.find((s) => s.id === branch.supermarketId);
@@ -1810,6 +1855,13 @@ app.post('/api/shopper/scan-lookup', (req, res) => {
   );
 
   if (!product) {
+    recordScanEvent(data, {
+      createdAt: new Date().toISOString(),
+      branchId: branch.id,
+      supermarketId: branch.supermarketId,
+      success: false,
+    });
+    db.save();
     return res.status(404).json({
       error: `Product with barcode ${cleanBarcode} is not in ${branch.name}'s catalogue.`,
       barcode: cleanBarcode,
@@ -1831,6 +1883,14 @@ app.post('/api/shopper/scan-lookup', (req, res) => {
       p.productBarcodes.includes(product.barcode)
   );
 
+  recordScanEvent(data, {
+    createdAt: now,
+    branchId: branch.id,
+    supermarketId: branch.supermarketId,
+    success: true,
+  });
+  db.save();
+
   res.json({
     product: {
       ...product,
@@ -1848,6 +1908,49 @@ app.post('/api/shopper/scan-lookup', (req, res) => {
 // ==========================================
 // 4. LIVE CART OPERATIONS & OFFLINE SYNC
 // ==========================================
+
+const buildServerCartSummary = (
+  data: ReturnType<typeof db.getRaw>,
+  cart: Cart,
+  callerUser: User | null
+) => {
+  const sm = data.supermarkets.find((s) => s.id === cart.supermarketId);
+  const br = data.branches.find((b) => b.id === cart.branchId);
+  const itemCount = cart.items.reduce((sum, it) => sum + (it.quantity || 1), 0);
+
+  let loyaltyEarnedOnCart: number | null = null;
+  let loyaltyBalance: number | null = null;
+
+  if (
+    callerUser &&
+    callerUser.role === 'shopper' &&
+    callerUser.status === 'active' &&
+    cart.shopperId === callerUser.id
+  ) {
+    ensureLoyaltyContainers(data);
+    loyaltyEarnedOnCart =
+      typeof cart.loyaltyPointsEarned === 'number' && cart.loyaltyPointsEarned > 0
+        ? cart.loyaltyPointsEarned
+        : null;
+    loyaltyBalance = getLedgerBalance(data, callerUser.id);
+  }
+
+  return {
+    cartId: cart.id,
+    shortCode: cart.shortCode,
+    status: cart.status,
+    itemCount,
+    lineItemCount: cart.items.length,
+    subtotal: cart.subtotal,
+    totalDiscount: cart.totalDiscount,
+    finalTotal: cart.finalTotal,
+    branchId: cart.branchId,
+    branchName: br?.name || '',
+    supermarketName: sm?.name || '',
+    loyaltyEarnedOnCart,
+    loyaltyBalance,
+  };
+};
 
 app.get('/api/shopper/cart', (req, res) => {
   const user = getAuthUser(req);
@@ -1869,7 +1972,7 @@ app.get('/api/shopper/cart', (req, res) => {
   let cart = data.carts.find(
     (c) =>
       c.shopperId === callerId &&
-      (c.status === 'active' || c.status === 'locked') &&
+      c.status === 'active' &&
       (!branchId || c.branchId === branchId)
   );
 
@@ -1901,6 +2004,85 @@ app.get('/api/shopper/cart', (req, res) => {
   res.json(cart || null);
 });
 
+// Start a fresh active empty cart (used after finishing a cart on the Goodbye screen)
+app.post('/api/shopper/cart/new', (req, res) => {
+  const user = getAuthUser(req);
+  const callerId = getShopperOrGuestId(req, user);
+  const { branchId } = req.body || {};
+  if (!branchId || typeof branchId !== 'string') {
+    return res.status(400).json({ error: 'branchId is required' });
+  }
+
+  const data = db.getRaw();
+  const branch = data.branches.find((b) => b.id === branchId);
+  if (!branch) return res.status(404).json({ error: 'Branch not found' });
+
+  const existingEmpty = data.carts.find(
+    (c) =>
+      c.shopperId === callerId &&
+      c.branchId === branch.id &&
+      c.status === 'active' &&
+      c.items.length === 0
+  );
+  if (existingEmpty) {
+    return res.json(existingEmpty);
+  }
+
+  const newCart: Cart = {
+    id: `cart_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
+    shortCode: generateShortCode(branch.id),
+    shopperId: callerId,
+    shopperName: user?.name || 'Guest Shopper',
+    shopperPhone: user?.phone || '',
+    supermarketId: branch.supermarketId,
+    branchId: branch.id,
+    status: 'active',
+    items: [],
+    subtotal: 0,
+    totalDiscount: 0,
+    finalTotal: 0,
+    budgetLimit: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  data.carts.push(newCart);
+  db.save();
+
+  res.json(newCart);
+});
+
+// Server-authoritative summary for an owned cart (active, locked, verified, or completed)
+app.get('/api/shopper/cart/summary', (req, res) => {
+  const user = getAuthUser(req);
+  const callerId = getShopperOrGuestId(req, user);
+  const { cartId, branchId } = req.query;
+  const data = db.getRaw();
+
+  let cart: Cart | undefined;
+  if (cartId && typeof cartId === 'string') {
+    cart = data.carts.find((c) => c.id === cartId);
+    if (!cart) return res.status(404).json({ error: 'Cart not found' });
+    if (!canAccessCart(user, cart, callerId)) {
+      return res.status(403).json({ error: 'Forbidden: You cannot view another shopper\'s cart.' });
+    }
+  } else {
+    cart = data.carts
+      .filter(
+        (c) =>
+          c.shopperId === callerId &&
+          c.items.length > 0 &&
+          (!branchId || c.branchId === branchId)
+      )
+      .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())[0];
+    if (!cart) return res.status(404).json({ error: 'No recent shopping cart found.' });
+  }
+
+  return res.json({
+    cart,
+    summary: buildServerCartSummary(data, cart, user),
+  });
+});
+
 // Add item with permanent locked price
 app.post('/api/shopper/cart/add', (req, res) => {
   const user = getAuthUser(req);
@@ -1919,6 +2101,13 @@ app.post('/api/shopper/cart/add', (req, res) => {
     (p) => p.supermarketId === branch.supermarketId && p.barcode === cleanBarcode
   );
   if (!product) {
+    recordScanEvent(data, {
+      createdAt: new Date().toISOString(),
+      branchId: branch.id,
+      supermarketId: branch.supermarketId,
+      success: false,
+    });
+    db.save();
     return res.status(404).json({ error: `Product with barcode ${cleanBarcode} not found.` });
   }
 
@@ -1928,8 +2117,14 @@ app.post('/api/shopper/cart/add', (req, res) => {
   let cart: Cart | undefined;
   if (cartId) {
     cart = data.carts.find((c) => c.id === cartId);
-    if (cart && !canAccessCart(user, cart, callerId)) {
+    if (!cart) {
+      return res.status(404).json({ error: 'Cart not found' });
+    }
+    if (!canAccessCart(user, cart, callerId)) {
       return res.status(403).json({ error: 'Forbidden: You cannot modify another shopper\'s cart.' });
+    }
+    if (cart.status !== 'active') {
+      return res.status(400).json({ error: 'This cart is closed and cannot be modified. Start a new cart instead.' });
     }
   }
 
@@ -1938,7 +2133,7 @@ app.post('/api/shopper/cart/add', (req, res) => {
       (c) =>
         c.shopperId === callerId &&
         c.branchId === branchId &&
-        (c.status === 'active' || c.status === 'locked')
+        c.status === 'active'
     );
   }
 
@@ -1961,10 +2156,6 @@ app.post('/api/shopper/cart/add', (req, res) => {
       updatedAt: new Date().toISOString(),
     };
     data.carts.push(cart);
-  }
-
-  if (cart.status === 'locked') {
-    cart.status = 'active';
   }
 
   const existingItem = cart.items.find((i) => i.barcode === cleanBarcode);
@@ -1992,12 +2183,18 @@ app.post('/api/shopper/cart/add', (req, res) => {
   }
 
   recalculateCart(cart, branchId, data.promotions);
+  recordScanEvent(data, {
+    createdAt: new Date().toISOString(),
+    branchId: branch.id,
+    supermarketId: branch.supermarketId,
+    success: true,
+  });
   db.save();
 
   res.json(cart);
 });
 
-// Update item quantity with ownership verification
+// Update item quantity with ownership verification & closed-cart lock guard
 app.put('/api/shopper/cart/quantity', (req, res) => {
   const user = getAuthUser(req);
   const callerId = getShopperOrGuestId(req, user);
@@ -2009,6 +2206,10 @@ app.put('/api/shopper/cart/quantity', (req, res) => {
   // Ownership verification: shopper can only modify their own cart
   if (!canAccessCart(user, cart, callerId)) {
     return res.status(403).json({ error: 'Forbidden: You cannot modify another shopper\'s cart.' });
+  }
+
+  if (cart.status !== 'active') {
+    return res.status(400).json({ error: 'This cart is closed and cannot be modified.' });
   }
 
   const itemIndex = cart.items.findIndex((i) => i.id === itemId);
@@ -2026,7 +2227,7 @@ app.put('/api/shopper/cart/quantity', (req, res) => {
   res.json(cart);
 });
 
-// Set daily budget limit with ownership verification
+// Set daily budget limit with ownership verification & closed-cart guard
 app.post('/api/shopper/cart/budget', (req, res) => {
   const user = getAuthUser(req);
   const callerId = getShopperOrGuestId(req, user);
@@ -2040,16 +2241,53 @@ app.post('/api/shopper/cart/budget', (req, res) => {
     return res.status(403).json({ error: 'Forbidden: You cannot modify another shopper\'s cart.' });
   }
 
+  if (cart.status !== 'active') {
+    return res.status(400).json({ error: 'This cart is closed and cannot be modified.' });
+  }
+
   cart.budgetLimit = budgetLimit ? parseFloat(budgetLimit) : null;
   db.save();
   res.json(cart);
 });
 
+// Shared idempotent cart closing helper used by both /lock and /finish
+const closeShopperCart = (
+  data: ReturnType<typeof db.getRaw>,
+  cart: Cart,
+  callerUser: User | null
+) => {
+  const alreadyClosed = cart.status !== 'active';
+  const nowIso = new Date().toISOString();
+
+  if (cart.status === 'active') {
+    cart.status = 'locked';
+    if (!cart.shortCode) cart.shortCode = generateShortCode(cart.branchId);
+    cart.finishedAt = cart.finishedAt || nowIso;
+    cart.updatedAt = nowIso;
+    db.save();
+  } else {
+    if (!cart.shortCode) {
+      cart.shortCode = generateShortCode(cart.branchId);
+      db.save();
+    }
+    if (!cart.finishedAt) {
+      cart.finishedAt = nowIso;
+      db.save();
+    }
+  }
+
+  return {
+    alreadyClosed,
+    cart,
+    summary: buildServerCartSummary(data, cart, callerUser),
+  };
+};
+
 // Lock cart & get till shortcode with ownership verification
 app.post('/api/shopper/cart/lock', (req, res) => {
   const user = getAuthUser(req);
   const callerId = getShopperOrGuestId(req, user);
-  const { cartId } = req.body;
+  const { cartId } = req.body || {};
   const data = db.getRaw();
   const cart = data.carts.find((c) => c.id === cartId);
   if (!cart) return res.status(404).json({ error: 'Cart not found' });
@@ -2062,13 +2300,46 @@ app.post('/api/shopper/cart/lock', (req, res) => {
   if (cart.items.length === 0) {
     return res.status(400).json({ error: 'Cannot checkout an empty cart.' });
   }
+  if (cart.status === 'cancelled') {
+    return res.status(400).json({ error: 'Cancelled cart cannot be finished.' });
+  }
 
-  cart.status = 'locked';
-  if (!cart.shortCode) cart.shortCode = generateShortCode(cart.branchId);
-  cart.updatedAt = new Date().toISOString();
-  db.save();
+  const closed = closeShopperCart(data, cart, user);
+  res.json(closed.cart);
+});
 
-  res.json(cart);
+// Finish shopping cleanly & idempotently -> closes cart & returns authoritative server summary
+app.post('/api/shopper/cart/finish', (req, res) => {
+  const user = getAuthUser(req);
+  const callerId = getShopperOrGuestId(req, user);
+  const { cartId } = req.body || {};
+  if (!cartId || typeof cartId !== 'string') {
+    return res.status(400).json({ error: 'cartId is required' });
+  }
+
+  const data = db.getRaw();
+  const cart = data.carts.find((c) => c.id === cartId);
+  if (!cart) return res.status(404).json({ error: 'Cart not found' });
+
+  // Ownership verification
+  if (!canAccessCart(user, cart, callerId)) {
+    return res.status(403).json({ error: 'Forbidden: You cannot finish another shopper\'s cart.' });
+  }
+
+  if (cart.items.length === 0) {
+    return res.status(400).json({ error: 'Cannot finish an empty cart.' });
+  }
+  if (cart.status === 'cancelled') {
+    return res.status(400).json({ error: 'Cancelled cart cannot be finished.' });
+  }
+
+  const closed = closeShopperCart(data, cart, user);
+  res.json({
+    success: true,
+    alreadyClosed: closed.alreadyClosed,
+    cart: closed.cart,
+    summary: closed.summary,
+  });
 });
 
 // Offline Sync Endpoint: seamlessly merges an offline created/scanned cart with ownership check
@@ -2094,15 +2365,16 @@ app.post('/api/shopper/cart/sync', (req, res) => {
     return res.status(403).json({ error: 'Forbidden: You cannot sync into another shopper\'s cart.' });
   }
 
-  // Never allow client sync to alter or forge an already verified/completed/flagged/cancelled cart
+  // Never allow client sync to alter or forge an already closed/verified/completed/flagged/cancelled cart
   if (
     serverCart &&
-    (serverCart.status === 'verified' ||
+    (serverCart.status === 'locked' ||
+      serverCart.status === 'verified' ||
       serverCart.status === 'completed' ||
       serverCart.status === 'flagged' ||
       serverCart.status === 'cancelled')
   ) {
-    return res.status(400).json({ error: 'Cannot modify a cart that has already been verified or finalized.' });
+    return res.status(400).json({ error: 'Cannot modify a cart that has already been closed, verified, or finalized.' });
   }
 
   // Strictly limit client-supplied cart status to shopper-owned pre-till states only
@@ -2113,7 +2385,7 @@ app.post('/api/shopper/cart/sync', (req, res) => {
       (c) =>
         c.shopperId === callerId &&
         c.branchId === branchId &&
-        (c.status === 'active' || c.status === 'locked')
+        c.status === 'active'
     );
   }
 
@@ -2164,6 +2436,10 @@ app.delete('/api/shopper/cart/:id', (req, res) => {
 
   if (!canAccessCart(user, cart, callerId)) {
     return res.status(403).json({ error: 'Forbidden: You cannot modify another shopper\'s cart.' });
+  }
+
+  if (cart.status !== 'active') {
+    return res.status(400).json({ error: 'This cart is closed and cannot be cleared.' });
   }
 
   cart.items = [];
@@ -4167,6 +4443,66 @@ app.get('/api/admin/metrics', requireAuth, requireRole(['admin']), (req, res) =>
     totalCarts: data.carts.length,
     totalItemsScanned: data.carts.reduce((acc, cur) => acc + cur.items.reduce((sum, it) => sum + it.quantity, 0), 0),
   });
+});
+
+// Admin-only Aggregated Analytics Endpoint (60s server cache, strict zero-PII outputs, rate limited)
+app.get('/api/admin/analytics', adminAnalyticsRateLimiter, requireAuth, requireRole(['admin']), (req, res) => {
+  const range = normalizeAnalyticsRange(req.query.range);
+  if (!range) {
+    return res.status(400).json({ error: 'Invalid range. Allowed: today, 7d, 30d, 90d, year.' });
+  }
+  const supermarketId =
+    typeof req.query.supermarketId === 'string' && req.query.supermarketId.trim()
+      ? req.query.supermarketId.trim()
+      : null;
+  const branchId =
+    typeof req.query.branchId === 'string' && req.query.branchId.trim()
+      ? req.query.branchId.trim()
+      : null;
+
+  const data = db.getRaw();
+  if (supermarketId && !data.supermarkets.some((s) => s.id === supermarketId)) {
+    return res.status(404).json({ error: 'Supermarket not found' });
+  }
+  if (branchId && !data.branches.some((b) => b.id === branchId)) {
+    return res.status(404).json({ error: 'Branch not found' });
+  }
+
+  const payload = getAdminAnalytics(data, { range, supermarketId, branchId });
+  return res.json(payload);
+});
+
+// Admin-only Aggregated Analytics CSV Export (strictly counts/totals only, formula-safe, zero PII)
+app.get('/api/admin/analytics/csv', adminAnalyticsRateLimiter, requireAuth, requireRole(['admin']), (req, res) => {
+  const range = normalizeAnalyticsRange(req.query.range);
+  if (!range) {
+    return res.status(400).json({ error: 'Invalid range. Allowed: today, 7d, 30d, 90d, year.' });
+  }
+  const supermarketId =
+    typeof req.query.supermarketId === 'string' && req.query.supermarketId.trim()
+      ? req.query.supermarketId.trim()
+      : null;
+  const branchId =
+    typeof req.query.branchId === 'string' && req.query.branchId.trim()
+      ? req.query.branchId.trim()
+      : null;
+
+  const data = db.getRaw();
+  if (supermarketId && !data.supermarkets.some((s) => s.id === supermarketId)) {
+    return res.status(404).json({ error: 'Supermarket not found' });
+  }
+  if (branchId && !data.branches.some((b) => b.id === branchId)) {
+    return res.status(404).json({ error: 'Branch not found' });
+  }
+
+  const payload = getAdminAnalytics(data, { range, supermarketId, branchId });
+  const csv = buildAnalyticsCsv(payload);
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader(
+    'Content-Disposition',
+    `attachment; filename="smartcart_admin_analytics_${range}.csv"`
+  );
+  return res.send(csv);
 });
 
 app.put('/api/admin/supermarkets/:id/status', requireAuth, requireRole(['admin']), async (req, res) => {

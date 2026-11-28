@@ -7,7 +7,8 @@ export type OfflineQueueActionType =
   | 'update_qty'
   | 'set_budget'
   | 'clear_cart'
-  | 'lock_cart';
+  | 'lock_cart'
+  | 'finish_cart';
 
 export interface OfflineQueueOperation {
   id: string;

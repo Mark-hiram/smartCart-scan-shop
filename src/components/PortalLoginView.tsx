@@ -31,6 +31,7 @@ interface PortalLoginViewProps {
   onSwitchPortal: (portal: PortalType) => void;
   onContinueAsGuest?: () => void;
   onOpenAdminLogin?: () => void;
+  onOpenWelcome?: () => void;
 }
 
 export const PortalLoginView: React.FC<PortalLoginViewProps> = ({
@@ -38,6 +39,7 @@ export const PortalLoginView: React.FC<PortalLoginViewProps> = ({
   onSwitchPortal,
   onContinueAsGuest,
   onOpenAdminLogin,
+  onOpenWelcome,
 }) => {
   const { login, register } = useAuth();
   const { t, language } = useTranslation();
@@ -858,7 +860,16 @@ export const PortalLoginView: React.FC<PortalLoginViewProps> = ({
             </div>
           </div>
 
-          <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex justify-center text-slate-600 dark:text-slate-400">
+          <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex flex-col items-center gap-2 text-slate-600 dark:text-slate-400">
+            {onOpenWelcome && (
+              <button
+                type="button"
+                onClick={onOpenWelcome}
+                className="text-xs font-semibold text-emerald-700 dark:text-emerald-400 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 rounded px-1.5 py-0.5"
+              >
+                {t.aboutSmartCartLink}
+              </button>
+            )}
             <CopyrightBadge />
           </div>
         </div>

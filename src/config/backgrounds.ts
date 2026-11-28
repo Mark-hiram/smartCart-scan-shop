@@ -19,10 +19,13 @@ export interface PortalPhotoOption {
 }
 
 // Vite eagerly collects ONLY real user-supplied WebP photos placed in src/assets/images/photos/
-const USER_PHOTO_MODULES = import.meta.glob<string>('/src/assets/images/photos/*.webp', {
-  eager: true,
-  import: 'default',
-});
+const USER_PHOTO_MODULES: Record<string, string> =
+  typeof (import.meta as { glob?: unknown }).glob === 'function'
+    ? import.meta.glob<string>('/src/assets/images/photos/*.webp', {
+        eager: true,
+        import: 'default',
+      })
+    : {};
 
 const USER_PHOTOS_BY_FILENAME: Record<string, string> = Object.fromEntries(
   Object.entries(USER_PHOTO_MODULES).map(([fullPath, resolvedUrl]) => {

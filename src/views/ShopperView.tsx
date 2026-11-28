@@ -41,6 +41,7 @@ import {
   ShoppingListItem,
   LoyaltyPointsSummary,
   ProductHistoryEntry,
+  GoodbyeSummaryData,
 } from '../types';
 import {
   ShoppingBag,
@@ -84,14 +85,24 @@ interface ShopperViewProps {
   onOpenStoreModal: () => void;
   onRequestSignIn?: () => void;
   initialTab?: ShopperTab;
+  requestedTabNonce?: { tab: ShopperTab; nonce: number } | null;
+  newCartNonce?: number;
+  onShowGoodbye?: (summary: GoodbyeSummaryData) => void;
+  onOfflineFinishSynced?: (summary: GoodbyeSummaryData) => void;
+  onShopperActivityChange?: (info: { cart: Cart | null; lastClosedCartId: string | null }) => void;
 }
 
 export const ShopperView: React.FC<ShopperViewProps> = ({
   onOpenStoreModal,
   onRequestSignIn,
   initialTab = 'scan',
+  requestedTabNonce,
+  newCartNonce = 0,
+  onShowGoodbye,
+  onOfflineFinishSynced,
+  onShopperActivityChange,
 }) => {
-  const { branch, user, token } = useAuth();
+  const { branch, supermarket, user, token } = useAuth();
   const { t, language } = useTranslation();
 
   const [activeTab, setActiveTab] = useState<ShopperTab>(initialTab);
@@ -106,6 +117,9 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
   const [summaryCardCart, setSummaryCardCart] = useState<Cart | null>(null);
   const [isLoyaltyModalOpen, setIsLoyaltyModalOpen] = useState(false);
   const [loyaltySummary, setLoyaltySummary] = useState<LoyaltyPointsSummary | null>(null);
+  const [showFinishConfirmModal, setShowFinishConfirmModal] = useState(false);
+  const [isFinishingCart, setIsFinishingCart] = useState(false);
+  const [lastClosedCartId, setLastClosedCartId] = useState<string | null>(null);
   const [priceCheckData, setPriceCheckData] = useState<{
     product: Product;
     effectivePrice: number;
@@ -161,11 +175,16 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
   const cartRef = useRef<Cart | null>(null);
   const syncInFlightRef = useRef<Promise<void> | null>(null);
 
-  useBodyScrollLock(showCreateListModal || (showImportHistoryModal && Boolean(selectedList)));
+  useBodyScrollLock(
+    showCreateListModal ||
+      (showImportHistoryModal && Boolean(selectedList)) ||
+      showFinishConfirmModal
+  );
 
   useEffect(() => {
     cartRef.current = cart;
-  }, [cart]);
+    onShopperActivityChange?.({ cart, lastClosedCartId });
+  }, [cart, lastClosedCartId]);
 
   const showScanError = (msg: string) => {
     setScanErrorNotice(msg);
@@ -536,13 +555,35 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
                 body: JSON.stringify({ cartId: serverCart.id }),
               });
             }
+          } else if (op.action === 'finish_cart') {
+            const serverCart = await ensureServerCart();
+            if (serverCart) {
+              res = await fetch('/api/shopper/cart/finish', {
+                method: 'POST',
+                headers: getGuestHeaders(),
+                body: JSON.stringify({ cartId: serverCart.id }),
+              });
+            }
           }
 
           if (res) {
             if (res.ok) {
-              const updatedCart: Cart = await res.json();
+              const payload = await res.json();
+              const updatedCart: Cart = payload?.cart ? payload.cart : payload;
               workingCart = updatedCart;
-              setCart(updatedCart);
+              if (op.action === 'finish_cart') {
+                setLastClosedCartId(updatedCart.id);
+                if (payload?.summary && onOfflineFinishSynced) {
+                  onOfflineFinishSynced({
+                    ...payload.summary,
+                    pendingOfflineFinish: false,
+                    source: 'finish_button',
+                  });
+                }
+                setCart(null);
+              } else {
+                setCart(updatedCart);
+              }
               await saveOfflineCartSnapshot(activeBranchId, callerIdSnapshot, updatedCart);
               await removeOfflineQueueItem(op.id);
             } else if (res.status >= 400 && res.status < 500) {
@@ -616,6 +657,67 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
   useEffect(() => {
     setActiveTab(initialTab);
   }, [initialTab]);
+
+  useEffect(() => {
+    if (requestedTabNonce?.tab) {
+      setActiveTab(requestedTabNonce.tab);
+    }
+  }, [requestedTabNonce?.nonce]);
+
+  const startFreshActiveCart = useCallback(async () => {
+    if (!branch) return;
+    setLastClosedCartId(null);
+    if (!navigator.onLine || isOffline) {
+      const freshLocal: Cart = {
+        id: `offline-cart-${Date.now()}`,
+        shortCode: `OFF-${Math.floor(1000 + Math.random() * 9000)}`,
+        shopperId: currentCallerId,
+        shopperName: user?.name || 'Shopper',
+        shopperPhone: user?.phone || '',
+        supermarketId: branch.supermarketId,
+        branchId: branch.id,
+        status: 'active',
+        items: [],
+        subtotal: 0,
+        totalDiscount: 0,
+        finalTotal: 0,
+        budgetLimit: null,
+        isOfflineCreated: true,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      setCart(freshLocal);
+      await saveOfflineCartSnapshot(branch.id, currentCallerId, freshLocal);
+      setActiveTab('scan');
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/shopper/cart/new', {
+        method: 'POST',
+        headers: getGuestHeaders(),
+        body: JSON.stringify({ branchId: branch.id }),
+      });
+      if (res.ok) {
+        const freshCart: Cart = await res.json();
+        setCart(freshCart);
+        await saveOfflineCartSnapshot(branch.id, currentCallerId, freshCart);
+        setActiveTab('scan');
+      } else {
+        await loadCart();
+        setActiveTab('scan');
+      }
+    } catch {
+      await loadCart();
+      setActiveTab('scan');
+    }
+  }, [branch?.id, currentCallerId, user?.name, user?.phone, isOffline, token]);
+
+  useEffect(() => {
+    if (newCartNonce > 0) {
+      void startFreshActiveCart();
+    }
+  }, [newCartNonce]);
 
   useEffect(() => {
     if (user && token) {
@@ -1073,46 +1175,107 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
     }
   };
 
-  // Finish shopping & generate till checkout code
-  const handleFinishShopping = async () => {
+  // Show till QR code modal (keeps current code accessible without leaving cart)
+  const handleShowTillQr = async () => {
     if (!cart || cart.items.length === 0) return;
-    const branchKey = branch?.id || cart.branchId;
+    setIsCartCodeModalOpen(true);
+  };
 
-    const lockLocally = async () => {
-      const lockedCart = { ...cart, status: 'locked' as const };
-      setCart(lockedCart);
-      await saveOfflineCartSnapshot(branchKey, currentCallerId, lockedCart);
-      await enqueueOfflineOperation({
+  // Finish shopping -> close cart on server (or queue offline) and open Goodbye screen
+  const handleConfirmFinishShopping = async () => {
+    if (!cart || cart.items.length === 0 || isFinishingCart) return;
+    const branchKey = branch?.id || cart.branchId;
+    setIsFinishingCart(true);
+
+    const buildOfflineSummary = (): GoodbyeSummaryData => {
+      const itemCount = cart.items.reduce((sum, it) => sum + (it.quantity || 1), 0);
+      const earned =
+        typeof cart.loyaltyPointsEarned === 'number' && cart.loyaltyPointsEarned > 0
+          ? cart.loyaltyPointsEarned
+          : null;
+      const balance =
+        user?.role === 'shopper' && loyaltySummary
+          ? loyaltySummary.totalPoints
+          : null;
+      return {
+        cartId: cart.id,
+        shortCode: cart.shortCode,
+        status: 'locked',
+        itemCount,
+        lineItemCount: cart.items.length,
+        subtotal: cart.subtotal,
+        totalDiscount: cart.totalDiscount,
+        finalTotal: cart.finalTotal,
         branchId: branchKey,
-        callerId: currentCallerId,
-        action: 'lock_cart',
-      });
+        branchName: branch?.name || '',
+        supermarketName: supermarket?.name || '',
+        loyaltyEarnedOnCart: earned,
+        loyaltyBalance: balance,
+        pendingOfflineFinish: true,
+        source: 'finish_button',
+      };
+    };
+
+    const finishOffline = async () => {
+      const closedSnapshot = { ...cart, status: 'locked' as const, finishedAt: new Date().toISOString() };
+      await saveOfflineCartSnapshot(branchKey, currentCallerId, closedSnapshot);
+      const existingQueue = await getOfflineQueue(branchKey, currentCallerId);
+      const alreadyQueuedFinish = existingQueue.some((op) => op.action === 'finish_cart');
+      if (!alreadyQueuedFinish) {
+        await enqueueOfflineOperation({
+          branchId: branchKey,
+          callerId: currentCallerId,
+          action: 'finish_cart',
+        });
+      }
       setQueuedOps(await getOfflineQueue(branchKey, currentCallerId));
       setSyncStatus('queued');
-      setIsCartCodeModalOpen(true);
+      setLastClosedCartId(cart.id);
+      setCart(null);
+      setShowFinishConfirmModal(false);
+      setIsFinishingCart(false);
+      onShowGoodbye?.(buildOfflineSummary());
     };
 
     if (isOffline || !navigator.onLine || queuedOps.length > 0) {
-      await lockLocally();
+      await finishOffline();
       return;
     }
 
     try {
-      const res = await fetch('/api/shopper/cart/lock', {
+      const res = await fetch('/api/shopper/cart/finish', {
         method: 'POST',
         headers: getGuestHeaders(),
         body: JSON.stringify({ cartId: cart.id }),
       });
-      if (res.ok) {
-        const lockedCart = await res.json();
-        setCart(lockedCart);
-        await saveOfflineCartSnapshot(branchKey, currentCallerId, lockedCart);
-        setIsCartCodeModalOpen(true);
+      const data = await res.json();
+      if (res.ok && data?.summary) {
+        const closedCart: Cart = data.cart;
+        setLastClosedCartId(closedCart.id);
+        setCart(null);
+        await saveOfflineCartSnapshot(branchKey, currentCallerId, closedCart);
+        void loadLoyaltyPoints();
+        void loadHistory();
+        setShowFinishConfirmModal(false);
+        setIsFinishingCart(false);
+        onShowGoodbye?.({
+          ...data.summary,
+          pendingOfflineFinish: false,
+          source: 'finish_button',
+        });
+      } else {
+        setShowFinishConfirmModal(false);
+        setIsFinishingCart(false);
+        showScanError(data?.error || 'Could not finish cart right now.');
       }
     } catch (err) {
       if (isNetworkOfflineError(err)) {
         setIsOffline(true);
-        await lockLocally();
+        await finishOffline();
+      } else {
+        setShowFinishConfirmModal(false);
+        setIsFinishingCart(false);
+        showScanError('Could not finish cart. Please try again.');
       }
     }
   };
@@ -1930,13 +2093,25 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
                   {t.checkoutNotice}
                 </div>
 
-                <button
-                  onClick={handleFinishShopping}
-                  className="w-full h-12 rounded-2xl bg-emerald-500 hover:bg-emerald-600 active:scale-98 text-slate-950 font-bold text-xs flex items-center justify-center gap-2 transition shadow-lg shadow-emerald-500/20"
-                >
-                  <QrCode className="w-4 h-4" />
-                  <span>{t.generateCashierCode}</span>
-                </button>
+                <div className="space-y-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowFinishConfirmModal(true)}
+                    className="w-full h-12 rounded-2xl bg-emerald-500 hover:bg-emerald-600 active:scale-98 text-slate-950 font-extrabold text-xs sm:text-sm flex items-center justify-center gap-2 transition shadow-lg shadow-emerald-500/20"
+                  >
+                    <CheckCircle className="w-4 h-4" />
+                    <span>{t.finishShoppingBtn}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleShowTillQr}
+                    className="w-full h-10 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-100 font-semibold text-xs flex items-center justify-center gap-2 border border-slate-700 transition"
+                  >
+                    <QrCode className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>{t.showTillQrBtn}</span>
+                  </button>
+                </div>
               </div>
             </div>
           ) : (
@@ -3320,6 +3495,70 @@ export const ShopperView: React.FC<ShopperViewProps> = ({
         activeSupermarketId={branch?.supermarketId}
         onOpenRewards={() => setActiveTab('rewards')}
       />
+
+      {/* Finish Shopping Confirmation Modal */}
+      {showFinishConfirmModal && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="finish-confirm-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in"
+        >
+          <div className="w-full max-w-sm rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl p-6 space-y-4">
+            <div className="flex items-start justify-between gap-2">
+              <div className="space-y-1">
+                <h3
+                  id="finish-confirm-title"
+                  className="text-base font-extrabold text-slate-900 dark:text-white"
+                >
+                  {t.finishConfirmTitle}
+                </h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                  {t.finishConfirmDesc}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowFinishConfirmModal(false)}
+                aria-label={t.finishConfirmKeep}
+                className="p-1.5 rounded-full text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {cart && (
+              <div className="rounded-2xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700 p-3 flex items-center justify-between text-xs">
+                <span className="text-slate-600 dark:text-slate-300 font-medium">
+                  {totalItemCount} {t.itemsCount} · <span className="font-mono">{cart.shortCode}</span>
+                </span>
+                <span className="font-bold font-mono text-emerald-700 dark:text-emerald-400 tabular-nums">
+                  KES {cart.finalTotal.toLocaleString()}
+                </span>
+              </div>
+            )}
+
+            <div className="flex flex-col sm:flex-row gap-2 pt-1">
+              <button
+                type="button"
+                disabled={isFinishingCart}
+                onClick={() => setShowFinishConfirmModal(false)}
+                className="flex-1 min-h-[42px] px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 text-xs font-semibold transition"
+              >
+                {t.finishConfirmKeep}
+              </button>
+              <button
+                type="button"
+                disabled={isFinishingCart}
+                onClick={handleConfirmFinishShopping}
+                className="flex-1 min-h-[42px] px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white text-xs font-extrabold transition shadow-sm"
+              >
+                {isFinishingCart ? t.finishingCartProgress : t.finishConfirmYes}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

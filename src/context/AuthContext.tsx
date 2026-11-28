@@ -33,18 +33,26 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [user, setUser] = useState<User | null>(null);
   const [supermarket, setSupermarket] = useState<Supermarket | null>(null);
   const [branch, setBranch] = useState<Branch | null>(null);
-  const [token, setToken] = useState<string | null>(() => localStorage.getItem('smartcart_token'));
+  const [token, setToken] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem('smartcart_token');
+    } catch {
+      return null;
+    }
+  });
   const [isLoading, setIsLoading] = useState(true);
   const [adminSetupKeyRequired, setAdminSetupKeyRequired] = useState(true);
   const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null);
 
   // Restore saved store from localStorage for shoppers
   useEffect(() => {
-    const savedBranch = localStorage.getItem('smartcart_active_branch');
-    if (savedBranch) {
-      try {
+    try {
+      const savedBranch = localStorage.getItem('smartcart_active_branch');
+      if (savedBranch) {
         setBranch(JSON.parse(savedBranch));
-      } catch (e) {}
+      }
+    } catch {
+      // ignore storage errors
     }
   }, []);
 
@@ -62,10 +70,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const handleSetBranch = (b: Branch | null) => {
     setBranch(b);
-    if (b) {
-      localStorage.setItem('smartcart_active_branch', JSON.stringify(b));
-    } else {
-      localStorage.removeItem('smartcart_active_branch');
+    try {
+      if (b) {
+        localStorage.setItem('smartcart_active_branch', JSON.stringify(b));
+      } else {
+        localStorage.removeItem('smartcart_active_branch');
+      }
+    } catch {
+      // ignore storage errors
     }
   };
 
@@ -105,7 +117,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         // Token invalid
         setToken(null);
         setUser(null);
-        localStorage.removeItem('smartcart_token');
+        try {
+          localStorage.removeItem('smartcart_token');
+        } catch {
+          // ignore storage errors
+        }
       }
     } catch (e) {
       console.error('Error fetching user:', e);
@@ -135,7 +151,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         };
       }
       setToken(data.token);
-      localStorage.setItem('smartcart_token', data.token);
+      try {
+        localStorage.setItem('smartcart_token', data.token);
+      } catch {
+        // ignore storage errors
+      }
       setUser(data.user);
       if (data.supermarket) setSupermarket(data.supermarket);
       if (data.branch) handleSetBranch(data.branch);
@@ -157,7 +177,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return { success: false, error: data.error };
       }
       setToken(data.token);
-      localStorage.setItem('smartcart_token', data.token);
+      try {
+        localStorage.setItem('smartcart_token', data.token);
+      } catch {
+        // ignore storage errors
+      }
       setUser(data.user);
       return { success: true };
     } catch (e: any) {
@@ -248,7 +272,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setToken(null);
     setUser(null);
     setSupermarket(null);
-    localStorage.removeItem('smartcart_token');
+    try {
+      localStorage.removeItem('smartcart_token');
+    } catch {
+      // ignore storage errors
+    }
   };
 
   return (

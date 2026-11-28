@@ -48,14 +48,15 @@ import {
   X,
 } from 'lucide-react';
 import { useBodyScrollLock } from '../hooks/useBodyScrollLock';
+import { AdminAnalyticsSection } from '../components/AdminAnalyticsSection';
 
 export const AdminView: React.FC = () => {
   const { token, user, reloadUser } = useAuth();
   const { t, language } = useTranslation();
 
   const [activeTab, setActiveTab] = useState<
-    'metrics' | 'reports' | 'supermarkets' | 'users' | 'rewards' | 'loyalty_settings' | 'announcements' | 'support' | 'audit'
-  >('metrics');
+    'analytics' | 'metrics' | 'reports' | 'supermarkets' | 'users' | 'rewards' | 'loyalty_settings' | 'announcements' | 'support' | 'audit'
+  >('analytics');
 
   const [metrics, setMetrics] = useState<any>(null);
   const [reportsData, setReportsData] = useState<any>(null);
@@ -735,36 +736,44 @@ export const AdminView: React.FC = () => {
       </div>
 
       {/* Admin Navigation Tabs */}
-      <div className="flex items-center gap-1.5 p-1.5 bg-slate-100 dark:bg-slate-800 rounded-2xl overflow-x-auto">
+      <div
+        role="tablist"
+        aria-label="Admin sections"
+        className="flex items-center gap-1.5 p-1.5 bg-slate-100 dark:bg-slate-800 rounded-2xl overflow-x-auto"
+      >
         {[
-          { id: 'metrics', label: t.platformReports, icon: <BarChart2 className="w-4 h-4" /> },
-          { id: 'reports', label: 'Platform Analytics', icon: <TrendingUp className="w-4 h-4" /> },
-          { id: 'supermarkets', label: t.allSupermarkets, icon: <Building2 className="w-4 h-4" /> },
-          { id: 'users', label: t.allUsers, icon: <Users className="w-4 h-4" /> },
-          { id: 'rewards', label: t.adminTabRewards, icon: <Gift className="w-4 h-4" /> },
-          { id: 'loyalty_settings', label: t.adminTabLoyaltySettings, icon: <Sliders className="w-4 h-4" /> },
-          { id: 'announcements', label: t.announcements, icon: <Bell className="w-4 h-4" /> },
-          { id: 'support', label: t.supportInbox, icon: <MessageSquare className="w-4 h-4" /> },
-          { id: 'audit', label: t.auditLog, icon: <History className="w-4 h-4" /> },
+          { id: 'analytics', label: t.adminTabAnalytics, icon: <TrendingUp className="w-4 h-4 shrink-0" /> },
+          { id: 'metrics', label: t.platformReports, icon: <BarChart2 className="w-4 h-4 shrink-0" /> },
+          { id: 'reports', label: 'Traffic Reports', icon: <Calendar className="w-4 h-4 shrink-0" /> },
+          { id: 'supermarkets', label: t.allSupermarkets, icon: <Building2 className="w-4 h-4 shrink-0" /> },
+          { id: 'users', label: t.allUsers, icon: <Users className="w-4 h-4 shrink-0" /> },
+          { id: 'rewards', label: t.adminTabRewards, icon: <Gift className="w-4 h-4 shrink-0" /> },
+          { id: 'loyalty_settings', label: t.adminTabLoyaltySettings, icon: <Sliders className="w-4 h-4 shrink-0" /> },
+          { id: 'announcements', label: t.announcements, icon: <Bell className="w-4 h-4 shrink-0" /> },
+          { id: 'support', label: t.supportInbox, icon: <MessageSquare className="w-4 h-4 shrink-0" /> },
+          { id: 'audit', label: t.auditLog, icon: <History className="w-4 h-4 shrink-0" /> },
         ].map((tab) => (
           <button
             key={tab.id}
+            type="button"
+            role="tab"
+            aria-selected={activeTab === tab.id}
             onClick={() => setActiveTab(tab.id as any)}
-            className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold whitespace-nowrap transition active:scale-95 ${
+            className={`min-h-10 flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap shrink-0 transition active:scale-95 ${
               activeTab === tab.id
-                ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-sm'
-                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
+                ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
+                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
             }`}
           >
             {tab.icon}
             <span>{tab.label}</span>
             {tab.id === 'supermarkets' && pendingSupermarketCount > 0 && (
-              <span className="px-1.5 py-0.5 rounded-full bg-amber-500 text-white text-[10px] font-black leading-none">
+              <span className="px-1.5 py-0.5 rounded-full bg-amber-500 text-white text-[10px] font-black leading-none tabular-nums">
                 {pendingSupermarketCount}
               </span>
             )}
             {tab.id === 'rewards' && requestedOrdersCount > 0 && (
-              <span className="px-1.5 py-0.5 rounded-full bg-emerald-600 text-white text-[10px] font-black leading-none">
+              <span className="px-1.5 py-0.5 rounded-full bg-emerald-600 text-white text-[10px] font-black leading-none tabular-nums">
                 {requestedOrdersCount}
               </span>
             )}
@@ -772,37 +781,40 @@ export const AdminView: React.FC = () => {
         ))}
       </div>
 
-      {/* 1. METRICS TAB */}
+      {/* 1. ANALYTICS DASHBOARD TAB */}
+      {activeTab === 'analytics' && <AdminAnalyticsSection token={token} />}
+
+      {/* 1B. PLATFORM OVERVIEW METRICS TAB */}
       {activeTab === 'metrics' && metrics && (
         <div className="space-y-6">
-          <div className="grid grid-cols-2 lg:grid-cols-5 gap-3.5">
-            <div className="p-4 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs">
-              <span className="text-xs text-slate-500">{t.totalChains}</span>
-              <p className="text-2xl font-black text-slate-900 dark:text-white mt-1 tabular-nums">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3.5">
+            <div className="p-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 min-w-0">
+              <span className="text-xs font-medium text-slate-600 dark:text-slate-400">{t.totalChains}</span>
+              <p className="text-2xl font-bold text-slate-900 dark:text-white mt-1 tabular-nums">
                 {metrics.totalChains}
               </p>
             </div>
-            <div className="p-4 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs">
-              <span className="text-xs text-slate-500">{t.totalBranches}</span>
-              <p className="text-2xl font-black text-slate-900 dark:text-white mt-1 tabular-nums">
+            <div className="p-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 min-w-0">
+              <span className="text-xs font-medium text-slate-600 dark:text-slate-400">{t.totalBranches}</span>
+              <p className="text-2xl font-bold text-slate-900 dark:text-white mt-1 tabular-nums">
                 {metrics.totalBranches}
               </p>
             </div>
-            <div className="p-4 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs">
-              <span className="text-xs text-slate-500">{t.totalShoppers}</span>
-              <p className="text-2xl font-black text-slate-900 dark:text-white mt-1 tabular-nums">
+            <div className="p-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 min-w-0">
+              <span className="text-xs font-medium text-slate-600 dark:text-slate-400">{t.totalShoppers}</span>
+              <p className="text-2xl font-bold text-slate-900 dark:text-white mt-1 tabular-nums">
                 {metrics.totalShoppers}
               </p>
             </div>
-            <div className="p-4 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs">
-              <span className="text-xs text-slate-500">{t.totalCarts}</span>
-              <p className="text-2xl font-black text-slate-900 dark:text-white mt-1 tabular-nums">
+            <div className="p-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 min-w-0">
+              <span className="text-xs font-medium text-slate-600 dark:text-slate-400">{t.totalCarts}</span>
+              <p className="text-2xl font-bold text-slate-900 dark:text-white mt-1 tabular-nums">
                 {metrics.totalCarts}
               </p>
             </div>
-            <div className="p-4 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs col-span-2 lg:col-span-1">
-              <span className="text-xs text-slate-500">{t.totalScans}</span>
-              <p className="text-2xl font-black text-emerald-600 mt-1 tabular-nums">
+            <div className="p-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 min-w-0 sm:col-span-2 lg:col-span-1">
+              <span className="text-xs font-medium text-slate-600 dark:text-slate-400">{t.totalScans}</span>
+              <p className="text-2xl font-bold text-emerald-600 dark:text-emerald-400 mt-1 tabular-nums">
                 {metrics.totalItemsScanned}
               </p>
             </div>

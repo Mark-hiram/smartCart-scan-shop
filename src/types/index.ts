@@ -354,9 +354,29 @@ export interface Cart {
   syncedAt?: string;
   verifiedByStaffId?: string;
   verifiedAt?: string;
+  finishedAt?: string;
   mismatchNotes?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface GoodbyeSummaryData {
+  cartId: string;
+  shortCode: string;
+  status: CartStatus;
+  itemCount: number;
+  lineItemCount: number;
+  subtotal: number;
+  totalDiscount: number;
+  finalTotal: number;
+  branchId?: string;
+  branchName?: string;
+  supermarketName?: string;
+  loyaltyEarnedOnCart: number | null;
+  loyaltyBalance: number | null;
+  pendingOfflineFinish?: boolean;
+  signedOutAfterShopping?: boolean;
+  source?: 'finish_button' | 'sign_out';
 }
 
 export interface TransactionReceipt extends Cart {
@@ -509,3 +529,180 @@ export interface ProductHistoryEntry {
   currentBranchPrice: number;
 }
 
+export type AnalyticsRange = 'today' | '7d' | '30d' | '90d' | 'year';
+
+export interface ScanTelemetryEvent {
+  createdAt: string;
+  branchId: string;
+  supermarketId: string;
+  success: boolean;
+}
+
+export interface SecurityTelemetryEvent {
+  createdAt: string;
+  type: 'login_failure' | 'lockout';
+  portal: PortalType | 'admin';
+}
+
+export interface AnalyticsKpiMetric {
+  value: number;
+  previous: number;
+  changePct: number | null;
+  sparkline: number[];
+}
+
+export interface AdminAnalyticsPayload {
+  meta: {
+    range: AnalyticsRange;
+    supermarketId: string | null;
+    branchId: string | null;
+    startIso: string;
+    endIso: string;
+  };
+  filterOptions: {
+    supermarkets: Array<{
+      id: string;
+      name: string;
+      status: Supermarket['status'];
+    }>;
+    branches: Array<{
+      id: string;
+      supermarketId: string;
+      name: string;
+      isActive: boolean;
+    }>;
+  };
+  kpis: {
+    activeShoppers: AnalyticsKpiMetric;
+    newSignups: AnalyticsKpiMetric;
+    cartsStarted: AnalyticsKpiMetric;
+    cartsFinished: AnalyticsKpiMetric;
+    itemsScanned: AnalyticsKpiMetric;
+    averageCartValueKes: AnalyticsKpiMetric;
+    loyaltyPointsIssued: AnalyticsKpiMetric;
+    loyaltyPointsRedeemed: AnalyticsKpiMetric;
+    scanSuccessRatePct: AnalyticsKpiMetric & {
+      successes: number;
+      failures: number;
+    };
+    securityEventsCount: AnalyticsKpiMetric & {
+      failures: number;
+      lockouts: number;
+    };
+  };
+  organizationCounts: {
+    supermarkets: {
+      total: number;
+      active: number;
+      pending: number;
+      suspended: number;
+      rejected: number;
+    };
+    branches: {
+      total: number;
+      active: number;
+      inactive: number;
+    };
+  };
+  supermarketStatusSeries: Array<{
+    status: 'active' | 'pending' | 'suspended';
+    label: string;
+    count: number;
+  }>;
+  cartCompletionSeries: Array<{
+    key: 'finished' | 'in_progress';
+    label: string;
+    count: number;
+  }>;
+  activityOverTime: Array<{
+    bucketKey: string;
+    label: string;
+    signups: number;
+    cartsStarted: number;
+    cartsFinished: number;
+    itemsScanned: number;
+    avgCartValueKes: number;
+  }>;
+  topSupermarketsByCarts: Array<{
+    supermarketName: string;
+    cartsStarted: number;
+    cartsFinished: number;
+    itemsScanned: number;
+    avgCartValueKes: number;
+    totalCartValueKes: number;
+  }>;
+  busiestHours: Array<{
+    hour: number;
+    label: string;
+    cartsCount: number;
+  }>;
+  busiestDays: Array<{
+    dayIndex: number;
+    dayName: string;
+    shortDay: string;
+    cartsCount: number;
+  }>;
+  activityHeatmap: Array<{
+    dayIndex: number;
+    dayName: string;
+    shortDay: string;
+    hours: Array<{
+      hour: number;
+      count: number;
+    }>;
+  }>;
+  mostScannedProducts: Array<{
+    productName: string;
+    unitsScanned: number;
+    cartAppearances: number;
+  }>;
+  scanOutcomes: {
+    successes: number;
+    failures: number;
+    overTime: Array<{
+      bucketKey: string;
+      label: string;
+      successes: number;
+      failures: number;
+    }>;
+  };
+  loyaltyOverTime: Array<{
+    bucketKey: string;
+    label: string;
+    issued: number;
+    redeemed: number;
+  }>;
+  rewardsRedeemedByItem: Array<{
+    rewardName: string;
+    redemptionsCount: number;
+    pointsRedeemed: number;
+  }>;
+  supportSummary: {
+    passwordResetRequests: {
+      total: number;
+      open: number;
+      closed: number;
+    };
+    supportTickets: {
+      total: number;
+      open: number;
+      closed: number;
+    };
+  };
+  securitySummary: {
+    totalFailures: number;
+    totalLockouts: number;
+    currentlyLockedAccounts: number;
+    byPortal: Array<{
+      portal: string;
+      failures: number;
+      lockouts: number;
+    }>;
+    perDay: Array<{
+      date: string;
+      label: string;
+      failures: number;
+      lockouts: number;
+    }>;
+  };
+}

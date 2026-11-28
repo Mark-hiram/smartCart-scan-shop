@@ -72,8 +72,26 @@
   animation: scanline 2.2s ease-in-out infinite;
 }
 
+@keyframes welcomeFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.welcome-fade-in {
+  animation: welcomeFadeIn 0.36s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .animate-scanline {
-    animation: none;
+  .animate-scanline,
+  .welcome-fade-in {
+    animation: none !important;
+    transition: none !important;
+    transform: none !important;
   }
 }

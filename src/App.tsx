@@ -16,10 +16,18 @@ import { AdminLoginView } from './components/AdminLoginView';
 import { PortalLoginView } from './components/PortalLoginView';
 import { ForcePasswordChangeModal } from './components/ForcePasswordChangeModal';
 import { SmartCartChat } from './components/SmartCartChat';
-import { PortalType } from './types';
+import { WelcomeScreen } from './components/WelcomeScreen';
+import { GoodbyeScreen } from './components/GoodbyeScreen';
+import { ShopperTab } from './components/BottomNav';
+import {
+  readWelcomeDismissed,
+  persistWelcomeDismissed,
+  shouldShowWelcomeScreen,
+} from './utils/welcomeState';
+import { Cart, GoodbyeSummaryData, PortalType } from './types';
 
 function AppContent() {
-  const { user, isLoading } = useAuth();
+  const { user, token, logout, isLoading } = useAuth();
   const { t } = useTranslation();
   const [currentPath, setCurrentPath] = useState<string>(() => window.location.pathname);
   const [activePortal, setActivePortal] = useState<PortalType>(() => {
@@ -46,6 +54,19 @@ function AppContent() {
   const [isPowerSave, setIsPowerSave] = useState<boolean>(false);
   const [waitingWorker, setWaitingWorker] = useState<ServiceWorker | null>(null);
   const refreshingRef = useRef(false);
+
+  // Welcome & Goodbye screen state
+  const [welcomeDismissed, setWelcomeDismissed] = useState<boolean>(() => readWelcomeDismissed());
+  const [forceWelcomeOpen, setForceWelcomeOpen] = useState<boolean>(false);
+  const [guestSessionActive, setGuestSessionActive] = useState<boolean>(false);
+  const [goodbyeData, setGoodbyeData] = useState<GoodbyeSummaryData | null>(null);
+  const [isStartingNewCart, setIsStartingNewCart] = useState<boolean>(false);
+  const [shopperTabRequest, setShopperTabRequest] = useState<{ tab: ShopperTab; nonce: number } | null>(null);
+  const [newCartNonce, setNewCartNonce] = useState<number>(0);
+  const shopperActivityRef = useRef<{ cart: Cart | null; lastClosedCartId: string | null }>({
+    cart: null,
+    lastClosedCartId: null,
+  });
 
   const navigateTo = (path: string) => {
     if (window.location.pathname !== path) {
@@ -175,6 +196,8 @@ function AppContent() {
   // Automatically align portal & URL when user logs in or logs out
   useEffect(() => {
     if (user) {
+      setForceWelcomeOpen(false);
+      setGoodbyeData(null);
       if (user.role === 'staff') {
         setActivePortal('staff');
       } else if (user.role === 'owner') {
@@ -191,6 +214,164 @@ function AppContent() {
       navigateTo('/admin/login');
     }
   }, [user]);
+
+  const handleDismissWelcomeToLogin = (portal: PortalType, path: string) => {
+    persistWelcomeDismissed();
+    setWelcomeDismissed(true);
+    setForceWelcomeOpen(false);
+    setGuestSessionActive(false);
+    setActivePortal(portal);
+    navigateTo(path);
+  };
+
+  const handleHeaderLogout = async () => {
+    if (user?.role === 'shopper') {
+      const { cart, lastClosedCartId } = shopperActivityRef.current;
+      const hasActiveItems = Boolean(cart && cart.items.length > 0);
+      const targetCartId = hasActiveItems ? cart?.id : lastClosedCartId || cart?.id;
+
+      if (hasActiveItems || lastClosedCartId) {
+        let guestId = '';
+        try {
+          guestId = localStorage.getItem('smartcart_guest_id') || '';
+        } catch {
+          // ignore storage errors
+        }
+
+        const authHeaders: Record<string, string> = {};
+        if (token) authHeaders['Authorization'] = `Bearer ${token}`;
+        if (guestId) authHeaders['x-guest-id'] = guestId;
+
+        if (hasActiveItems && cart?.status === 'active' && isOnline) {
+          try {
+            const finishRes = await fetch('/api/shopper/cart/finish', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                ...authHeaders,
+              },
+              body: JSON.stringify({ cartId: cart.id }),
+            });
+            if (finishRes.ok) {
+              const finishPayload = await finishRes.json();
+              if (finishPayload?.summary) {
+                logout();
+                setGoodbyeData({
+                  ...finishPayload.summary,
+                  signedOutAfterShopping: true,
+                  source: 'sign_out',
+                });
+                return;
+              }
+            }
+          } catch {
+            // Fall through to summary lookup / offline fallback
+          }
+        }
+
+        if (isOnline) {
+          try {
+            const query = targetCartId ? `?cartId=${encodeURIComponent(targetCartId)}` : '';
+            const res = await fetch(`/api/shopper/cart/summary${query}`, { headers: authHeaders });
+            if (res.ok) {
+              const payload = await res.json();
+              const summary: GoodbyeSummaryData = payload?.summary || payload;
+              if (summary && typeof summary.finalTotal === 'number') {
+                logout();
+                setGoodbyeData({
+                  ...summary,
+                  signedOutAfterShopping: true,
+                  source: 'sign_out',
+                });
+                return;
+              }
+            }
+          } catch {
+            // Fall through to offline / local fallback
+          }
+        }
+
+        if (cart) {
+          const subtotal =
+            typeof cart.subtotal === 'number'
+              ? cart.subtotal
+              : cart.items.reduce((sum, item) => sum + item.lockedPrice * item.quantity, 0);
+          const itemCount = cart.items.reduce((sum, item) => sum + item.quantity, 0);
+          logout();
+          setGoodbyeData({
+            cartId: cart.id,
+            shortCode: cart.shortCode,
+            status: cart.status,
+            itemCount,
+            lineItemCount: cart.items.length,
+            subtotal,
+            totalDiscount: cart.totalDiscount || 0,
+            finalTotal:
+              typeof cart.finalTotal === 'number'
+                ? cart.finalTotal
+                : Math.max(0, subtotal - (cart.totalDiscount || 0)),
+            branchId: cart.branchId,
+            loyaltyEarnedOnCart:
+              typeof cart.loyaltyPointsEarned === 'number' && cart.loyaltyPointsEarned > 0
+                ? cart.loyaltyPointsEarned
+                : null,
+            loyaltyBalance: null,
+            pendingOfflineFinish: !isOnline,
+            signedOutAfterShopping: true,
+            source: 'sign_out',
+          });
+          return;
+        }
+      }
+    }
+
+    logout();
+  };
+
+  const handleGoodbyeStartNewCart = async () => {
+    setIsStartingNewCart(true);
+    try {
+      setGoodbyeData(null);
+      if (!user) {
+        setGuestSessionActive(true);
+      }
+      setActivePortal('shopper');
+      setShopperTabRequest({ tab: 'scan', nonce: Date.now() });
+      setNewCartNonce((prev) => prev + 1);
+      navigateTo('/');
+    } finally {
+      setIsStartingNewCart(false);
+    }
+  };
+
+  const handleGoodbyeViewRewards = () => {
+    setGoodbyeData(null);
+    if (!user) {
+      setGuestSessionActive(true);
+    }
+    setActivePortal('shopper');
+    setShopperTabRequest({ tab: 'rewards', nonce: Date.now() });
+    navigateTo('/');
+  };
+
+  const handleGoodbyeSignOutOrIn = () => {
+    if (user) {
+      logout();
+    }
+    setGoodbyeData(null);
+    setGuestSessionActive(false);
+    setActivePortal('shopper');
+    navigateTo('/login');
+  };
+
+  const handleGoodbyeBackToDashboard = () => {
+    setGoodbyeData(null);
+    if (!user) {
+      setGuestSessionActive(true);
+    }
+    setActivePortal('shopper');
+    navigateTo('/');
+  };
 
   const isAdminRoute = currentPath.startsWith('/admin');
   const isAboutRoute = currentPath === '/about';
@@ -245,7 +426,32 @@ function AppContent() {
     );
   }
 
+  const showWelcome = shouldShowWelcomeScreen({
+    isLoading,
+    user,
+    currentPath,
+    welcomeDismissed,
+    forceWelcomeOpen,
+    guestSessionActive,
+    hasActiveGoodbye: Boolean(goodbyeData),
+  });
+
+  const showReturningShopperLogin =
+    !user &&
+    welcomeDismissed &&
+    !guestSessionActive &&
+    !showWelcome &&
+    !goodbyeData &&
+    !isAdminRoute &&
+    !isAboutRoute &&
+    !isReceiptsRoute &&
+    !isShopperLoginRoute &&
+    activePortal === 'shopper';
+
   const showingShopperShell =
+    !goodbyeData &&
+    !showWelcome &&
+    !showReturningShopperLogin &&
     !isAdminRoute &&
     !isAboutRoute &&
     !(isShopperLoginRoute && user?.role !== 'shopper') &&
@@ -258,6 +464,8 @@ function AppContent() {
       <Header
         activePortal={isAdminRoute ? 'management' : isAboutRoute ? 'shopper' : activePortal}
         onNavigateHome={() => {
+          setGoodbyeData(null);
+          setForceWelcomeOpen(false);
           if (isAdminRoute || (activePortal === 'management' && user?.role === 'admin')) {
             navigateTo(user?.role === 'admin' && !user.mustChangePassword ? '/admin/dashboard' : '/admin/login');
           } else if (activePortal === 'staff') {
@@ -270,6 +478,8 @@ function AppContent() {
           }
         }}
         onSwitchPortal={(portal) => {
+          setGoodbyeData(null);
+          setForceWelcomeOpen(false);
           if (portal === 'shopper') navigateTo('/');
           else if (portal === 'staff') navigateTo('/staff/login');
           else if (portal === 'management') navigateTo('/store/login');
@@ -278,18 +488,37 @@ function AppContent() {
         onOpenStoreModal={() => setIsStoreModalOpen(true)}
         onOpenAuthModal={() => {
           if (activePortal === 'shopper' || isAboutRoute) {
+            setForceWelcomeOpen(false);
+            setGoodbyeData(null);
             navigateTo('/login');
           } else {
             setIsAuthModalOpen(true);
           }
         }}
+        onLogoutRequest={handleHeaderLogout}
         isDarkMode={isDarkMode}
         onToggleDarkMode={() => setIsDarkMode((prev) => !prev)}
       />
 
       {/* Main Content Area */}
-      <main className="flex-1">
-        {isAboutRoute ? (
+      <main className="flex-1 flex flex-col">
+        {goodbyeData ? (
+          <GoodbyeScreen
+            summary={goodbyeData}
+            isSignedIn={Boolean(user)}
+            onStartNewCart={handleGoodbyeStartNewCart}
+            onViewRewards={handleGoodbyeViewRewards}
+            onSignOutOrSignIn={handleGoodbyeSignOutOrIn}
+            onBackToDashboard={handleGoodbyeBackToDashboard}
+            isStartingNewCart={isStartingNewCart}
+          />
+        ) : showWelcome ? (
+          <WelcomeScreen
+            onGetStarted={() => handleDismissWelcomeToLogin('shopper', '/login')}
+            onSelectOwnerPortal={() => handleDismissWelcomeToLogin('management', '/store/login')}
+            onSelectStaffPortal={() => handleDismissWelcomeToLogin('staff', '/staff/login')}
+          />
+        ) : isAboutRoute ? (
           <AboutView
             onBackHome={() => {
               navigateTo('/');
@@ -315,7 +544,7 @@ function AppContent() {
                   navigateTo('/admin/dashboard');
                 }}
               />
-            ) : isShopperLoginRoute && user?.role !== 'shopper' ? (
+            ) : (isShopperLoginRoute || showReturningShopperLogin) && user?.role !== 'shopper' ? (
               <PortalLoginView
                 portal="shopper"
                 onSwitchPortal={(portal) => {
@@ -325,16 +554,29 @@ function AppContent() {
                   setActivePortal(portal);
                 }}
                 onContinueAsGuest={() => {
+                  persistWelcomeDismissed();
+                  setWelcomeDismissed(true);
+                  setGuestSessionActive(true);
                   navigateTo('/');
                   setActivePortal('shopper');
                 }}
                 onOpenAdminLogin={() => navigateTo('/admin/login')}
+                onOpenWelcome={() => setForceWelcomeOpen(true)}
               />
             ) : activePortal === 'shopper' ? (
               <ShopperView
                 initialTab={isReceiptsRoute ? 'history' : 'scan'}
+                requestedTabNonce={shopperTabRequest}
+                newCartNonce={newCartNonce}
                 onOpenStoreModal={() => setIsStoreModalOpen(true)}
                 onRequestSignIn={() => navigateTo('/login')}
+                onShowGoodbye={(summary) => setGoodbyeData(summary)}
+                onOfflineFinishSynced={(summary) =>
+                  setGoodbyeData((prev) => (prev ? { ...summary, signedOutAfterShopping: prev.signedOutAfterShopping, source: prev.source } : prev))
+                }
+                onShopperActivityChange={(info) => {
+                  shopperActivityRef.current = info;
+                }}
               />
             ) : activePortal === 'staff' ? (
               user?.role === 'staff' ? (
@@ -348,10 +590,12 @@ function AppContent() {
                     setActivePortal(portal);
                   }}
                   onContinueAsGuest={() => {
+                    setGuestSessionActive(true);
                     navigateTo('/');
                     setActivePortal('shopper');
                   }}
                   onOpenAdminLogin={() => navigateTo('/admin/login')}
+                  onOpenWelcome={() => setForceWelcomeOpen(true)}
                 />
               )
             ) : activePortal === 'management' ? (
@@ -368,10 +612,12 @@ function AppContent() {
                     setActivePortal(portal);
                   }}
                   onContinueAsGuest={() => {
+                    setGuestSessionActive(true);
                     navigateTo('/');
                     setActivePortal('shopper');
                   }}
                   onOpenAdminLogin={() => navigateTo('/admin/login')}
+                  onOpenWelcome={() => setForceWelcomeOpen(true)}
                 />
               )
             ) : null}

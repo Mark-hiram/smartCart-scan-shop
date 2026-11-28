@@ -21,6 +21,8 @@ import {
   RewardItem,
   RewardRedemptionOrder,
   AiUsageRecord,
+  ScanTelemetryEvent,
+  SecurityTelemetryEvent,
 } from '../types';
 
 const DB_FILE = process.env.DB_PATH ? path.resolve(process.env.DB_PATH) : path.resolve(process.cwd(), 'smartcart_db.json');
@@ -59,6 +61,8 @@ export interface DatabaseSchema {
   rewards: RewardItem[];
   rewardRedemptions: RewardRedemptionOrder[];
   favourites: Record<string, string[]>; // userId -> array of barcodes
+  scanEvents: ScanTelemetryEvent[];
+  securityEvents: SecurityTelemetryEvent[];
 }
 
 export function createDefaultLoyaltySettings(): LoyaltySettings {
@@ -171,6 +175,8 @@ export function createInitialDatabase(): DatabaseSchema {
     rewards: createSeedRewards(),
     rewardRedemptions: [],
     favourites: {},
+    scanEvents: [],
+    securityEvents: [],
   };
 }
 
@@ -253,6 +259,14 @@ export class Database {
         }
         if (!Array.isArray(parsed.aiUsageLogs)) {
           parsed.aiUsageLogs = [];
+          needsSave = true;
+        }
+        if (!Array.isArray(parsed.scanEvents)) {
+          parsed.scanEvents = [];
+          needsSave = true;
+        }
+        if (!Array.isArray(parsed.securityEvents)) {
+          parsed.securityEvents = [];
           needsSave = true;
         }
         if (!parsed.passwords) parsed.passwords = {};
@@ -361,6 +375,30 @@ export class Database {
 
   public hasAdmin(): boolean {
     return this.data.users.some((u) => u.role === 'admin');
+  }
+}
+
+const MAX_TELEMETRY_EVENTS = 20000;
+
+export function recordScanEvent(
+  data: DatabaseSchema,
+  event: ScanTelemetryEvent
+): void {
+  if (!Array.isArray(data.scanEvents)) data.scanEvents = [];
+  data.scanEvents.push(event);
+  if (data.scanEvents.length > MAX_TELEMETRY_EVENTS) {
+    data.scanEvents = data.scanEvents.slice(-MAX_TELEMETRY_EVENTS);
+  }
+}
+
+export function recordSecurityEvent(
+  data: DatabaseSchema,
+  event: SecurityTelemetryEvent
+): void {
+  if (!Array.isArray(data.securityEvents)) data.securityEvents = [];
+  data.securityEvents.push(event);
+  if (data.securityEvents.length > MAX_TELEMETRY_EVENTS) {
+    data.securityEvents = data.securityEvents.slice(-MAX_TELEMETRY_EVENTS);
   }
 }
 

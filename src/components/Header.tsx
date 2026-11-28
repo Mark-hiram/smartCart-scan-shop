@@ -15,6 +15,7 @@ interface HeaderProps {
   onOpenStoreModal?: () => void;
   onOpenAuthModal?: () => void;
   onOpenSupportModal?: () => void;
+  onLogoutRequest?: () => void;
   isDarkMode?: boolean;
   onToggleDarkMode?: () => void;
 }
@@ -26,6 +27,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenStoreModal,
   onOpenAuthModal,
   onOpenSupportModal,
+  onLogoutRequest,
   isDarkMode = false,
   onToggleDarkMode,
 }) => {
@@ -179,7 +181,7 @@ export const Header: React.FC<HeaderProps> = ({
           {user ? (
             <div className="flex items-center gap-1 sm:gap-2">
               <button
-                onClick={logout}
+                onClick={() => (onLogoutRequest ? onLogoutRequest() : logout())}
                 className="flex items-center gap-1 px-2 sm:px-2.5 py-1.5 rounded-lg text-slate-600 hover:text-rose-600 dark:text-slate-300 dark:hover:text-rose-400 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-medium transition active:scale-95"
                 title={t.logout}
               >
